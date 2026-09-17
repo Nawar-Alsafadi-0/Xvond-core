@@ -61,7 +61,7 @@ def workflow_engine_status(current_admin: User = Depends(require_xvond_operator)
 
 @router.post("/companies")
 def create_company(data: CompanyCreate, current_admin: User = Depends(require_xvond_admin)):
-    """Create an onboarding tenant shell with portal access and AI runtime off."""
+    """Create an Xvond-managed onboarding tenant with portal access and runtime off."""
     name = data.name.strip()
     owner_email = data.owner_email.strip().lower()
     owner_full_name = data.owner_full_name.strip()
@@ -81,7 +81,12 @@ def create_company(data: CompanyCreate, current_admin: User = Depends(require_xv
         existing_user = db.query(User).filter(User.email == owner_email).first()
         if existing_user is not None:
             raise HTTPException(status_code=400, detail="Owner email already exists")
-        company = Company(name=name, active=False, lifecycle_status="onboarding")
+        company = Company(
+            name=name,
+            active=False,
+            lifecycle_status="onboarding",
+            onboarding_source="managed",
+        )
         db.add(company)
         db.flush()
         owner = User(
@@ -110,6 +115,7 @@ def create_company(data: CompanyCreate, current_admin: User = Depends(require_xv
                 "initial_state": "onboarding",
                 "runtime_active": False,
                 "billing_source": "service_subscriptions",
+                "onboarding_source": "managed",
             },
         )
         db.commit()
@@ -121,6 +127,7 @@ def create_company(data: CompanyCreate, current_admin: User = Depends(require_xv
                 "name": company.name,
                 "active": company.active,
                 "lifecycle_status": company.lifecycle_status,
+                "onboarding_source": company.onboarding_source,
             },
             "owner": {
                 "id": owner.id,
@@ -191,6 +198,7 @@ def update_company_lifecycle(
                 "name": company.name,
                 "active": company.active,
                 "lifecycle_status": company.lifecycle_status,
+                "onboarding_source": company.onboarding_source,
                 "lifecycle_updated_at": company.lifecycle_updated_at,
             },
         }
@@ -259,6 +267,7 @@ def update_company_status(
                 "name": company.name,
                 "active": company.active,
                 "lifecycle_status": company.lifecycle_status,
+                "onboarding_source": company.onboarding_source,
             },
         }
     except HTTPException:
@@ -283,6 +292,7 @@ def list_companies(current_admin: User = Depends(require_xvond_operator)):
                     "name": company.name,
                     "active": company.active,
                     "lifecycle_status": company.lifecycle_status,
+                    "onboarding_source": company.onboarding_source,
                     "lifecycle_updated_at": company.lifecycle_updated_at,
                     "created_at": company.created_at,
                 }
