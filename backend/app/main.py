@@ -41,6 +41,7 @@ from backend.app.api.admin_analytics_builder import router as admin_analytics_bu
 from backend.app.api.admin_service_billing import router as admin_service_billing_router
 from backend.app.api.internal_workflow_actions import router as internal_workflow_actions_router
 from backend.app.api.public_channels import router as public_channels_router
+from backend.app.api.public_employee_builder import router as public_employee_builder_router
 from backend.app.api.voice_llm import router as voice_llm_router
 from backend.app.api.website_widget import router as website_widget_router
 from backend.app.api.ai_agents import router as ai_agents_router
@@ -71,7 +72,7 @@ from backend.app.core.rate_limit import rate_limiter
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
-CUSTOMER_PORTAL_VERSION = "20260914-audit1"
+CUSTOMER_PORTAL_VERSION = "20260917-selfservice1"
 
 
 @asynccontextmanager
@@ -135,7 +136,7 @@ async def request_observability(request: Request, call_next):
         reset_request_id(token)
     duration_ms = round((perf_counter() - started) * 1000, 2)
     response.headers["X-Request-ID"] = request_id
-    if request.url.path.startswith(("/customer/", "/admin/", "/auth/", "/ai-agents/")) or request.url.path.endswith(".html") or request.url.path in {"/admin-ui", "/customer-ui", "/login", "/dashboard"}:
+    if request.url.path.startswith(("/customer/", "/admin/", "/auth/", "/ai-agents/")) or request.url.path.endswith(".html") or request.url.path in {"/admin-ui", "/customer-ui", "/login", "/dashboard", "/build"}:
         response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -155,8 +156,10 @@ async def request_observability(request: Request, call_next):
 
 _RATE_LIMITS = {
     ("POST", "/auth/login"): (10, 60),
+    ("POST", "/auth/signup"): (5, 300),
     ("POST", "/auth/customer/forgot-password"): (5, 300),
     ("POST", "/auth/customer/reset-password"): (10, 300),
+    ("POST", "/public/employee-builder/preview"): (60, 60),
     ("POST", "/webhooks/whatsapp"): (240, 60),
 }
 
@@ -223,6 +226,7 @@ for r in [
     internal_workflow_actions_router,
     ai_agents_router,
     public_channels_router,
+    public_employee_builder_router,
     voice_llm_router,
     website_widget_router,
     modules_router,
@@ -294,6 +298,13 @@ def admin_ui():
 def customer_ui():
     return RedirectResponse(
         url=f"/static/customer/index.html?v={CUSTOMER_PORTAL_VERSION}"
+    )
+
+
+@app.get("/build")
+def public_employee_builder():
+    return RedirectResponse(
+        url=f"/static/public/employee-builder.html?v={CUSTOMER_PORTAL_VERSION}"
     )
 
 
