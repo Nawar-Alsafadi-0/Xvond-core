@@ -16,6 +16,7 @@ def test_ai_agents_portal_is_capability_aware():
     assert _ids(basic) == [
         "dashboard",
         "business-profile",
+        "employee-builder",
         "agents",
         "chat",
         "usage",
@@ -27,6 +28,8 @@ def test_ai_agents_portal_is_capability_aware():
         "billing",
     ]
     assert next(item for item in basic if item["id"] == "business-profile")["group"] == "Company"
+    assert next(item for item in basic if item["id"] == "employee-builder")["group"] == "AI Workforce"
+    assert next(item for item in basic if item["id"] == "employee-builder")["loader"] == "employee-builder"
     assert next(item for item in basic if item["id"] == "agents")["group"] == "AI Workforce"
     assert next(item for item in basic if item["id"] == "conversations")["group"] == "Customer Operations"
     assert next(item for item in basic if item["id"] == "conversations")["label"] == "Inbox"
@@ -42,6 +45,7 @@ def test_ai_agents_portal_is_capability_aware():
     assert _ids(quotation) == [
         "dashboard",
         "business-profile",
+        "employee-builder",
         "agents",
         "chat",
         "usage",
@@ -65,6 +69,7 @@ def test_multiple_capabilities_create_separate_operation_pages():
         ["quotation", "booking", "orders", "lead_management", "customer_support"],
     )
     ids = _ids(navigation)
+    assert "employee-builder" in ids
     assert "requests-quotation" in ids
     assert "requests-booking" in ids
     assert "requests-orders" in ids
@@ -90,6 +95,7 @@ def test_portal_separates_active_services_and_keeps_account_core():
         "account",
         "billing",
     ]
+    assert "employee-builder" not in ids
     assert "agents" not in ids
     assert "customers" not in ids
     assert "business-profile" not in ids
@@ -114,6 +120,9 @@ def test_customer_ui_renders_backend_navigation_and_unified_inbox():
     information_architecture = (
         ROOT / "frontend" / "customer" / "portal-information-architecture.js"
     ).read_text(encoding="utf-8")
+    employee_builder = (
+        ROOT / "frontend" / "customer" / "employee-builder.js"
+    ).read_text(encoding="utf-8")
     api_source = (
         ROOT / "backend" / "app" / "api" / "customer_portal.py"
     ).read_text(encoding="utf-8")
@@ -132,12 +141,16 @@ def test_customer_ui_renders_backend_navigation_and_unified_inbox():
     assert "/static/customer/portal-enhancements.js" in html
     assert "/static/customer/customer-operations.js" in html
     assert "/static/customer/portal-information-architecture.js" in html
+    assert "/static/customer/employee-builder.js" in html
     assert "portalOverview?.portal?.navigation" in js
     assert "renderPortalNavigation" in js
     assert "renderBilling" in js
     assert "renderBusinessProfilePage" in information_architecture
     assert "Business Information" in information_architecture
     assert "openBusinessProfileFromEmployee" in information_architecture
+    assert "loadEmployeeBuilder" in employee_builder
+    assert "/customer/employee-builder/preview" in employee_builder
+    assert "/customer/employee-builder/create" in employee_builder
     assert "/customer/inbox" in enhancements
     assert "conversation-channel" in enhancements
     assert "capability_module" in enhancements
