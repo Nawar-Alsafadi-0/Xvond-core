@@ -139,4 +139,4 @@ def test_manager_knowledge_ui_loads_after_base_manager_controls_before_session_s
 
 def test_customer_portal_entrypoint_version_is_bumped_for_new_manager_ui():
     source = MAIN_APP.read_text(encoding="utf-8")
-    assert 'CUSTOMER_PORTAL_VERSION = "20260914-audit1"' in source
+    assert 'CUSTOMER_PORTAL_VERSION = "20260917-selfservice1"' in source
