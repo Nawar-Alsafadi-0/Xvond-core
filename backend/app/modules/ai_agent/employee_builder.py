@@ -98,6 +98,10 @@ CAPABILITY_KEYWORDS = {
 }
 
 CHANNEL_KEYWORDS = {
+    "xvond": (
+        "xvond workspace", "inside xvond", "in xvond", "داخل xvond",
+        "داخل اكسفوند", "داخل إكسفوند", "اكسفوند", "إكسفوند",
+    ),
     "website": ("website", "web site", "site chat", "موقع", "الموقع", "ويب سايت"),
     "whatsapp": ("whatsapp", "واتساب", "واتس", "واتس اب", "واتساب بزنس"),
     "instagram": ("instagram", "insta", "dm", "dms", "انستغرام", "انستا", "إنستغرام"),
@@ -202,10 +206,8 @@ def build_employee_blueprint(description: str) -> EmployeeBlueprint:
     channels = _unique([
         channel
         for channel in SUPPORTED_CHANNELS
-        if channel != "xvond" and _contains_any(text, CHANNEL_KEYWORDS.get(channel, ()))
+        if _contains_any(text, CHANNEL_KEYWORDS.get(channel, ()))
     ])
-    if not channels:
-        channels = ("xvond",)
 
     audience = _audience(text)
     permissions = {
@@ -238,12 +240,11 @@ def sanitize_capabilities(values: list[str] | None, fallback: tuple[str, ...]) -
 def sanitize_channels(values: list[str] | None, fallback: tuple[str, ...]) -> tuple[str, ...]:
     if values is None:
         return fallback
-    cleaned = _unique([
+    return _unique([
         str(item).strip().lower()
         for item in values
         if str(item).strip().lower() in SUPPORTED_CHANNELS
     ])
-    return cleaned or fallback
 
 
 def runtime_tools_for(capabilities: tuple[str, ...]) -> tuple[str, ...]:

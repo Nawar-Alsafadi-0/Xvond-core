@@ -34,7 +34,7 @@ router = APIRouter(
     tags=["Customer Employee Builder"],
 )
 
-SELF_SERVICE_FREE_TEST_MESSAGES = 5
+SELF_SERVICE_FREE_TEST_MESSAGES = 0
 
 
 class EmployeeBuilderPreviewRequest(BaseModel):
@@ -351,7 +351,7 @@ def test_draft_employee(
                 raise HTTPException(
                     403,
                     detail={
-                        "message": "Free AI employee test limit reached",
+                        "message": "Subscribe to launch and test your AI employee",
                         "subscription_required": True,
                     },
                 )

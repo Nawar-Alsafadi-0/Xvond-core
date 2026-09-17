@@ -1,6 +1,7 @@
 from inspect import signature
 from pathlib import Path
 
+from backend.app.api.customer_employee_builder import SELF_SERVICE_FREE_TEST_MESSAGES
 from backend.app.api.public_employee_builder import (
     PublicEmployeePreviewRequest,
     preview_employee,
@@ -24,6 +25,10 @@ def test_public_preview_is_rule_based_and_free():
     assert "whatsapp" in result["blueprint"]["channels"]
 
 
+def test_self_service_build_has_zero_free_ai_messages_before_subscription():
+    assert SELF_SERVICE_FREE_TEST_MESSAGES == 0
+
+
 def test_company_source_defaults_to_managed_for_existing_manual_flow():
     column = Company.__table__.c.onboarding_source
     assert column.default.arg == "managed"
@@ -44,7 +49,31 @@ def test_public_builder_gates_creation_not_preview():
     assert "/auth/login" in html
     assert "/auth/signup" in html
     assert "sessionStorage" in html
+    assert "Xvond Workspace" in html
+    assert "مرحلة البناء مجانية" in html
     assert "ai_usage" not in html  # UI never calls an AI endpoint for preview.
+
+
+def test_customer_portal_manages_existing_employee_instead_of_building_one():
+    source = (
+        ROOT / "frontend" / "customer" / "employee-builder.js"
+    ).read_text(encoding="utf-8")
+    assert 'href="/build"' in source
+    assert "Build on Xvond.com" in source
+    assert "Xvond Workspace" in source
+    assert "/customer/employee-builder/create" not in source
+    assert "/customer/employee-builder/preview" not in source
+    assert "/customer/employee-builder/${employee.agent_id}/test" not in source
+
+
+def test_xvond_com_nginx_exposes_public_builder_without_replacing_landing():
+    nginx = (ROOT / "ops" / "nginx" / "core-locations.conf").read_text(
+        encoding="utf-8"
+    )
+    assert "Keep the existing landing" in nginx
+    assert "|build" in nginx
+    assert "public/" in nginx
+    assert "|public|" in nginx
 
 
 def test_signup_and_admin_source_separation_are_explicit():

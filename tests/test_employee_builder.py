@@ -4,6 +4,7 @@ from backend.app.modules.ai_agent.employee_builder import (
     missing_information_for,
     runtime_channels_for,
     runtime_tools_for,
+    sanitize_channels,
 )
 
 
@@ -33,7 +34,7 @@ def test_arabic_business_description_builds_expected_blueprint():
     assert "business_actions" in blueprint.missing_information
 
 
-def test_personal_employee_defaults_to_xvond_channel():
+def test_personal_employee_does_not_assume_a_channel():
     blueprint = build_employee_blueprint(
         "بدي مساعد شخصي إلي يبحث بالانترنت ويرتب مهامي كل يوم"
     )
@@ -42,9 +43,19 @@ def test_personal_employee_defaults_to_xvond_channel():
     assert blueprint.audience == "personal"
     assert "web_research" in blueprint.capabilities
     assert "scheduling" in blueprint.capabilities
-    assert blueprint.channels == ("xvond",)
+    assert blueprint.channels == ()
     assert runtime_channels_for(blueprint.channels) == ()
     assert blueprint.permissions["scheduling"] == "ask_before_action"
+
+
+def test_xvond_workspace_is_selected_only_when_requested():
+    blueprint = build_employee_blueprint(
+        "بدي مساعد شخصي إلي يضل داخل اكسفوند وينظم شغلي"
+    )
+
+    assert blueprint.audience == "personal"
+    assert blueprint.channels == ("xvond",)
+    assert blueprint_readiness(blueprint)["channels"]["xvond"] == "ready"
 
 
 def test_unknown_description_becomes_custom_task_not_support_role():
@@ -54,9 +65,13 @@ def test_unknown_description_becomes_custom_task_not_support_role():
 
     assert blueprint.name == "My AI Employee"
     assert blueprint.capabilities == ("custom_task",)
-    assert blueprint.channels == ("xvond",)
+    assert blueprint.channels == ()
     assert blueprint.permissions == {"custom_task": "automatic"}
     assert blueprint_readiness(blueprint)["capabilities"]["custom_task"] == "conversational_ready"
+
+
+def test_explicit_empty_channel_selection_is_preserved():
+    assert sanitize_channels([], ("whatsapp",)) == ()
 
 
 def test_requested_channels_are_not_created_as_runtime_placeholders():
