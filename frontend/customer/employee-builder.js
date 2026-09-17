@@ -59,6 +59,60 @@
         return `<div class="employee-builder-missing">${items.map(item => badge(String(item).replaceAll("_", " "), "setup")).join("")}</div>`;
     }
 
+    function requirementMarkup(items) {
+        if (!(items || []).length) return '<p class="muted">No extra systems were identified.</p>';
+        return `<div class="employee-builder-missing">${items.map(item => {
+            const tone = item.status === "available" ? "ready" : "setup";
+            const label = `${String(item.key || "requirement").replaceAll("_", " ")} · ${String(item.status || "custom_required").replaceAll("_", " ")}`;
+            return badge(label, tone);
+        }).join("")}</div>`;
+    }
+
+    function compiledMarkup(spec) {
+        if (!spec) return "";
+        const tasks = (spec.tasks || []).map(item => `
+            <div class="note">
+                <strong>${escapeHtml(item.name || "Task")}</strong>
+                <div>${escapeHtml(item.description || "")}</div>
+                <div class="muted">Trigger: ${escapeHtml(item.trigger || "as requested")}</div>
+            </div>
+        `).join("") || '<p class="muted">No explicit task list was returned.</p>';
+        const permissions = (spec.permissions || []).map(item => badge(`${item.action}: ${String(item.mode || "ask_before").replaceAll("_", " ")}`, item.mode === "automatic" ? "ready" : "setup")).join("") || '<span class="muted">No additional permission rules.</span>';
+        const questions = (spec.setup_questions || []).map(item => `<li>${escapeHtml(item)}</li>`).join("");
+
+        return `
+            <div class="panel">
+                <div class="employee-builder-kicker">EMPLOYEE SPECIFICATION</div>
+                <h2>${escapeHtml(spec.role || "AI Employee")}</h2>
+                <p>${escapeHtml(spec.summary || "")}</p>
+                <p class="muted">Scope: ${escapeHtml(spec.scope || "hybrid")}</p>
+
+                <div class="employee-builder-section">
+                    <h3>What this employee will do</h3>
+                    ${tasks}
+                </div>
+
+                <div class="employee-builder-section">
+                    <h3>Systems, tools and connections</h3>
+                    ${requirementMarkup(spec.requirements)}
+                    <p class="muted">Anything marked setup, connection or custom required is not active yet and must be configured before the employee can use it.</p>
+                </div>
+
+                <div class="employee-builder-section">
+                    <h3>Permissions</h3>
+                    <div class="employee-builder-missing">${permissions}</div>
+                </div>
+
+                ${questions ? `
+                    <div class="employee-builder-section">
+                        <h3>Needed to finish setup</h3>
+                        <ul>${questions}</ul>
+                    </div>
+                ` : ""}
+            </div>
+        `;
+    }
+
     function renderCurrent(employee) {
         const target = root();
         if (!target) return;
@@ -88,16 +142,34 @@
                             <div class="employee-builder-missing">${channels}</div>
                         </div>
                         <div>
-                            <h3>Build model</h3>
-                            <div class="employee-builder-missing">${badge("Open-ended job brief", "ready")}</div>
+                            <h3>Preparation</h3>
+                            <div class="employee-builder-missing">${badge(employee.compiled ? "Prepared" : "Job brief saved", employee.compiled ? "ready" : "setup")}</div>
                         </div>
                     </div>
+
+                    ${employee.compiled ? "" : employee.can_compile ? `
+                        <div class="employee-builder-section">
+                            <h3>Prepare this employee</h3>
+                            <p class="muted">Xvond will now use AI to understand the full job, identify tasks, systems, integrations, automations and permissions, and build the employee specification.</p>
+                            <div class="employee-builder-actions">
+                                <button type="button" id="prepare-employee-btn">Prepare employee</button>
+                            </div>
+                            <div id="prepare-employee-error" class="error"></div>
+                        </div>
+                    ` : `
+                        <div class="employee-builder-section">
+                            <h3>Next step</h3>
+                            <p class="muted">Subscribe to prepare, test and launch this employee. Saving the Job Brief itself used no paid AI.</p>
+                        </div>
+                    `}
 
                     <div class="employee-builder-section">
                         <h3>Setup requirements</h3>
                         ${missingMarkup(employee.missing_information)}
                     </div>
                 </div>
+
+                ${compiledMarkup(employee.compiled_spec)}
 
                 ${employee.enabled ? `
                     <div class="panel">
@@ -108,12 +180,35 @@
                 ` : `
                     <div class="panel">
                         <div class="employee-builder-kicker">DRAFT</div>
-                        <h2>Your job brief is saved</h2>
-                        <p class="muted">No paid AI is used while saving the brief. Subscribe before AI-backed testing or live execution.</p>
+                        <h2>${employee.compiled ? "Your employee is prepared" : "Your job brief is saved"}</h2>
+                        <p class="muted">${employee.compiled ? "Finish the required connections and setup before enabling real external actions." : "No paid AI is used while saving the brief. Subscribe before AI-backed preparation, testing or live execution."}</p>
                     </div>
                 `}
             </div>
         `;
+
+        const prepareButton = document.getElementById("prepare-employee-btn");
+        if (prepareButton) {
+            prepareButton.addEventListener("click", () => prepareEmployee(employee.agent_id));
+        }
+    }
+
+    async function prepareEmployee(agentId) {
+        const button = document.getElementById("prepare-employee-btn");
+        const error = document.getElementById("prepare-employee-error");
+        if (button) button.disabled = true;
+        if (error) error.textContent = "";
+        try {
+            await api(`/customer/employee-builder/${agentId}/compile`, {
+                method: "POST",
+                body: "{}"
+            });
+            await loadEmployeeBuilder();
+        } catch (err) {
+            if (error) error.textContent = err?.message || "Could not prepare employee.";
+        } finally {
+            if (button) button.disabled = false;
+        }
     }
 
     async function loadEmployeeBuilder() {
