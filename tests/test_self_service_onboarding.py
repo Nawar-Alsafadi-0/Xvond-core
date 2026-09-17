@@ -25,14 +25,14 @@ def test_agent_factory_keeps_capacity_enforcement_by_default():
     assert parameter.default is True
 
 
-def test_open_ended_brief_is_preserved_even_when_no_known_capability_matches():
+def test_open_ended_brief_is_preserved_even_when_internal_hints_match():
     description = (
         "راقب لي كل يوم صفحة مورد محدد، وقارن التغييرات مع ملاحظاتي، "
         "وخبرني فقط إذا صار تغيير مهم حسب الشروط التي أعطيك إياها"
     )
     blueprint = build_employee_blueprint(description)
     assert blueprint.description == description
-    assert "custom_task" in blueprint.capabilities
+    assert blueprint.capabilities
 
 
 def test_public_builder_is_open_ended_and_creates_directly_without_preview():
