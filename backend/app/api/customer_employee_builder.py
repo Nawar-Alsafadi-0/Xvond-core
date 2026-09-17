@@ -24,6 +24,7 @@ from backend.app.modules.ai_agent.employee_builder import (
 )
 from backend.app.modules.ai_agent.employee_compiler import (
     COMPILER_SYSTEM_PROMPT,
+    build_compiled_employee_system_prompt,
     build_compiler_user_message,
     parse_compiler_response,
 )
@@ -242,8 +243,15 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
     builder["compiled_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     builder["compiler_provider"] = selected.provider
     builder["compiler_model"] = selected.model
+    builder["missing_information"] = list(compiled_spec.get("setup_required") or [])
     settings["employee_builder"] = builder
     config.settings = settings
+
+    company = db.query(Company).filter(Company.id == company_id).first()
+    agent.system_prompt = build_compiled_employee_system_prompt(
+        owner_name=company.name if company else "the owner",
+        spec=compiled_spec,
+    )
 
     _record_ai_usage(
         db,
