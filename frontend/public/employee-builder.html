@@ -14,39 +14,32 @@
     <section class="hero">
       <div class="muted" dir="ltr">BUILD YOUR AI EMPLOYEE</div>
       <h1>شو بدك موظفك يعمل؟</h1>
-      <p>اوصف شغله بطريقتك. Xvond يفهم المطلوب ويجهّز لك موظف AI واحد بقدرات وقنوات متعددة.</p>
+      <p>اوصف شغله، اختار قدراته والقنوات اللي بدك يشتغل عليها، واحفظه كـ Draft مجانًا.</p>
     </section>
 
-    <section id="describe-card" class="card">
-      <textarea id="description" placeholder="مثال: بدي موظف يرد على العملاء، يعرف خدماتي وأسعاري، يتابع المهتمين ويحجز مواعيد على واتساب."></textarea>
-      <div class="row" style="margin-top:14px;align-items:center">
-        <button id="preview-btn">شوف كيف Xvond فهمه</button>
-        <span class="muted">مرحلة البناء مجانية وما تستخدم موديل AI مدفوع.</span>
-      </div>
-      <div id="preview-error" class="status"></div>
-    </section>
+    <section id="build-card" class="card">
+      <label for="description">وصف الموظف</label>
+      <textarea id="description" placeholder="مثال: بدي موظف شخصي يبحثلي عن فرص استثمار ويرتب النتائج، أو موظف يرد على العملاء ويتابع المبيعات."></textarea>
 
-    <section id="review-card" class="card hidden">
-      <h2>هيك فهمنا موظفك</h2>
-      <label>اسم الموظف</label>
+      <label for="employee-name" style="display:block;margin-top:18px">اسم الموظف</label>
       <input id="employee-name" value="My AI Employee" maxlength="200">
+
       <div class="grid" style="margin-top:20px">
         <div>
           <h3>القدرات</h3>
-          <p class="muted">عدّل القدرات مثل ما بدك قبل الحفظ.</p>
+          <p class="muted">اختار اللي بدك ياه. وإذا ما اخترت، Xvond يحفظ الوصف ويجهّز الإعداد الأساسي بدون تشغيل AI.</p>
           <div id="capabilities" class="chips"></div>
         </div>
         <div>
           <h3>القنوات</h3>
-          <p class="muted">اختار وين بدك الموظف يشتغل. إذا بدك ياه شخصي إلك داخل Xvond اختار Xvond Workspace.</p>
+          <p class="muted">اختيارية. إذا بدك الموظف شخصي داخل Xvond اختار Xvond Workspace.</p>
           <div id="channels" class="chips"></div>
         </div>
       </div>
-      <div style="margin-top:20px"><h3>الخطوات الناقصة</h3><div id="missing" class="muted"></div></div>
-      <div class="note muted">تقدر تحفظ الموظف Draft مجانًا. الاشتراك مطلوب فقط عند تشغيل AI فعليًا أو إطلاق الموظف.</div>
-      <div class="row" style="margin-top:22px">
-        <button id="create-btn">احفظ الموظف</button>
-        <button id="edit-btn" class="secondary">عدّل الوصف</button>
+
+      <div class="note muted">البناء والحفظ ما بيستخدموا أي موديل AI مدفوع. الاشتراك مطلوب قبل أول Test أو تشغيل فعلي للموظف.</div>
+      <div class="row" style="margin-top:22px;align-items:center">
+        <button id="create-btn">إنشاء الموظف</button>
       </div>
       <div id="create-error" class="status"></div>
     </section>
@@ -75,8 +68,8 @@
 
     <section id="success-card" class="card success hidden">
       <h2>موظفك صار Draft</h2>
-      <p>انحفظ الموظف مجانًا ولسا ما استخدم أي AI مدفوع. وقت بدك تجربه أو تطلقه فعليًا، ساعتها لازم تشترك.</p>
-      <a href="/customer-ui"><button>افتح مساحة العمل</button></a>
+      <p>انحفظ الموظف بدون أي استخدام AI. من لوحة التحكم بتشترك أولًا، وبعدها بتقدر تعمل Test وتشغله.</p>
+      <a href="/customer-ui"><button>افتح لوحة التحكم</button></a>
     </section>
   </main>
 
@@ -94,102 +87,129 @@
     instagram: "إنستغرام",
     email: "الإيميل"
   };
-  const CAPABILITY_OPTIONS = Object.keys(CAPABILITY_LABELS);
-  const CHANNEL_OPTIONS = Object.keys(CHANNEL_LABELS);
-  let preview = null;
 
   const $ = id => document.getElementById(id);
   const show = (id, yes=true) => $(id).classList.toggle("hidden", !yes);
+  const checked = name => Array.from(document.querySelectorAll(`input[name="${name}"]:checked`)).map(x => x.value);
   const detail = async response => {
     try { const data = await response.json(); return typeof data.detail === "string" ? data.detail : (data.detail?.message || "حدث خطأ"); }
     catch { return "حدث خطأ"; }
   };
-  const checked = name => Array.from(document.querySelectorAll(`input[name="${name}"]:checked`)).map(x => x.value);
+
+  function renderOptions(target, name, labels, selectedValues=[]) {
+    const selected = new Set(selectedValues || []);
+    $(target).innerHTML = Object.entries(labels).map(([value, label]) => `<label class="chip"><input type="checkbox" name="${name}" value="${value}" ${selected.has(value) ? "checked" : ""}> ${label}</label>`).join("");
+  }
+
   const saveDraft = () => sessionStorage.setItem("xvond_employee_draft", JSON.stringify({
     description: $("description").value.trim(),
     name: $("employee-name").value.trim() || "My AI Employee",
-    capabilities: checked("capability"), channels: checked("channel")
+    capabilities: checked("capability"),
+    channels: checked("channel")
   }));
   const loadDraft = () => { try { return JSON.parse(sessionStorage.getItem("xvond_employee_draft") || "null"); } catch { return null; } };
 
-  function renderOptions(target, name, values, labels, selectedValues=[]) {
-    const selected = new Set(selectedValues || []);
-    $(target).innerHTML = values.map(v => `<label class="chip"><input type="checkbox" name="${name}" value="${v}" ${selected.has(v) ? "checked" : ""}> ${labels[v] || v}</label>`).join("");
-  }
-
-  async function doPreview() {
-    $("preview-error").textContent = "";
-    const description = $("description").value.trim();
-    if (description.length < 8) { $("preview-error").textContent = "اكتب وصف أوضح للموظف."; return; }
-    $("preview-btn").disabled = true;
-    try {
-      const response = await fetch("/public/employee-builder/preview", {
-        method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({description})
-      });
-      if (!response.ok) throw new Error(await detail(response));
-      preview = await response.json();
-      const bp = preview.blueprint || {};
-      $("employee-name").value = bp.name || "My AI Employee";
-      renderOptions("capabilities", "capability", CAPABILITY_OPTIONS, CAPABILITY_LABELS, bp.capabilities || []);
-      renderOptions("channels", "channel", CHANNEL_OPTIONS, CHANNEL_LABELS, bp.channels || []);
-      $("missing").textContent = (bp.missing_information || []).map(x => x.replaceAll("_", " ")).join(" • ") || "ما في معلومات إضافية مطلوبة حاليًا.";
-      show("review-card", true); show("auth-card", false); show("success-card", false);
-      $("review-card").scrollIntoView({behavior:"smooth"});
-    } catch (err) { $("preview-error").textContent = err.message; }
-    finally { $("preview-btn").disabled = false; }
-  }
-
   async function createEmployee(showAuthOn401=true) {
+    $("create-error").textContent = "";
+    $("auth-error").textContent = "";
+    const description = $("description").value.trim();
+    if (description.length < 8) {
+      $("create-error").textContent = "اكتب وصف أوضح للموظف.";
+      return false;
+    }
+
     saveDraft();
     const draft = loadDraft();
-    $("create-error").textContent = ""; $("auth-error").textContent = "";
-    const response = await fetch("/customer/employee-builder/create", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(draft)
-    });
-    if (response.ok) {
-      sessionStorage.removeItem("xvond_employee_draft");
-      show("auth-card", false); show("review-card", false); show("success-card", true);
-      $("success-card").scrollIntoView({behavior:"smooth"});
-      return true;
+    $("create-btn").disabled = true;
+    try {
+      const response = await fetch("/customer/employee-builder/create", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(draft)
+      });
+      if (response.ok) {
+        sessionStorage.removeItem("xvond_employee_draft");
+        show("auth-card", false);
+        show("build-card", false);
+        show("success-card", true);
+        $("success-card").scrollIntoView({behavior:"smooth"});
+        return true;
+      }
+      if (response.status === 401 && showAuthOn401) {
+        show("auth-card", true);
+        $("auth-card").scrollIntoView({behavior:"smooth"});
+        return false;
+      }
+      if (response.status === 409) {
+        show("auth-card", false);
+        show("build-card", false);
+        show("success-card", true);
+        $("success-card").querySelector("h2").textContent = "عندك موظف موجود بالفعل";
+        return true;
+      }
+      const message = await detail(response);
+      if (showAuthOn401) $("create-error").textContent = message;
+      else $("auth-error").textContent = message;
+      return false;
+    } finally {
+      $("create-btn").disabled = false;
     }
-    if (response.status === 401 && showAuthOn401) {
-      show("auth-card", true); $("auth-card").scrollIntoView({behavior:"smooth"}); return false;
-    }
-    if (response.status === 409) {
-      show("auth-card", false); show("review-card", false); show("success-card", true);
-      $("success-card").querySelector("h2").textContent = "عندك موظف موجود بالفعل";
-      return true;
-    }
-    const message = await detail(response);
-    if (showAuthOn401) $("create-error").textContent = message; else $("auth-error").textContent = message;
-    return false;
   }
 
   async function login() {
     $("auth-error").textContent = "";
-    const response = await fetch("/auth/login", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:$("login-email").value.trim(),password:$("login-password").value})});
+    const response = await fetch("/auth/login", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({email:$("login-email").value.trim(),password:$("login-password").value})
+    });
     if (!response.ok) { $("auth-error").textContent = await detail(response); return; }
     await createEmployee(false);
   }
 
   async function signup() {
     $("auth-error").textContent = "";
-    const payload = {full_name:$("signup-name").value.trim(),workspace_name:$("signup-workspace").value.trim() || null,email:$("signup-email").value.trim(),password:$("signup-password").value};
-    const response = await fetch("/auth/signup", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    const payload = {
+      full_name:$("signup-name").value.trim(),
+      workspace_name:$("signup-workspace").value.trim() || null,
+      email:$("signup-email").value.trim(),
+      password:$("signup-password").value
+    };
+    const response = await fetch("/auth/signup", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(payload)
+    });
     if (!response.ok) { $("auth-error").textContent = await detail(response); return; }
     await createEmployee(false);
   }
 
-  $("preview-btn").addEventListener("click", doPreview);
-  $("edit-btn").addEventListener("click", () => { show("review-card", false); $("description").focus(); });
-  $("create-btn").addEventListener("click", () => createEmployee(true));
-  $("login-btn").addEventListener("click", login); $("signup-btn").addEventListener("click", signup);
-  $("login-tab").addEventListener("click", () => { $("login-tab").classList.add("active"); $("signup-tab").classList.remove("active"); show("login-form", true); show("signup-form", false); });
-  $("signup-tab").addEventListener("click", () => { $("signup-tab").classList.add("active"); $("login-tab").classList.remove("active"); show("signup-form", true); show("login-form", false); });
+  renderOptions("capabilities", "capability", CAPABILITY_LABELS);
+  renderOptions("channels", "channel", CHANNEL_LABELS);
 
   const saved = loadDraft();
-  if (saved?.description) $("description").value = saved.description;
+  if (saved?.description) {
+    $("description").value = saved.description;
+    $("employee-name").value = saved.name || "My AI Employee";
+    renderOptions("capabilities", "capability", CAPABILITY_LABELS, saved.capabilities || []);
+    renderOptions("channels", "channel", CHANNEL_LABELS, saved.channels || []);
+  }
+
+  $("create-btn").addEventListener("click", () => createEmployee(true));
+  $("login-btn").addEventListener("click", login);
+  $("signup-btn").addEventListener("click", signup);
+  $("login-tab").addEventListener("click", () => {
+    $("login-tab").classList.add("active");
+    $("signup-tab").classList.remove("active");
+    show("login-form", true);
+    show("signup-form", false);
+  });
+  $("signup-tab").addEventListener("click", () => {
+    $("signup-tab").classList.add("active");
+    $("login-tab").classList.remove("active");
+    show("signup-form", true);
+    show("login-form", false);
+  });
 })();
 </script>
 </body>
