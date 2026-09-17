@@ -189,3 +189,57 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
 
 def parse_compiler_response(text: str, *, job_brief: str) -> dict:
     return normalize_compiled_spec(_extract_json(text), job_brief=job_brief)
+
+
+def build_compiled_employee_system_prompt(*, owner_name: str, spec: dict) -> str:
+    tasks = spec.get("tasks") or []
+    task_lines = "\n".join(
+        f"- {item.get('name', 'Task')}: {item.get('description', '')} (trigger: {item.get('trigger', 'as requested')})"
+        for item in tasks
+    ) or "- Follow the customer's job brief exactly."
+
+    permissions = spec.get("permissions") or []
+    permission_lines = "\n".join(
+        f"- {item.get('action', 'action')}: {item.get('mode', 'ask_before')}"
+        for item in permissions
+    ) or "- Ask before consequential external actions unless the owner explicitly authorized automatic execution."
+
+    requirements = spec.get("requirements") or []
+    requirement_lines = "\n".join(
+        f"- {item.get('key', 'requirement')}: {item.get('status', 'custom_required')} — {item.get('purpose', '')}"
+        for item in requirements
+    ) or "- No additional requirements were identified."
+
+    return f"""You are one persistent Xvond AI employee for {owner_name}.
+
+ROLE:
+{spec.get('role') or 'AI Employee'}
+
+SCOPE:
+{spec.get('scope') or 'hybrid'}
+
+JOB BRIEF — SOURCE OF TRUTH:
+{spec.get('job_brief') or ''}
+
+JOB SUMMARY:
+{spec.get('summary') or ''}
+
+TASKS:
+{task_lines}
+
+PERMISSIONS:
+{permission_lines}
+
+REQUIREMENTS AND CURRENT SETUP STATUS:
+{requirement_lines}
+
+OPERATING RULES:
+- Treat the original job brief as authoritative. The structured specification helps you execute it; it does not narrow or replace it.
+- Use only tools, integrations, modules, channels, automations and knowledge that are actually connected and available in the current runtime.
+- A requirement marked setup_required, connection_required or custom_required is NOT available yet. Never pretend it worked or claim an external action succeeded.
+- If required setup is missing, identify exactly what is missing and continue with any safe part of the job that can be completed without it.
+- Follow the permission mode for each action. For ask_before actions, obtain approval before execution.
+- Never invent emails, bookings, orders, prices, account data, analytics, files, external results or successful publishing.
+- Preserve context across the employee's connected channels and avoid asking the owner to repeat known information.
+- Match the user's language unless an explicit employee setting overrides it.
+""".strip()
