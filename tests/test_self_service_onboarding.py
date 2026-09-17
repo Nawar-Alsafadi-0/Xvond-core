@@ -3,6 +3,7 @@ from pathlib import Path
 
 from backend.app.api.customer_employee_builder import SELF_SERVICE_FREE_TEST_MESSAGES
 from backend.app.models.company import Company
+from backend.app.modules.ai_agent.employee_builder import build_employee_blueprint
 from backend.app.modules.ai_agent.factory import AgentFactory
 
 
@@ -24,7 +25,17 @@ def test_agent_factory_keeps_capacity_enforcement_by_default():
     assert parameter.default is True
 
 
-def test_public_builder_creates_directly_without_preview():
+def test_open_ended_brief_is_preserved_even_when_internal_hints_match():
+    description = (
+        "راقب لي كل يوم صفحة مورد محدد، وقارن التغييرات مع ملاحظاتي، "
+        "وخبرني فقط إذا صار تغيير مهم حسب الشروط التي أعطيك إياها"
+    )
+    blueprint = build_employee_blueprint(description)
+    assert blueprint.description == description
+    assert blueprint.capabilities
+
+
+def test_public_builder_is_open_ended_and_creates_directly_without_preview():
     html = (ROOT / "frontend" / "public" / "employee-builder.html").read_text(
         encoding="utf-8"
     )
@@ -36,17 +47,25 @@ def test_public_builder_creates_directly_without_preview():
     assert "/auth/signup" in html
     assert "sessionStorage" in html
     assert "Xvond Workspace" in html
-    assert "إنشاء الموظف" in html
-    assert "الاشتراك مطلوب قبل أول Test" in html
+    assert "ابنِ موظفي" in html
+    assert "شو بدك موظفك يعمل؟" in html
+    assert "Job Brief" in html
+    assert 'name="capability"' not in html
+    assert "خدمة العملاء" not in html
+    assert "المبيعات" not in html
 
 
-def test_customer_portal_manages_existing_employee_instead_of_building_one():
+def test_customer_portal_treats_job_brief_as_source_of_truth():
     source = (
         ROOT / "frontend" / "customer" / "employee-builder.js"
     ).read_text(encoding="utf-8")
     assert 'href="/build"' in source
     assert "Build on Xvond.com" in source
     assert "Xvond Workspace" in source
+    assert "Job brief" in source
+    assert "source of truth" in source
+    assert "do not limit" in source
+    assert "Capabilities" not in source
     assert "/customer/employee-builder/create" not in source
     assert "/customer/employee-builder/preview" not in source
     assert "/customer/employee-builder/${employee.agent_id}/test" not in source

@@ -1,18 +1,4 @@
 (() => {
-    const CAPABILITIES = [
-        ["customer_support", "Customer replies"],
-        ["sales", "Sales & follow-up"],
-        ["lead_capture", "Lead capture"],
-        ["booking", "Bookings"],
-        ["orders", "Orders"],
-        ["web_research", "Web research"],
-        ["email", "Email"],
-        ["files", "Files"],
-        ["content", "Content"],
-        ["scheduling", "Scheduled tasks"],
-        ["custom_task", "Custom task"],
-    ];
-
     const CHANNELS = [
         ["xvond", "Xvond Workspace"],
         ["website", "Website"],
@@ -57,9 +43,9 @@
             <div class="employee-builder-shell">
                 <div class="panel employee-builder-hero">
                     <div class="employee-builder-kicker">XVOND AI EMPLOYEE</div>
-                    <h2>You do not have an AI employee yet</h2>
-                    <p class="employee-builder-lead">Employee creation starts on Xvond.com, not inside the customer portal.</p>
-                    <p class="muted">Build and save your employee for free. AI usage starts only after you subscribe and launch it.</p>
+                    <h2>Tell Xvond what you need</h2>
+                    <p class="employee-builder-lead">Describe any job, business role, personal agent, assistant or recurring task. Xvond saves the brief first, then the employee is prepared around that job.</p>
+                    <p class="muted">The brief is not limited to predefined agent types or capability categories.</p>
                     <div class="employee-builder-actions">
                         <a href="/build"><button type="button">Build on Xvond.com</button></a>
                     </div>
@@ -69,7 +55,7 @@
     }
 
     function missingMarkup(items) {
-        if (!(items || []).length) return '<p class="muted">No additional setup detected.</p>';
+        if (!(items || []).length) return '<p class="muted">No additional setup detected yet.</p>';
         return `<div class="employee-builder-missing">${items.map(item => badge(String(item).replaceAll("_", " "), "setup")).join("")}</div>`;
     }
 
@@ -77,7 +63,6 @@
         const target = root();
         if (!target) return;
         const lifecycleTone = employee.enabled ? "ready" : "setup";
-        const capabilities = (employee.capabilities || []).map(item => badge(labelFor(CAPABILITIES, item))).join("") || badge("Custom");
         const channels = (employee.requested_channels || []).map(item => badge(labelFor(CHANNELS, item))).join("") || '<span class="muted">No channel selected yet.</span>';
 
         target.innerHTML = `
@@ -85,26 +70,31 @@
                 <div class="panel employee-builder-current">
                     <div class="employee-builder-current-head">
                         <div>
-                            <div class="employee-builder-kicker">YOUR AI EMPLOYEE</div>
+                            <div class="employee-builder-kicker">YOUR XVOND EMPLOYEE</div>
                             <h2>${escapeHtml(employee.name || "My AI Employee")}</h2>
-                            <p>${escapeHtml(employee.description || "")}</p>
                         </div>
                         ${badge(employee.enabled ? "Live" : "Draft", lifecycleTone)}
                     </div>
 
+                    <div class="employee-builder-section">
+                        <h3>Job brief</h3>
+                        <p>${escapeHtml(employee.description || "")}</p>
+                        <p class="muted">This brief is the source of truth for the employee. Internal capability labels are implementation details and do not limit what the employee can be built to do.</p>
+                    </div>
+
                     <div class="employee-builder-summary-grid">
-                        <div>
-                            <h3>Capabilities</h3>
-                            <div class="employee-builder-missing">${capabilities}</div>
-                        </div>
                         <div>
                             <h3>Channels</h3>
                             <div class="employee-builder-missing">${channels}</div>
                         </div>
+                        <div>
+                            <h3>Build model</h3>
+                            <div class="employee-builder-missing">${badge("Open-ended job brief", "ready")}</div>
+                        </div>
                     </div>
 
                     <div class="employee-builder-section">
-                        <h3>Next setup</h3>
+                        <h3>Setup requirements</h3>
                         ${missingMarkup(employee.missing_information)}
                     </div>
                 </div>
@@ -113,13 +103,13 @@
                     <div class="panel">
                         <div class="employee-builder-kicker">LIVE</div>
                         <h2>Your employee is launched</h2>
-                        <p class="muted">Manage conversations, usage, knowledge and connected channels from the workspace.</p>
+                        <p class="muted">Manage conversations, usage, knowledge, tools, automations and connected channels from the workspace.</p>
                     </div>
                 ` : `
                     <div class="panel">
-                        <div class="employee-builder-kicker">LAUNCH</div>
-                        <h2>Your employee is saved as a Draft</h2>
-                        <p class="muted">Building is free. No AI is used while the employee stays in the build stage. Subscribe before testing or launching the employee.</p>
+                        <div class="employee-builder-kicker">DRAFT</div>
+                        <h2>Your job brief is saved</h2>
+                        <p class="muted">No paid AI is used while saving the brief. Subscribe before AI-backed testing or live execution.</p>
                     </div>
                 `}
             </div>
