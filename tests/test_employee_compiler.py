@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from backend.app.modules.ai_agent.employee_compiler import (
+    build_compiled_employee_system_prompt,
     build_compiler_user_message,
     parse_compiler_response,
 )
@@ -65,6 +66,25 @@ def test_compiler_prompt_keeps_full_job_and_selected_channels():
     assert "whatsapp, instagram" in message
 
 
+def test_compiled_runtime_prompt_keeps_job_permissions_and_missing_setup_honest():
+    spec = {
+        "role": "Inbox employee",
+        "scope": "business",
+        "job_brief": "اقرأ الإيميلات ورد بعد موافقتي",
+        "summary": "Read and reply to email.",
+        "tasks": [{"name": "Inbox", "description": "Read new email", "trigger": "new email"}],
+        "requirements": [
+            {"key": "email_read", "status": "connection_required", "purpose": "Read inbox"}
+        ],
+        "permissions": [{"action": "send email", "mode": "ask_before"}],
+    }
+    prompt = build_compiled_employee_system_prompt(owner_name="Xvond Demo", spec=spec)
+    assert "اقرأ الإيميلات ورد بعد موافقتي" in prompt
+    assert "send email: ask_before" in prompt
+    assert "email_read: connection_required" in prompt
+    assert "Never pretend" in prompt
+
+
 def test_paid_compile_endpoint_is_part_of_customer_employee_builder_contract():
     source = (ROOT / "backend" / "app" / "api" / "customer_employee_builder.py").read_text(
         encoding="utf-8"
@@ -73,4 +93,17 @@ def test_paid_compile_endpoint_is_part_of_customer_employee_builder_contract():
     assert 'service_limits.entitlement(db, current_user.company_id, "ai_agents")' in source
     assert "_compile_employee_spec" in source
     assert 'builder["compiled_spec"] = compiled_spec' in source
+    assert 'builder["missing_information"] = list(compiled_spec.get("setup_required") or [])' in source
+    assert "agent.system_prompt = build_compiled_employee_system_prompt" in source
     assert 'if not isinstance(builder.get("compiled_spec"), dict):' in source
+
+
+def test_customer_portal_can_prepare_and_render_employee_specification():
+    source = (ROOT / "frontend" / "customer" / "employee-builder.js").read_text(
+        encoding="utf-8"
+    )
+    assert "Prepare employee" in source
+    assert "EMPLOYEE SPECIFICATION" in source
+    assert "/compile`" in source
+    assert "custom required" in source
+    assert "connection or custom required" in source
