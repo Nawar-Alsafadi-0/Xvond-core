@@ -1,5 +1,8 @@
 from pathlib import Path
 
+from backend.app.modules.ai_agent.employee_capability_builder import (
+    build_managed_action_config,
+)
 from backend.app.modules.ai_agent.employee_compiler import (
     build_compiled_employee_system_prompt,
     build_compiler_user_message,
@@ -10,29 +13,52 @@ from backend.app.modules.ai_agent.employee_compiler import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_compiler_preserves_unknown_requirements_as_custom_work():
-    job_brief = "راقب منصة متخصصة خاصة فيني ونفذ قاعدة مخصصة ما عنا تكامل جاهز إلها"
+def test_compiler_turns_unknown_digital_requirement_into_xvond_build_work():
+    job_brief = "راقب منصة متخصصة خاصة فيني ونفذ قاعدة مخصصة عليها كل يوم"
     response = """{
       "role": "Personal monitoring agent",
       "scope": "personal",
-      "summary": "Monitor a private specialist platform and apply a custom rule.",
+      "summary": "Monitor a specialist platform and apply a custom rule.",
       "tasks": [{"name":"Monitor","description":"Watch the platform","trigger":"daily"}],
       "requirements": [
-        {"key":"specialist_private_platform","kind":"custom","purpose":"Read private platform data"},
-        {"key":"scheduling","kind":"automation","purpose":"Run daily"}
+        {"key":"specialist_platform_monitor","kind":"custom","purpose":"Read the platform and apply the rule","requires_connection":false,"primitives":["browser_web","workflow_engine"]},
+        {"key":"scheduling","kind":"automation","purpose":"Run daily","requires_connection":false,"primitives":["scheduler","workflow_engine"]}
       ],
       "permissions": [{"action":"send a notification","mode":"automatic"}],
-      "setup_questions": ["How should Xvond authenticate to the private platform?"]
+      "setup_questions": []
     }"""
     spec = parse_compiler_response(response, job_brief=job_brief)
 
     assert spec["job_brief"] == job_brief
-    custom = next(x for x in spec["requirements"] if x["key"] == "specialist_private_platform")
-    assert custom["known_to_xvond"] is False
-    assert custom["status"] == "custom_required"
+    novel = next(x for x in spec["requirements"] if x["key"] == "specialist_platform_monitor")
+    assert novel["known_to_xvond"] is False
+    assert novel["status"] == "xvond_build"
+    assert "workflow_engine" in novel["primitives"]
     scheduling = next(x for x in spec["requirements"] if x["key"] == "scheduling")
     assert scheduling["known_to_xvond"] is True
-    assert scheduling["status"] == "setup_required"
+    assert scheduling["status"] == "xvond_build"
+    assert spec["unsupported_requirements"] == []
+
+
+def test_unknown_external_account_requirement_asks_for_connection_instead_of_rejection():
+    response = """{
+      "role": "Private account assistant",
+      "scope": "personal",
+      "summary": "Watch a private account.",
+      "tasks": [],
+      "requirements": [
+        {"key":"private_vendor_account","kind":"integration","purpose":"Read account data","requires_connection":true,"customer_inputs":["Connect the vendor account"],"primitives":["http_api","workflow_engine"]}
+      ],
+      "permissions": [],
+      "setup_questions": ["Connect the vendor account"]
+    }"""
+    spec = parse_compiler_response(response, job_brief="راقب حسابي الخاص")
+    requirement = spec["requirements"][0]
+
+    assert requirement["status"] == "connection_required"
+    assert requirement["delivery_mode"] == "connect_and_compose"
+    assert requirement["customer_inputs"] == ["Connect the vendor account"]
+    assert spec["unsupported_requirements"] == []
 
 
 def test_compiler_maps_email_and_instagram_to_real_connection_requirements():
@@ -55,6 +81,26 @@ def test_compiler_maps_email_and_instagram_to_real_connection_requirements():
     assert statuses["email_read"] == "connection_required"
     assert statuses["email_send"] == "connection_required"
     assert statuses["instagram_publish"] == "connection_required"
+
+
+def test_managed_capability_compiles_to_generic_workflow_action():
+    spec = {
+        "job_brief": "راقب الأسعار وابعتلي تنبيه",
+        "summary": "Monitor prices and notify the owner.",
+        "permissions": [{"action": "send a notification", "mode": "automatic"}],
+    }
+    requirement = {
+        "key": "competitor_price_monitor",
+        "purpose": "Monitor competitor prices and send a notification",
+        "primitives": ["browser_web", "scheduler", "workflow_engine"],
+    }
+    action = build_managed_action_config(requirement=requirement, spec=spec)
+
+    assert action["destination"]["type"] == "workflow_engine"
+    assert action["destination"]["capability_key"] == "competitor_price_monitor"
+    assert action["destination"]["delivery_mode"] == "compose"
+    assert "workflow_engine" in action["destination"]["primitives"]
+    assert action["xvond_generated"] is True
 
 
 def test_compiler_prompt_keeps_full_job_and_selected_channels():
@@ -82,7 +128,7 @@ def test_compiled_runtime_prompt_keeps_job_permissions_and_missing_setup_honest(
     assert "اقرأ الإيميلات ورد بعد موافقتي" in prompt
     assert "send email: ask_before" in prompt
     assert "email_read: connection_required" in prompt
-    assert "Never pretend" in prompt
+    assert "Do not claim an external action succeeded" in prompt
 
 
 def test_paid_compile_endpoint_is_part_of_customer_employee_builder_contract():
@@ -98,12 +144,21 @@ def test_paid_compile_endpoint_is_part_of_customer_employee_builder_contract():
     assert 'if not isinstance(builder.get("compiled_spec"), dict):' in source
 
 
-def test_customer_portal_can_prepare_and_render_employee_specification():
+def test_customer_portal_shows_xvond_owned_build_instead_of_unsupported_features():
     source = (ROOT / "frontend" / "customer" / "employee-builder.js").read_text(
         encoding="utf-8"
     )
-    assert "Prepare employee" in source
-    assert "EMPLOYEE SPECIFICATION" in source
+    assert "Build employee" in source
+    assert "EMPLOYEE BUILD PLAN" in source
     assert "/compile`" in source
-    assert "custom required" in source
-    assert "connection or custom required" in source
+    assert "Xvond builds this" in source
+    assert "custom required" not in source.lower()
+
+
+def test_compiler_contract_has_no_custom_required_end_state():
+    source = (ROOT / "backend" / "app" / "modules" / "ai_agent" / "employee_compiler.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"xvond_build"' in source
+    assert '"unsupported_requirements": []' in source
+    assert "custom_required" not in source
