@@ -14,6 +14,7 @@ from backend.app.modules.ai_agent.employee_builder import (
     blueprint_readiness,
     build_employee_blueprint,
     build_employee_system_prompt,
+    missing_information_for,
     runtime_tools_for,
     sanitize_capabilities,
     sanitize_channels,
@@ -23,6 +24,7 @@ from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
 from backend.app.modules.ai_agent.profile_models import AIAgentProfile
 from backend.app.modules.billing.limits import limits_service
+from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord, CompanyAIProfile
 from backend.app.modules.tools.models import AgentToolAssignment
 
@@ -136,18 +138,6 @@ def _build_final_blueprint(data: EmployeeBuilderCreateRequest) -> EmployeeBluepr
         for capability in capabilities
     }
 
-    missing = list(base.missing_information)
-    if any(item in capabilities for item in ("customer_support", "sales", "lead_capture", "booking", "orders", "files")):
-        if "knowledge" not in missing:
-            missing.append("knowledge")
-    if any(item in capabilities for item in ("lead_capture", "booking", "orders")):
-        if "business_actions" not in missing:
-            missing.append("business_actions")
-    for channel in channels:
-        marker = f"connect_{channel}"
-        if channel != "xvond" and marker not in missing:
-            missing.append(marker)
-
     return EmployeeBlueprint(
         name=(data.name or base.name).strip() or base.name,
         description=base.description,
@@ -155,7 +145,7 @@ def _build_final_blueprint(data: EmployeeBuilderCreateRequest) -> EmployeeBluepr
         capabilities=capabilities,
         channels=channels,
         permissions=permissions,
-        missing_information=tuple(dict.fromkeys(missing)),
+        missing_information=missing_information_for(capabilities, channels),
     )
 
 
@@ -210,6 +200,8 @@ def create_employee(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
+        service_limits.entitlement(db, company.id, "ai_agents")
+
         existing = _existing_employee(db, company.id)
         if existing is not None:
             raise HTTPException(
