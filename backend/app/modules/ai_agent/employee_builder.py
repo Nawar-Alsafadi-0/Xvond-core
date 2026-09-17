@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
 
 
 SUPPORTED_CAPABILITIES = (
@@ -15,6 +14,7 @@ SUPPORTED_CAPABILITIES = (
     "files",
     "content",
     "scheduling",
+    "custom_task",
 )
 
 SUPPORTED_CHANNELS = (
@@ -25,19 +25,31 @@ SUPPORTED_CHANNELS = (
     "email",
 )
 
-# Capabilities that already map to real Xvond runtime tools. Builder V1 never
-# creates fictional tool assignments for features that are not wired yet.
-CAPABILITY_TOOLS = {
-    "customer_support": ("human_handoff",),
-    "sales": ("lead", "human_handoff"),
-    "lead_capture": ("lead",),
-    "booking": ("booking", "human_handoff"),
-    "orders": ("order", "human_handoff"),
+ACTION_CAPABILITIES = {
+    "sales",
+    "lead_capture",
+    "booking",
+    "orders",
+    "email",
+    "scheduling",
 }
 
-# These channel surfaces already exist in the core. Xvond portal chat is an
-# internal surface and does not need an AgentChannel row.
-RUNTIME_CHANNELS = {"website", "whatsapp"}
+# Employee Builder V1 must not attach the legacy booking/order/lead tools because
+# Delivery Readiness intentionally blocks those old paths from going live. The
+# only safe runtime tool assigned automatically is human handoff. Real business
+# actions are configured later through Xvond's canonical Business Actions flow.
+CAPABILITY_TOOLS = {
+    "customer_support": ("human_handoff",),
+    "sales": ("human_handoff",),
+    "lead_capture": ("human_handoff",),
+    "booking": ("human_handoff",),
+    "orders": ("human_handoff",),
+}
+
+# Requested channels are persisted in AgentConfig first. A real AgentChannel row
+# is created only when its required credentials/config are supplied, avoiding
+# invalid placeholder rows that could interfere with later setup.
+RUNTIME_CHANNELS: set[str] = set()
 
 CAPABILITY_KEYWORDS = {
     "customer_support": (
@@ -148,24 +160,6 @@ def _audience(text: str) -> str:
     return "general"
 
 
-def _name_for(capabilities: tuple[str, ...], audience: str) -> str:
-    labels = {
-        "customer_support": "Customer & Support Employee",
-        "sales": "Sales Employee",
-        "booking": "Booking Employee",
-        "web_research": "Research Employee",
-        "content": "Content Employee",
-        "email": "Email Employee",
-        "scheduling": "Operations Employee",
-    }
-    if audience == "personal" and not capabilities:
-        return "My AI Employee"
-    for capability in capabilities:
-        if capability in labels:
-            return labels[capability]
-    return "AI Employee"
-
-
 def build_employee_blueprint(description: str) -> EmployeeBlueprint:
     clean = " ".join((description or "").strip().split())
     if len(clean) < 8:
@@ -177,13 +171,11 @@ def build_employee_blueprint(description: str) -> EmployeeBlueprint:
     capabilities = _unique([
         capability
         for capability in SUPPORTED_CAPABILITIES
-        if _contains_any(text, CAPABILITY_KEYWORDS.get(capability, ()))
+        if capability != "custom_task"
+        and _contains_any(text, CAPABILITY_KEYWORDS.get(capability, ()))
     ])
-
-    # A useful employee should always be able to converse, even when the user
-    # describes a niche job that V1 does not classify yet.
     if not capabilities:
-        capabilities = ("customer_support",)
+        capabilities = ("custom_task",)
 
     channels = _unique([
         channel
@@ -194,26 +186,28 @@ def build_employee_blueprint(description: str) -> EmployeeBlueprint:
         channels = ("xvond",)
 
     audience = _audience(text)
-
-    action_capabilities = {"sales", "lead_capture", "booking", "orders", "email", "scheduling"}
     permissions = {
-        capability: ("ask_before_action" if capability in action_capabilities else "automatic")
+        capability: ("ask_before_action" if capability in ACTION_CAPABILITIES else "automatic")
         for capability in capabilities
     }
 
     missing: list[str] = []
-    if any(item in capabilities for item in ("customer_support", "sales", "booking", "orders")):
+    if any(item in capabilities for item in ("customer_support", "sales", "lead_capture", "booking", "orders", "files")):
         missing.append("knowledge")
-    if "booking" in capabilities:
-        missing.append("booking_rules")
+    if any(item in capabilities for item in ("lead_capture", "booking", "orders")):
+        missing.append("business_actions")
+    if "web_research" in capabilities:
+        missing.append("web_research_tool")
     if "email" in capabilities:
         missing.append("email_connection")
+    if "scheduling" in capabilities:
+        missing.append("automation")
     for channel in channels:
-        if channel not in {"xvond", "website"}:
+        if channel != "xvond":
             missing.append(f"connect_{channel}")
 
     return EmployeeBlueprint(
-        name=_name_for(capabilities, audience),
+        name="My AI Employee",
         description=clean,
         audience=audience,
         capabilities=capabilities,
@@ -256,13 +250,9 @@ def runtime_channels_for(channels: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(channel for channel in channels if channel in RUNTIME_CHANNELS)
 
 
-def build_employee_system_prompt(
-    *,
-    owner_name: str,
-    blueprint: EmployeeBlueprint,
-) -> str:
+def build_employee_system_prompt(*, owner_name: str, blueprint: EmployeeBlueprint) -> str:
     capabilities = ", ".join(blueprint.capabilities)
-    return f"""You are a persistent AI employee created in Xvond for {owner_name}.
+    return f"""You are one persistent AI employee created in Xvond for {owner_name}.
 
 YOUR JOB:
 {blueprint.description}
@@ -271,7 +261,8 @@ YOUR CONFIGURED CAPABILITIES:
 {capabilities}
 
 OPERATING RULES:
-- Work toward the user's stated job and remain consistent across connected Xvond channels.
+- You are one employee with multiple capabilities, not separate role-specific agents.
+- Work toward the owner's stated job and remain consistent across connected Xvond channels.
 - Use only tools and actions that are actually available in the current runtime.
 - Never claim an external action succeeded unless the connected tool confirms success.
 - If an action needs approval, ask for approval before taking it.
@@ -284,16 +275,19 @@ OPERATING RULES:
 
 
 def blueprint_readiness(blueprint: EmployeeBlueprint) -> dict:
-    capability_status = {
-        capability: (
-            "ready" if capability in CAPABILITY_TOOLS or capability == "files" else "planned"
-        )
-        for capability in blueprint.capabilities
-    }
+    capability_status = {}
+    for capability in blueprint.capabilities:
+        if capability in {"customer_support", "sales", "content", "custom_task"}:
+            capability_status[capability] = "conversational_ready"
+        elif capability in {"lead_capture", "booking", "orders", "files"}:
+            capability_status[capability] = "setup_required"
+        else:
+            capability_status[capability] = "planned"
+
     channel_status = {
         channel: (
-            "ready" if channel in {"xvond", "website"}
-            else "connect_required" if channel == "whatsapp"
+            "ready" if channel == "xvond"
+            else "connect_required" if channel in {"website", "whatsapp"}
             else "planned"
         )
         for channel in blueprint.channels
