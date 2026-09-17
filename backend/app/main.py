@@ -47,6 +47,7 @@ from backend.app.api.ai_agents import router as ai_agents_router
 from backend.app.api.company_modules import router as company_modules_router
 from backend.app.api.customer_action_requests import router as customer_action_requests_router
 from backend.app.api.customer_agents import router as customer_agents_router
+from backend.app.api.customer_employee_builder import router as customer_employee_builder_router
 from backend.app.api.customer_business import router as customer_business_router
 from backend.app.api.customer_inbox import router as customer_inbox_router
 from backend.app.api.customer_meta_whatsapp import router as customer_meta_whatsapp_router
@@ -228,6 +229,7 @@ for r in [
     company_modules_router,
     customer_action_requests_router,
     customer_agents_router,
+    customer_employee_builder_router,
     customer_business_router,
     customer_inbox_router,
     customer_meta_whatsapp_router,
