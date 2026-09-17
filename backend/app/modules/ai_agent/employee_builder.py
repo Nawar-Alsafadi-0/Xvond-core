@@ -160,6 +160,28 @@ def _audience(text: str) -> str:
     return "general"
 
 
+def missing_information_for(
+    capabilities: tuple[str, ...],
+    channels: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return setup requirements for the final user-selected employee blueprint."""
+    missing: list[str] = []
+    if any(item in capabilities for item in ("customer_support", "sales", "lead_capture", "booking", "orders", "files")):
+        missing.append("knowledge")
+    if any(item in capabilities for item in ("lead_capture", "booking", "orders")):
+        missing.append("business_actions")
+    if "web_research" in capabilities:
+        missing.append("web_research_tool")
+    if "email" in capabilities:
+        missing.append("email_connection")
+    if "scheduling" in capabilities:
+        missing.append("automation")
+    for channel in channels:
+        if channel != "xvond":
+            missing.append(f"connect_{channel}")
+    return _unique(missing)
+
+
 def build_employee_blueprint(description: str) -> EmployeeBlueprint:
     clean = " ".join((description or "").strip().split())
     if len(clean) < 8:
@@ -191,21 +213,6 @@ def build_employee_blueprint(description: str) -> EmployeeBlueprint:
         for capability in capabilities
     }
 
-    missing: list[str] = []
-    if any(item in capabilities for item in ("customer_support", "sales", "lead_capture", "booking", "orders", "files")):
-        missing.append("knowledge")
-    if any(item in capabilities for item in ("lead_capture", "booking", "orders")):
-        missing.append("business_actions")
-    if "web_research" in capabilities:
-        missing.append("web_research_tool")
-    if "email" in capabilities:
-        missing.append("email_connection")
-    if "scheduling" in capabilities:
-        missing.append("automation")
-    for channel in channels:
-        if channel != "xvond":
-            missing.append(f"connect_{channel}")
-
     return EmployeeBlueprint(
         name="My AI Employee",
         description=clean,
@@ -213,7 +220,7 @@ def build_employee_blueprint(description: str) -> EmployeeBlueprint:
         capabilities=capabilities,
         channels=channels,
         permissions=permissions,
-        missing_information=_unique(missing),
+        missing_information=missing_information_for(capabilities, channels),
     )
 
 
