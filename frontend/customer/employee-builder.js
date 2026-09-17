@@ -44,7 +44,7 @@
                 <div class="panel employee-builder-hero">
                     <div class="employee-builder-kicker">XVOND AI EMPLOYEE</div>
                     <h2>Tell Xvond what you need</h2>
-                    <p class="employee-builder-lead">Describe any job, business role, personal agent, assistant or recurring task. Xvond saves the brief first, then the employee is prepared around that job.</p>
+                    <p class="employee-builder-lead">Describe any job, business role, personal agent, assistant or recurring task. Xvond saves the brief first, then builds the employee around that job.</p>
                     <p class="muted">The brief is not limited to predefined agent types or capability categories.</p>
                     <div class="employee-builder-actions">
                         <a href="/build"><button type="button">Build on Xvond.com</button></a>
@@ -55,15 +55,26 @@
     }
 
     function missingMarkup(items) {
-        if (!(items || []).length) return '<p class="muted">No additional setup detected yet.</p>';
+        if (!(items || []).length) return '<p class="muted">Nothing else is needed from you right now.</p>';
         return `<div class="employee-builder-missing">${items.map(item => badge(String(item).replaceAll("_", " "), "setup")).join("")}</div>`;
+    }
+
+    function requirementStatusLabel(item) {
+        const status = String(item?.status || "xvond_build");
+        if (status === "available") return "ready";
+        if (status === "xvond_managed") return "built by Xvond";
+        if (status === "xvond_build") return "Xvond builds this";
+        if (status === "connection_required") return "connect account";
+        if (status === "customer_input_required") return "add required data";
+        return status.replaceAll("_", " ");
     }
 
     function requirementMarkup(items) {
         if (!(items || []).length) return '<p class="muted">No extra systems were identified.</p>';
         return `<div class="employee-builder-missing">${items.map(item => {
-            const tone = item.status === "available" ? "ready" : "setup";
-            const label = `${String(item.key || "requirement").replaceAll("_", " ")} · ${String(item.status || "custom_required").replaceAll("_", " ")}`;
+            const status = String(item.status || "xvond_build");
+            const tone = ["available", "xvond_managed"].includes(status) ? "ready" : "setup";
+            const label = `${String(item.key || "requirement").replaceAll("_", " ")} · ${requirementStatusLabel(item)}`;
             return badge(label, tone);
         }).join("")}</div>`;
     }
@@ -82,7 +93,7 @@
 
         return `
             <div class="panel">
-                <div class="employee-builder-kicker">EMPLOYEE SPECIFICATION</div>
+                <div class="employee-builder-kicker">EMPLOYEE BUILD PLAN</div>
                 <h2>${escapeHtml(spec.role || "AI Employee")}</h2>
                 <p>${escapeHtml(spec.summary || "")}</p>
                 <p class="muted">Scope: ${escapeHtml(spec.scope || "hybrid")}</p>
@@ -95,7 +106,7 @@
                 <div class="employee-builder-section">
                     <h3>Systems, tools and connections</h3>
                     ${requirementMarkup(spec.requirements)}
-                    <p class="muted">Anything marked setup, connection or custom required is not active yet and must be configured before the employee can use it.</p>
+                    <p class="muted">Xvond composes missing digital capabilities through its managed workflow layer. You only need to connect external accounts, grant permissions or provide required data when the job depends on them.</p>
                 </div>
 
                 <div class="employee-builder-section">
@@ -105,7 +116,7 @@
 
                 ${questions ? `
                     <div class="employee-builder-section">
-                        <h3>Needed to finish setup</h3>
+                        <h3>Needed from you</h3>
                         <ul>${questions}</ul>
                     </div>
                 ` : ""}
@@ -133,7 +144,7 @@
                     <div class="employee-builder-section">
                         <h3>Job brief</h3>
                         <p>${escapeHtml(employee.description || "")}</p>
-                        <p class="muted">This brief is the source of truth for the employee. Internal capability labels are implementation details and do not limit what the employee can be built to do.</p>
+                        <p class="muted">This brief is the source of truth. Xvond builds the employee around the requested job instead of limiting it to a predefined agent type.</p>
                     </div>
 
                     <div class="employee-builder-summary-grid">
@@ -149,22 +160,22 @@
 
                     ${employee.compiled ? "" : employee.can_compile ? `
                         <div class="employee-builder-section">
-                            <h3>Prepare this employee</h3>
-                            <p class="muted">Xvond will now use AI to understand the full job, identify tasks, systems, integrations, automations and permissions, and build the employee specification.</p>
+                            <h3>Build this employee</h3>
+                            <p class="muted">Xvond will understand the complete job, break it into tasks, compose any missing digital capabilities and identify only the external accounts, permissions or data it needs from you.</p>
                             <div class="employee-builder-actions">
-                                <button type="button" id="prepare-employee-btn">Prepare employee</button>
+                                <button type="button" id="prepare-employee-btn">Build employee</button>
                             </div>
                             <div id="prepare-employee-error" class="error"></div>
                         </div>
                     ` : `
                         <div class="employee-builder-section">
                             <h3>Next step</h3>
-                            <p class="muted">Subscribe to prepare, test and launch this employee. Saving the Job Brief itself used no paid AI.</p>
+                            <p class="muted">Subscribe to build, test and launch this employee. Saving the Job Brief itself used no paid AI.</p>
                         </div>
                     `}
 
                     <div class="employee-builder-section">
-                        <h3>Setup requirements</h3>
+                        <h3>Needed from you</h3>
                         ${missingMarkup(employee.missing_information)}
                     </div>
                 </div>
@@ -180,8 +191,8 @@
                 ` : `
                     <div class="panel">
                         <div class="employee-builder-kicker">DRAFT</div>
-                        <h2>${employee.compiled ? "Your employee is prepared" : "Your job brief is saved"}</h2>
-                        <p class="muted">${employee.compiled ? "Finish the required connections and setup before enabling real external actions." : "No paid AI is used while saving the brief. Subscribe before AI-backed preparation, testing or live execution."}</p>
+                        <h2>${employee.compiled ? "Your employee build plan is ready" : "Your job brief is saved"}</h2>
+                        <p class="muted">${employee.compiled ? "Xvond owns the capability build. Finish only the external account connections, permissions or data the job needs before live actions." : "No paid AI is used while saving the brief. Subscribe before AI-backed building, testing or live execution."}</p>
                     </div>
                 `}
             </div>
@@ -205,7 +216,7 @@
             });
             await loadEmployeeBuilder();
         } catch (err) {
-            if (error) error.textContent = err?.message || "Could not prepare employee.";
+            if (error) error.textContent = err?.message || "Could not build employee.";
         } finally {
             if (button) button.disabled = false;
         }
