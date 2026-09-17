@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Xvond — Build your AI employee</title>
   <style>
-    :root{font-family:Inter,Arial,sans-serif;color:#0f172a;background:#f8fafc}*{box-sizing:border-box}body{margin:0}.wrap{max-width:980px;margin:0 auto;padding:28px 20px 64px}.brand{font-size:28px;font-weight:800;color:#2563eb}.hero{padding:72px 0 34px}.hero h1{font-size:clamp(38px,7vw,72px);line-height:1.05;margin:12px 0}.hero p{font-size:20px;color:#475569;max-width:760px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:24px;box-shadow:0 14px 40px rgba(15,23,42,.06);margin-top:18px}textarea,input{width:100%;border:1px solid #cbd5e1;border-radius:12px;padding:14px 16px;font:inherit;background:#fff}textarea{min-height:150px;resize:vertical}button{border:0;border-radius:12px;padding:13px 18px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff}button.secondary{background:#e2e8f0;color:#0f172a}button:disabled{opacity:.55;cursor:not-allowed}.row{display:flex;gap:10px;flex-wrap:wrap}.muted{color:#64748b}.status{margin-top:12px;color:#b91c1c}.hidden{display:none!important}.chips{display:flex;gap:8px;flex-wrap:wrap}.chip{display:flex;gap:7px;align-items:center;padding:9px 11px;border:1px solid #dbeafe;border-radius:999px;background:#eff6ff}.chip input{width:auto}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.auth-tabs{display:flex;gap:8px;margin-bottom:14px}.auth-tabs button{background:#e2e8f0;color:#0f172a}.auth-tabs button.active{background:#2563eb;color:#fff}.success{border-color:#86efac;background:#f0fdf4}.ltr{direction:ltr;text-align:left}@media(max-width:720px){.grid{grid-template-columns:1fr}.hero{padding-top:40px}}
+    :root{font-family:Inter,Arial,sans-serif;color:#0f172a;background:#f8fafc}*{box-sizing:border-box}body{margin:0}.wrap{max-width:980px;margin:0 auto;padding:28px 20px 64px}.brand{font-size:28px;font-weight:800;color:#2563eb}.hero{padding:72px 0 34px}.hero h1{font-size:clamp(38px,7vw,72px);line-height:1.05;margin:12px 0}.hero p{font-size:20px;color:#475569;max-width:760px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:24px;box-shadow:0 14px 40px rgba(15,23,42,.06);margin-top:18px}textarea,input{width:100%;border:1px solid #cbd5e1;border-radius:12px;padding:14px 16px;font:inherit;background:#fff}textarea{min-height:150px;resize:vertical}button{border:0;border-radius:12px;padding:13px 18px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff}button.secondary{background:#e2e8f0;color:#0f172a}button:disabled{opacity:.55;cursor:not-allowed}.row{display:flex;gap:10px;flex-wrap:wrap}.muted{color:#64748b}.status{margin-top:12px;color:#b91c1c}.hidden{display:none!important}.chips{display:flex;gap:8px;flex-wrap:wrap}.chip{display:flex;gap:7px;align-items:center;padding:9px 11px;border:1px solid #dbeafe;border-radius:999px;background:#eff6ff}.chip input{width:auto}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.auth-tabs{display:flex;gap:8px;margin-bottom:14px}.auth-tabs button{background:#e2e8f0;color:#0f172a}.auth-tabs button.active{background:#2563eb;color:#fff}.success{border-color:#86efac;background:#f0fdf4}.note{margin-top:14px;padding:12px 14px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0}.ltr{direction:ltr;text-align:left}@media(max-width:720px){.grid{grid-template-columns:1fr}.hero{padding-top:40px}}
   </style>
 </head>
 <body>
@@ -21,7 +21,7 @@
       <textarea id="description" placeholder="مثال: بدي موظف يرد على العملاء، يعرف خدماتي وأسعاري، يتابع المهتمين ويحجز مواعيد على واتساب."></textarea>
       <div class="row" style="margin-top:14px;align-items:center">
         <button id="preview-btn">شوف كيف Xvond فهمه</button>
-        <span class="muted">المعاينة مجانية وما تستخدم موديل AI مدفوع.</span>
+        <span class="muted">مرحلة البناء مجانية وما تستخدم موديل AI مدفوع.</span>
       </div>
       <div id="preview-error" class="status"></div>
     </section>
@@ -31,19 +31,28 @@
       <label>اسم الموظف</label>
       <input id="employee-name" value="My AI Employee" maxlength="200">
       <div class="grid" style="margin-top:20px">
-        <div><h3>القدرات</h3><div id="capabilities" class="chips"></div></div>
-        <div><h3>القنوات المطلوبة</h3><div id="channels" class="chips"></div></div>
+        <div>
+          <h3>القدرات</h3>
+          <p class="muted">عدّل القدرات مثل ما بدك قبل الحفظ.</p>
+          <div id="capabilities" class="chips"></div>
+        </div>
+        <div>
+          <h3>القنوات</h3>
+          <p class="muted">اختار وين بدك الموظف يشتغل. إذا بدك ياه شخصي إلك داخل Xvond اختار Xvond Workspace.</p>
+          <div id="channels" class="chips"></div>
+        </div>
       </div>
       <div style="margin-top:20px"><h3>الخطوات الناقصة</h3><div id="missing" class="muted"></div></div>
+      <div class="note muted">تقدر تحفظ الموظف Draft مجانًا. الاشتراك مطلوب فقط عند تشغيل AI فعليًا أو إطلاق الموظف.</div>
       <div class="row" style="margin-top:22px">
-        <button id="create-btn">أنشئ موظفي</button>
+        <button id="create-btn">احفظ الموظف</button>
         <button id="edit-btn" class="secondary">عدّل الوصف</button>
       </div>
       <div id="create-error" class="status"></div>
     </section>
 
     <section id="auth-card" class="card hidden">
-      <h2>سجّل دخول حتى ننشئ الموظف</h2>
+      <h2>سجّل دخول حتى نحفظ الموظف</h2>
       <p class="muted">الوصف والاختيارات محفوظة. ما رح تعيد شي بعد تسجيل الدخول.</p>
       <div class="auth-tabs">
         <button id="login-tab" class="active">تسجيل دخول</button>
@@ -52,21 +61,21 @@
       <div id="login-form">
         <input id="login-email" class="ltr" type="email" placeholder="Email">
         <input id="login-password" class="ltr" type="password" placeholder="Password" style="margin-top:10px">
-        <button id="login-btn" style="margin-top:12px">تسجيل دخول وإنشاء الموظف</button>
+        <button id="login-btn" style="margin-top:12px">تسجيل دخول وحفظ الموظف</button>
       </div>
       <div id="signup-form" class="hidden">
         <input id="signup-name" placeholder="اسمك">
         <input id="signup-workspace" placeholder="اسم الشركة أو مساحة العمل (اختياري)" style="margin-top:10px">
         <input id="signup-email" class="ltr" type="email" placeholder="Email" style="margin-top:10px">
         <input id="signup-password" class="ltr" type="password" placeholder="Password" style="margin-top:10px">
-        <button id="signup-btn" style="margin-top:12px">إنشاء حساب وإنشاء الموظف</button>
+        <button id="signup-btn" style="margin-top:12px">إنشاء حساب وحفظ الموظف</button>
       </div>
       <div id="auth-error" class="status"></div>
     </section>
 
     <section id="success-card" class="card success hidden">
       <h2>موظفك صار Draft</h2>
-      <p>انحفظ الموظف بأمان ولسا مو Live على أي قناة. كمل الإعداد والتجربة من مساحة العمل.</p>
+      <p>انحفظ الموظف مجانًا ولسا ما استخدم أي AI مدفوع. وقت بدك تجربه أو تطلقه فعليًا، ساعتها لازم تشترك.</p>
       <a href="/customer-ui"><button>افتح مساحة العمل</button></a>
     </section>
   </main>
@@ -78,7 +87,15 @@
     booking: "المواعيد", orders: "الطلبات", web_research: "البحث", email: "الإيميل",
     files: "الملفات", content: "المحتوى", scheduling: "الجدولة", custom_task: "مهام مخصصة"
   };
-  const CHANNEL_LABELS = {xvond:"داخل Xvond",website:"الموقع",whatsapp:"واتساب",instagram:"إنستغرام",email:"الإيميل"};
+  const CHANNEL_LABELS = {
+    xvond: "Xvond Workspace",
+    website: "الموقع",
+    whatsapp: "واتساب",
+    instagram: "إنستغرام",
+    email: "الإيميل"
+  };
+  const CAPABILITY_OPTIONS = Object.keys(CAPABILITY_LABELS);
+  const CHANNEL_OPTIONS = Object.keys(CHANNEL_LABELS);
   let preview = null;
 
   const $ = id => document.getElementById(id);
@@ -95,8 +112,9 @@
   }));
   const loadDraft = () => { try { return JSON.parse(sessionStorage.getItem("xvond_employee_draft") || "null"); } catch { return null; } };
 
-  function renderOptions(target, name, values, labels) {
-    $(target).innerHTML = values.map(v => `<label class="chip"><input type="checkbox" name="${name}" value="${v}" checked> ${labels[v] || v}</label>`).join("");
+  function renderOptions(target, name, values, labels, selectedValues=[]) {
+    const selected = new Set(selectedValues || []);
+    $(target).innerHTML = values.map(v => `<label class="chip"><input type="checkbox" name="${name}" value="${v}" ${selected.has(v) ? "checked" : ""}> ${labels[v] || v}</label>`).join("");
   }
 
   async function doPreview() {
@@ -112,8 +130,8 @@
       preview = await response.json();
       const bp = preview.blueprint || {};
       $("employee-name").value = bp.name || "My AI Employee";
-      renderOptions("capabilities", "capability", bp.capabilities || [], CAPABILITY_LABELS);
-      renderOptions("channels", "channel", bp.channels || [], CHANNEL_LABELS);
+      renderOptions("capabilities", "capability", CAPABILITY_OPTIONS, CAPABILITY_LABELS, bp.capabilities || []);
+      renderOptions("channels", "channel", CHANNEL_OPTIONS, CHANNEL_LABELS, bp.channels || []);
       $("missing").textContent = (bp.missing_information || []).map(x => x.replaceAll("_", " ")).join(" • ") || "ما في معلومات إضافية مطلوبة حاليًا.";
       show("review-card", true); show("auth-card", false); show("success-card", false);
       $("review-card").scrollIntoView({behavior:"smooth"});
