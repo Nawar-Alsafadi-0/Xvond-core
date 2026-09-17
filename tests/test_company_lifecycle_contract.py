@@ -33,7 +33,10 @@ def test_login_and_session_dependencies_use_lifecycle_portal_gate():
 
 def test_company_creation_starts_onboarding_with_runtime_off():
     source = inspect.getsource(admin.create_company)
-    assert 'Company(name=name, active=False, lifecycle_status="onboarding")' in source
+    assert "Company(" in source
+    assert "active=False" in source
+    assert 'lifecycle_status="onboarding"' in source
+    assert 'onboarding_source="managed"' in source
     assert '"initial_state": "onboarding"' in source
     assert '"runtime_active": False' in source
 
