@@ -2,27 +2,11 @@ from inspect import signature
 from pathlib import Path
 
 from backend.app.api.customer_employee_builder import SELF_SERVICE_FREE_TEST_MESSAGES
-from backend.app.api.public_employee_builder import (
-    PublicEmployeePreviewRequest,
-    preview_employee,
-)
 from backend.app.models.company import Company
 from backend.app.modules.ai_agent.factory import AgentFactory
 
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_public_preview_is_rule_based_and_free():
-    result = preview_employee(
-        PublicEmployeePreviewRequest(
-            description="بدي موظف يرد على العملاء ويتابع المبيعات على واتساب"
-        )
-    )
-    assert result["lifecycle"] == "preview"
-    assert result["ai_usage"] is False
-    assert "customer_support" in result["blueprint"]["capabilities"]
-    assert "whatsapp" in result["blueprint"]["channels"]
 
 
 def test_self_service_build_has_zero_free_ai_messages_before_subscription():
@@ -40,18 +24,20 @@ def test_agent_factory_keeps_capacity_enforcement_by_default():
     assert parameter.default is True
 
 
-def test_public_builder_gates_creation_not_preview():
+def test_public_builder_creates_directly_without_preview():
     html = (ROOT / "frontend" / "public" / "employee-builder.html").read_text(
         encoding="utf-8"
     )
-    assert "/public/employee-builder/preview" in html
+    assert "/public/employee-builder/preview" not in html
+    assert "preview-btn" not in html
+    assert "review-card" not in html
     assert "/customer/employee-builder/create" in html
     assert "/auth/login" in html
     assert "/auth/signup" in html
     assert "sessionStorage" in html
     assert "Xvond Workspace" in html
-    assert "مرحلة البناء مجانية" in html
-    assert "ai_usage" not in html  # UI never calls an AI endpoint for preview.
+    assert "إنشاء الموظف" in html
+    assert "الاشتراك مطلوب قبل أول Test" in html
 
 
 def test_customer_portal_manages_existing_employee_instead_of_building_one():
@@ -73,7 +59,6 @@ def test_xvond_com_nginx_exposes_public_builder_without_replacing_landing():
     assert "Keep the existing landing" in nginx
     assert "|build" in nginx
     assert "public/" in nginx
-    assert "|public|" in nginx
 
 
 def test_signup_and_admin_source_separation_are_explicit():
