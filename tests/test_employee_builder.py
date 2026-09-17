@@ -1,6 +1,7 @@
 from backend.app.modules.ai_agent.employee_builder import (
     blueprint_readiness,
     build_employee_blueprint,
+    missing_information_for,
     runtime_channels_for,
     runtime_tools_for,
 )
@@ -68,3 +69,14 @@ def test_requested_channels_are_not_created_as_runtime_placeholders():
     assert runtime_channels_for(blueprint.channels) == ()
     assert "connect_whatsapp" in blueprint.missing_information
     assert "connect_website" in blueprint.missing_information
+
+
+def test_setup_requirements_follow_final_user_selections():
+    missing = missing_information_for(
+        ("content", "scheduling"),
+        ("xvond", "email"),
+    )
+
+    assert missing == ("automation", "connect_email")
+    assert "knowledge" not in missing
+    assert "business_actions" not in missing
