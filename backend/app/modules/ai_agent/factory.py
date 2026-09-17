@@ -35,8 +35,12 @@ class AgentFactory:
         settings: dict,
         capabilities: dict,
         customer_controls: dict,
+        enforce_capacity: bool = True,
     ) -> AIAgent:
-        self.check_capacity(db, company_id)
+        # Self-service onboarding may create one disabled draft before purchase.
+        # Runtime activation and paid capacity remain enforced elsewhere.
+        if enforce_capacity:
+            self.check_capacity(db, company_id)
         self.validate_agent_identity(db, name, system_prompt, provider, model)
 
         agent = AIAgent(
