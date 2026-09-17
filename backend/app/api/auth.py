@@ -23,6 +23,7 @@ from backend.app.core.security import (
     verify_password,
 )
 from backend.app.models.company import Company
+from backend.app.models.company_module import CompanyModule
 from backend.app.models.password_reset import PasswordResetCode
 from backend.app.models.user import User
 
@@ -33,6 +34,13 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class SignupRequest(BaseModel):
+    full_name: str
+    email: str
+    password: str
+    workspace_name: str | None = None
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -77,6 +85,17 @@ def _clear_session_cookie(response: Response) -> None:
     )
 
 
+def _auth_payload(user: User, company: Company | None = None) -> dict:
+    return {
+        "id": user.id,
+        "company_id": user.company_id,
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": user.role,
+        "onboarding_source": getattr(company, "onboarding_source", None),
+    }
+
+
 @router.post("/login")
 def login(data: LoginRequest, response: Response):
     db = SessionLocal()
@@ -91,6 +110,7 @@ def login(data: LoginRequest, response: Response):
         ):
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
+        company = None
         if user.company_id is not None:
             company = db.query(Company).filter(Company.id == user.company_id).first()
             if company is None:
@@ -103,14 +123,72 @@ def login(data: LoginRequest, response: Response):
         return {
             "access_token": token,
             "token_type": "bearer",
-            "user": {
-                "id": user.id,
-                "company_id": user.company_id,
-                "email": user.email,
-                "full_name": user.full_name,
-                "role": user.role,
-            },
+            "user": _auth_payload(user, company),
         }
+    finally:
+        db.close()
+
+
+@router.post("/signup")
+def signup(data: SignupRequest, response: Response):
+    """Create a self-service workspace. No AI employee or paid usage starts here."""
+    email = data.email.strip().lower()
+    full_name = data.full_name.strip()
+    workspace_name = (data.workspace_name or "").strip() or full_name
+
+    if not full_name:
+        raise HTTPException(status_code=400, detail="Full name is required")
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email is required")
+    if not workspace_name:
+        raise HTTPException(status_code=400, detail="Workspace name is required")
+    _validate_new_password(data.password)
+
+    db = SessionLocal()
+    try:
+        if db.query(User).filter(User.email == email).first() is not None:
+            raise HTTPException(status_code=409, detail="An account with this email already exists")
+
+        company = Company(
+            name=workspace_name[:200],
+            active=False,
+            lifecycle_status="onboarding",
+            onboarding_source="self_service",
+        )
+        db.add(company)
+        db.flush()
+
+        owner = User(
+            company_id=company.id,
+            email=email,
+            full_name=full_name,
+            password_hash=hash_password(data.password),
+            role="owner",
+            active=True,
+        )
+        db.add(owner)
+        db.add(CompanyModule(company_id=company.id, module_name="ai_agent", enabled=True))
+        db.flush()
+
+        token = create_access_token(owner.id, owner.token_version)
+        db.commit()
+        _set_session_cookie(response, token)
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "company": {
+                "id": company.id,
+                "name": company.name,
+                "onboarding_source": company.onboarding_source,
+            },
+            "user": _auth_payload(owner, company),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
