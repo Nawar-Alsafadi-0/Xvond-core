@@ -1,25 +1,28 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from backend.app.core.ai.engine import ProviderExecutionError, ai_engine
+from backend.app.core.ai.provider_policy import runtime_selections
 from backend.app.core.database.connection import SessionLocal
 from backend.app.core.dependencies import require_customer_manager
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.employee_builder import (
+    ACTION_CAPABILITIES,
     EmployeeBlueprint,
     blueprint_readiness,
     build_employee_blueprint,
     build_employee_system_prompt,
-    runtime_channels_for,
     runtime_tools_for,
     sanitize_capabilities,
     sanitize_channels,
 )
 from backend.app.modules.ai_agent.factory import agent_factory
 from backend.app.modules.ai_agent.factory_models import AgentConfig
+from backend.app.modules.ai_agent.models import AIAgent, AIUsage
 from backend.app.modules.ai_agent.profile_models import AIAgentProfile
-from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.providers.models import (
     AIModelRecord,
     AIProviderRecord,
@@ -42,6 +45,10 @@ class EmployeeBuilderCreateRequest(EmployeeBuilderPreviewRequest):
     name: str | None = Field(default=None, max_length=200)
     capabilities: list[str] | None = None
     channels: list[str] | None = None
+
+
+class EmployeeBuilderTestRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=12000)
 
 
 DEFAULT_CUSTOMER_CONTROLS = {
@@ -108,22 +115,25 @@ def _build_final_blueprint(data: EmployeeBuilderCreateRequest) -> EmployeeBluepr
     channels = sanitize_channels(data.channels, base.channels)
 
     permissions = {
-        capability: base.permissions.get(capability, "automatic")
+        capability: ("ask_before_action" if capability in ACTION_CAPABILITIES else "automatic")
         for capability in capabilities
     }
-    action_capabilities = {"sales", "lead_capture", "booking", "orders", "email", "scheduling"}
-    for capability in capabilities:
-        if capability in action_capabilities:
-            permissions[capability] = "ask_before_action"
 
     missing = list(base.missing_information)
+    if any(item in capabilities for item in ("customer_support", "sales", "lead_capture", "booking", "orders", "files")):
+        if "knowledge" not in missing:
+            missing.append("knowledge")
+    if any(item in capabilities for item in ("lead_capture", "booking", "orders")):
+        if "business_actions" not in missing:
+            missing.append("business_actions")
     for channel in channels:
         marker = f"connect_{channel}"
-        if channel not in {"xvond", "website"} and marker not in missing:
+        if channel != "xvond" and marker not in missing:
             missing.append(marker)
 
+    name = (data.name or base.name).strip() or base.name
     return EmployeeBlueprint(
-        name=(data.name or base.name).strip() or base.name,
+        name=name,
         description=base.description,
         audience=base.audience,
         capabilities=capabilities,
@@ -131,6 +141,16 @@ def _build_final_blueprint(data: EmployeeBuilderCreateRequest) -> EmployeeBluepr
         permissions=permissions,
         missing_information=tuple(dict.fromkeys(missing)),
     )
+
+
+def _company_or_404(db, company_id: int) -> Company:
+    company = db.query(Company).filter(
+        Company.id == company_id,
+        Company.active.is_(True),
+    ).first()
+    if company is None:
+        raise HTTPException(404, "Company workspace not found")
+    return company
 
 
 @router.post("/preview")
@@ -157,13 +177,7 @@ def create_employee(
 ):
     db = SessionLocal()
     try:
-        company = db.query(Company).filter(
-            Company.id == current_user.company_id,
-            Company.active.is_(True),
-        ).first()
-        if company is None:
-            raise HTTPException(404, "Company workspace not found")
-
+        company = _company_or_404(db, current_user.company_id)
         try:
             blueprint = _build_final_blueprint(data)
         except ValueError as exc:
@@ -185,7 +199,10 @@ def create_employee(
             "dialect": "auto",
             "response_length": "concise",
             "clarification_style": "smart",
-            "off_topic_behavior": "brief_friendly" if blueprint.audience == "personal" else "business_redirect",
+            "off_topic_behavior": (
+                "brief_friendly" if blueprint.audience == "personal"
+                else "business_redirect"
+            ),
         }
         capability_flags = {item: True for item in blueprint.capabilities}
 
@@ -194,7 +211,10 @@ def create_employee(
             company_id=company.id,
             name=blueprint.name,
             description=blueprint.description,
-            system_prompt=build_employee_system_prompt(owner_name=company.name, blueprint=blueprint),
+            system_prompt=build_employee_system_prompt(
+                owner_name=company.name,
+                blueprint=blueprint,
+            ),
             provider=provider,
             model=model,
             agent_type="employee",
@@ -226,17 +246,6 @@ def create_employee(
                 )
             )
 
-        for channel_type in runtime_channels_for(blueprint.channels):
-            db.add(
-                AgentChannel(
-                    company_id=company.id,
-                    agent_id=agent.id,
-                    channel_type=channel_type,
-                    config={"created_by": "employee_builder_v1"},
-                    enabled=False,
-                )
-            )
-
         db.commit()
         db.refresh(agent)
         config = db.query(AgentConfig).filter(AgentConfig.agent_id == agent.id).first()
@@ -256,6 +265,94 @@ def create_employee(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/test")
+def test_draft_employee(
+    agent_id: int,
+    data: EmployeeBuilderTestRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Safely test a created employee without enabling channels or tools."""
+    db = SessionLocal()
+    try:
+        _company_or_404(db, current_user.company_id)
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == agent_id,
+            AIAgent.company_id == current_user.company_id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        config = db.query(AgentConfig).filter(AgentConfig.agent_id == agent.id).first()
+        if config is None or config.agent_type != "employee":
+            raise HTTPException(404, "Employee Builder employee not found")
+
+        limits_service.check_token_limit(db, current_user.company_id)
+        selections = runtime_selections(
+            db,
+            current_user.company_id,
+            agent.provider,
+            agent.model,
+            message=data.message,
+        )
+        if not selections:
+            raise HTTPException(503, "No eligible AI provider/model is available")
+
+        response = None
+        selected = None
+        for candidate in selections:
+            try:
+                response = ai_engine.generate(
+                    provider_name=candidate.provider,
+                    system_prompt=agent.system_prompt,
+                    user_message=data.message,
+                    model=candidate.model,
+                    tools=None,
+                )
+                selected = candidate
+                break
+            except ProviderExecutionError:
+                continue
+
+        if response is None or selected is None:
+            raise HTTPException(503, "AI provider is temporarily unavailable")
+
+        db.add(
+            AIUsage(
+                company_id=current_user.company_id,
+                agent_id=agent.id,
+                provider=selected.provider,
+                model=selected.model,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                total_tokens=response.total_tokens,
+                provider_cost=response.cost,
+                status="success",
+                latency_ms=0,
+            )
+        )
+        db.commit()
+        return {
+            "agent_id": agent.id,
+            "lifecycle": "draft" if not agent.enabled else "live",
+            "message": response.text,
+            "usage": {
+                "input_tokens": response.input_tokens,
+                "output_tokens": response.output_tokens,
+                "total_tokens": response.total_tokens,
+            },
+            "tools_used": False,
+            "channels_used": False,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         raise
