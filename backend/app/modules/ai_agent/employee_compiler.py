@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from typing import Any
 
 
@@ -227,6 +229,14 @@ def _normalized_primitives(values: Any, *, fallback: list[str]) -> list[str]:
     return result or list(fallback)
 
 
+def normalize_requirement_key(value: Any) -> str:
+    key = _bounded_text(value, limit=120).lower().replace(" ", "_")
+    if key and not re.fullmatch(r"[a-z0-9][a-z0-9_\-]{0,127}", key):
+        # Preserve novel non-English/punctuated keys through a stable wire-safe ID.
+        return "capability_" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
+    return key
+
+
 def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
     role = _bounded_text(payload.get("role"), limit=160) or "AI Employee"
     scope = str(payload.get("scope") or "hybrid").strip().lower()
@@ -255,7 +265,7 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
     for item in payload.get("requirements") or []:
         if not isinstance(item, dict):
             continue
-        key = _bounded_text(item.get("key"), limit=120).lower().replace(" ", "_")
+        key = normalize_requirement_key(item.get("key"))
         if not key or key in seen_keys:
             continue
         seen_keys.add(key)
@@ -284,6 +294,14 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
                 item.get("primitives"),
                 fallback=["workflow_engine"],
             )
+        customer_inputs = _bounded_string_list(item.get("customer_inputs"))
+        # Explicit customer prerequisites take precedence over build defaults.
+        if requires_connection:
+            status = "connection_required"
+            delivery_mode = "connect_and_compose"
+        elif customer_inputs and status == "xvond_build":
+            status = "customer_input_required"
+            delivery_mode = "configure"
         requirements.append({
             "key": key,
             "kind": kind,
@@ -291,7 +309,7 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
             "status": status,
             "delivery_mode": delivery_mode,
             "primitives": primitives,
-            "customer_inputs": _bounded_string_list(item.get("customer_inputs")),
+            "customer_inputs": customer_inputs,
             "known_to_xvond": bool(catalog),
         })
         if len(requirements) >= 50:
@@ -385,6 +403,7 @@ OPERATING RULES:
 - Use only tools, integrations, channels, automations and knowledge that are actually attached and available in the current runtime.
 - connection_required means the owner must connect or authorize an external account. customer_input_required means the owner must provide required data or files.
 - xvond_build means Xvond owns the build/provisioning work. Do not describe it as unsupported. Do not claim an external action succeeded until its runtime capability is actually provisioned and returns success.
+- xvond_managed means an action contract is stored, not that its execution adapter is ready. adapter_required means Xvond still needs to configure execution. Creating a contract does not run tasks, install schedules, connect accounts or perform external actions.
 - Follow the permission mode for each action. For ask_before actions, obtain approval before execution.
 - Never invent emails, bookings, orders, prices, account data, analytics, files, external results or successful publishing.
 - Preserve context across the employee's connected channels and avoid asking the owner to repeat known information.

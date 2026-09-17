@@ -28,6 +28,7 @@ from backend.app.modules.ai_agent.employee_compiler import (
     build_compiler_user_message,
     parse_compiler_response,
 )
+from backend.app.modules.ai_agent.employee_capability_builder import provision_compiled_capabilities
 from backend.app.modules.ai_agent.factory import agent_factory
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
@@ -188,12 +189,37 @@ def _record_ai_usage(db, *, company_id: int, agent_id: int, selected, response):
     )
 
 
+def _store_provisioned_spec(
+    db, *, company_id: int, agent: AIAgent, config: AgentConfig,
+    settings: dict, builder: dict, spec: dict,
+) -> dict:
+    compiled_spec, delivery = provision_compiled_capabilities(db, agent_id=agent.id, spec=spec)
+    builder["compiled_spec"] = compiled_spec
+    builder["delivery"] = delivery
+    builder["missing_information"] = list(compiled_spec.get("setup_required") or [])
+    settings["employee_builder"] = builder
+    config.settings = settings
+    company = db.query(Company).filter(Company.id == company_id).first()
+    agent.system_prompt = build_compiled_employee_system_prompt(
+        owner_name=company.name if company else "the owner",
+        spec=compiled_spec,
+    )
+    # Flush the spec and contracts together; the caller owns commit/rollback.
+    db.flush()
+    return compiled_spec
+
+
 def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: AgentConfig) -> dict:
+    # Serialize compilation/provisioning, including retries of a cached spec.
+    db.refresh(config, with_for_update=True)
     settings = dict(config.settings or {})
     builder = dict(settings.get("employee_builder") or {})
     existing = builder.get("compiled_spec")
     if isinstance(existing, dict) and existing.get("job_brief"):
-        return existing
+        return _store_provisioned_spec(
+            db, company_id=company_id, agent=agent, config=config,
+            settings=settings, builder=builder, spec=existing,
+        )
 
     job_brief = str(builder.get("source_description") or agent.description or "").strip()
     if not job_brief:
@@ -239,18 +265,12 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
     if response is None or selected is None or compiled_spec is None:
         raise HTTPException(502, "AI employee compiler could not produce a valid specification")
 
-    builder["compiled_spec"] = compiled_spec
     builder["compiled_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     builder["compiler_provider"] = selected.provider
     builder["compiler_model"] = selected.model
-    builder["missing_information"] = list(compiled_spec.get("setup_required") or [])
-    settings["employee_builder"] = builder
-    config.settings = settings
-
-    company = db.query(Company).filter(Company.id == company_id).first()
-    agent.system_prompt = build_compiled_employee_system_prompt(
-        owner_name=company.name if company else "the owner",
-        spec=compiled_spec,
+    compiled_spec = _store_provisioned_spec(
+        db, company_id=company_id, agent=agent, config=config,
+        settings=settings, builder=builder, spec=compiled_spec,
     )
 
     _record_ai_usage(
@@ -476,14 +496,12 @@ def test_draft_employee(
         free_tests_remaining = None
         if has_entitlement:
             limits_service.check_token_limit(db, current_user.company_id)
-            builder = (config.settings or {}).get("employee_builder") or {}
-            if not isinstance(builder.get("compiled_spec"), dict):
-                _compile_employee_spec(
-                    db,
-                    company_id=current_user.company_id,
-                    agent=agent,
-                    config=config,
-                )
+            _compile_employee_spec(
+                db,
+                company_id=current_user.company_id,
+                agent=agent,
+                config=config,
+            )
         elif is_self_service:
             used = db.query(AIUsage).filter(
                 AIUsage.company_id == current_user.company_id,

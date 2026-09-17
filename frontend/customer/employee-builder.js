@@ -62,7 +62,7 @@
     function requirementStatusLabel(item) {
         const status = String(item?.status || "xvond_build");
         if (status === "available") return "ready";
-        if (status === "xvond_managed") return "built by Xvond";
+        if (status === "xvond_managed") return item.execution_status === "disabled" ? "action paused" : "execution setup pending";
         if (status === "xvond_build") return "Xvond builds this";
         if (status === "connection_required") return "connect account";
         if (status === "customer_input_required") return "add required data";
@@ -73,7 +73,7 @@
         if (!(items || []).length) return '<p class="muted">No extra systems were identified.</p>';
         return `<div class="employee-builder-missing">${items.map(item => {
             const status = String(item.status || "xvond_build");
-            const tone = ["available", "xvond_managed"].includes(status) ? "ready" : "setup";
+            const tone = status === "available" ? "ready" : "setup";
             const label = `${String(item.key || "requirement").replaceAll("_", " ")} · ${requirementStatusLabel(item)}`;
             return badge(label, tone);
         }).join("")}</div>`;
@@ -106,7 +106,7 @@
                 <div class="employee-builder-section">
                     <h3>Systems, tools and connections</h3>
                     ${requirementMarkup(spec.requirements)}
-                    <p class="muted">Xvond composes missing digital capabilities through its managed workflow layer. You only need to connect external accounts, grant permissions or provide required data when the job depends on them.</p>
+                    <p class="muted">Xvond prepares the action plan and handles execution setup. An action plan alone does not mean tasks are running. You only need to connect external accounts, grant permissions or provide required data when the job depends on them.</p>
                 </div>
 
                 <div class="employee-builder-section">
@@ -128,6 +128,7 @@
         const target = root();
         if (!target) return;
         const lifecycleTone = employee.enabled ? "ready" : "setup";
+        const provisioned = employee.compiled_spec?.delivery?.provisioning_version === 1;
         const channels = (employee.requested_channels || []).map(item => badge(labelFor(CHANNELS, item))).join("") || '<span class="muted">No channel selected yet.</span>';
 
         target.innerHTML = `
@@ -154,11 +155,11 @@
                         </div>
                         <div>
                             <h3>Preparation</h3>
-                            <div class="employee-builder-missing">${badge(employee.compiled ? "Prepared" : "Job brief saved", employee.compiled ? "ready" : "setup")}</div>
+                            <div class="employee-builder-missing">${badge(provisioned ? "Action plan prepared" : "Preparation pending", provisioned ? "ready" : "setup")}</div>
                         </div>
                     </div>
 
-                    ${employee.compiled ? "" : employee.can_compile ? `
+                    ${provisioned ? "" : employee.can_compile ? `
                         <div class="employee-builder-section">
                             <h3>Build this employee</h3>
                             <p class="muted">Xvond will understand the complete job, break it into tasks, compose any missing digital capabilities and identify only the external accounts, permissions or data it needs from you.</p>

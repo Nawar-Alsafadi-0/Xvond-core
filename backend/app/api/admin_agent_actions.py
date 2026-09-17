@@ -601,6 +601,8 @@ def _readiness(action: dict, enabled_modules: set[str] | None = None) -> list[st
         issues.append(f"Enable {BUSINESS_MODULES.get(module, module)} for this company")
 
     destination = action.get("destination") or {}
+    if destination.get("type") == "workflow_engine":
+        issues.append("Xvond must configure an execution adapter for this generated action contract")
     if destination.get("type") == "unconfigured":
         issues.append("Choose a real destination")
     if destination.get("type") == "integration" and not destination.get("integration_id"):

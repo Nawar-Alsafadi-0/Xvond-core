@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from backend.app.core.config_secrets import reveal_config
+from backend.app.modules.ai_agent.employee_compiler import normalize_requirement_key
 from backend.app.modules.tools.models import AgentToolAssignment
 
 
@@ -11,20 +12,25 @@ BUILD_STATUS = "xvond_build"
 CUSTOMER_STATUSES = {"connection_required", "customer_input_required"}
 
 
-def _permission_requires_confirmation(spec: dict, requirement: dict) -> bool:
-    """Default consequential generated actions to approval unless explicitly automatic."""
-    purpose = str(requirement.get("purpose") or requirement.get("key") or "").lower()
-    automatic_matches = []
+def _permission_mode(spec: dict, requirement: dict) -> str:
+    """Only an exact capability/purpose rule can grant automatic execution."""
+    targets = {
+        str(requirement.get(field) or "").strip().lower().replace("_", " ")
+        for field in ("purpose", "key")
+    } - {""}
+    modes = []
     for item in spec.get("permissions") or []:
         if not isinstance(item, dict):
             continue
-        action = str(item.get("action") or "").strip().lower()
+        action = str(item.get("action") or "").strip().lower().replace("_", " ")
         mode = str(item.get("mode") or "ask_before").strip().lower()
         if not action:
             continue
-        if action in purpose or any(token and token in purpose for token in action.split()):
-            automatic_matches.append(mode == "automatic")
-    return not (automatic_matches and all(automatic_matches))
+        if action in targets:
+            modes.append(mode)
+    if "never" in modes:
+        return "never"
+    return "automatic" if modes and all(mode == "automatic" for mode in modes) else "ask_before"
 
 
 def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
@@ -41,12 +47,12 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
         if str(item).strip()
     ]
     return {
-        "enabled": True,
+        "enabled": _permission_mode(spec, requirement) != "never",
         "label": purpose[:200] or key,
         "description": purpose[:1000],
         "module": "tools",
         "fields": [],
-        "confirmation_required": _permission_requires_confirmation(spec, requirement),
+        "confirmation_required": _permission_mode(spec, requirement) != "automatic",
         "destination": {
             "type": "workflow_engine",
             "capability_key": key,
@@ -65,7 +71,7 @@ def _refresh_delivery_fields(spec: dict) -> dict:
     spec["ready_requirements"] = [
         item.get("key")
         for item in requirements
-        if item.get("status") in {"available", MANAGED_STATUS}
+        if item.get("status") == "available"
     ]
     spec["build_required"] = [
         item.get("key") for item in requirements if item.get("status") == BUILD_STATUS
@@ -86,51 +92,78 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
     """
     prepared = deepcopy(spec)
     requirements = prepared.get("requirements") or []
-    generated_actions: dict[str, dict] = {}
+    assignment = (
+        db.query(AgentToolAssignment)
+        .filter(
+            AgentToolAssignment.agent_id == agent_id,
+            AgentToolAssignment.tool_name == "action_request",
+        )
+        .with_for_update()
+        .first()
+    )
+    config = reveal_config(assignment.config) if assignment is not None else {}
+    config = dict(config or {})
+    actions = dict(config.get("actions") or {})
+    action_plan = {}
+    changed = False
 
     for item in requirements:
-        if not isinstance(item, dict) or item.get("status") != BUILD_STATUS:
+        if not isinstance(item, dict):
             continue
-        key = str(item.get("key") or "").strip()
+        # Upgrade cached pre-builder specs without another paid AI call.
+        aliases = {
+            "custom_required": BUILD_STATUS,
+            "unsupported": BUILD_STATUS,
+            "customer_connection": "connection_required",
+            "customer_input": "customer_input_required",
+        }
+        item["status"] = aliases.get(item.get("status"), item.get("status"))
+        if item.get("status") not in {BUILD_STATUS, MANAGED_STATUS}:
+            continue
+        key = normalize_requirement_key(item.get("key"))
         if not key:
             continue
-        generated_actions[key] = build_managed_action_config(requirement=item, spec=prepared)
+        item["key"] = key
+        if not isinstance(actions.get(key), dict):
+            actions[key] = build_managed_action_config(requirement=item, spec=prepared)
+            changed = True
+        # Existing operator configuration, permissions and disable switches win.
+        action = actions[key]
+        execution_status = (
+            "disabled" if not action.get("enabled", True) or (assignment is not None and not assignment.enabled)
+            else "adapter_required" if (action.get("destination") or {}).get("type") == "workflow_engine"
+            else "runtime_validation_required"
+        )
         item["status"] = MANAGED_STATUS
         item["provisioned"] = True
         item["delivery_mode"] = "compose"
+        item["execution_status"] = execution_status
+        action_plan[key] = {
+            "tool_name": "action_request",
+            "action_type": key,
+            "operations": [f"{key}.{operation}" for operation in ("check_availability", "execute", "cancel")],
+            "status": "contract_provisioned",
+            "execution_status": execution_status,
+            "source": "generated" if action.get("xvond_generated") else "existing",
+        }
 
-    if generated_actions:
-        assignment = (
-            db.query(AgentToolAssignment)
-            .filter(
-                AgentToolAssignment.agent_id == agent_id,
-                AgentToolAssignment.tool_name == "action_request",
-            )
-            .first()
-        )
+    if changed:
+        config["actions"] = actions
         if assignment is None:
             assignment = AgentToolAssignment(
                 agent_id=agent_id,
                 tool_name="action_request",
-                config={"actions": generated_actions},
+                config=config,
                 enabled=True,
             )
             db.add(assignment)
         else:
-            existing = reveal_config(assignment.config) or {}
-            config = dict(existing)
-            actions = dict(config.get("actions") or {})
-            for key, value in generated_actions.items():
-                current = actions.get(key)
-                if isinstance(current, dict) and not current.get("xvond_generated"):
-                    continue
-                actions[key] = value
-            config["actions"] = actions
             assignment.config = config
-            assignment.enabled = True
 
     _refresh_delivery_fields(prepared)
     delivery = {
+        "provisioning_version": 1,
+        "action_plan": action_plan,
         "managed_capabilities": [
             item.get("key")
             for item in requirements
