@@ -64,7 +64,8 @@ def test_customer_portal_treats_job_brief_as_source_of_truth():
     assert "Xvond Workspace" in source
     assert "Job brief" in source
     assert "source of truth" in source
-    assert "do not limit" in source
+    assert "instead of limiting it to a predefined agent type" in source
+    assert "Xvond builds this" in source
     assert "Capabilities" not in source
     assert "/customer/employee-builder/create" not in source
     assert "/customer/employee-builder/preview" not in source
