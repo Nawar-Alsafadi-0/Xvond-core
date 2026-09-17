@@ -23,13 +23,8 @@ from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
 from backend.app.modules.ai_agent.profile_models import AIAgentProfile
 from backend.app.modules.billing.limits import limits_service
-from backend.app.modules.providers.models import (
-    AIModelRecord,
-    AIProviderRecord,
-    CompanyAIProfile,
-)
+from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord, CompanyAIProfile
 from backend.app.modules.tools.models import AgentToolAssignment
-
 
 router = APIRouter(
     prefix="/customer/employee-builder",
@@ -74,6 +69,29 @@ def _ensure_module(db, company_id: int, name: str):
     return row
 
 
+def _company_or_404(db, company_id: int) -> Company:
+    company = db.query(Company).filter(
+        Company.id == company_id,
+        Company.active.is_(True),
+    ).first()
+    if company is None:
+        raise HTTPException(404, "Company workspace not found")
+    return company
+
+
+def _existing_employee(db, company_id: int) -> AIAgent | None:
+    return (
+        db.query(AIAgent)
+        .join(AgentConfig, AgentConfig.agent_id == AIAgent.id)
+        .filter(
+            AIAgent.company_id == company_id,
+            AgentConfig.agent_type == "employee",
+        )
+        .order_by(AIAgent.id.asc())
+        .first()
+    )
+
+
 def _select_model(db, company_id: int) -> tuple[str, str]:
     profile = db.query(CompanyAIProfile).filter(
         CompanyAIProfile.company_id == company_id
@@ -113,7 +131,6 @@ def _build_final_blueprint(data: EmployeeBuilderCreateRequest) -> EmployeeBluepr
     base = build_employee_blueprint(data.description)
     capabilities = sanitize_capabilities(data.capabilities, base.capabilities)
     channels = sanitize_channels(data.channels, base.channels)
-
     permissions = {
         capability: ("ask_before_action" if capability in ACTION_CAPABILITIES else "automatic")
         for capability in capabilities
@@ -131,9 +148,8 @@ def _build_final_blueprint(data: EmployeeBuilderCreateRequest) -> EmployeeBluepr
         if channel != "xvond" and marker not in missing:
             missing.append(marker)
 
-    name = (data.name or base.name).strip() or base.name
     return EmployeeBlueprint(
-        name=name,
+        name=(data.name or base.name).strip() or base.name,
         description=base.description,
         audience=base.audience,
         capabilities=capabilities,
@@ -143,14 +159,30 @@ def _build_final_blueprint(data: EmployeeBuilderCreateRequest) -> EmployeeBluepr
     )
 
 
-def _company_or_404(db, company_id: int) -> Company:
-    company = db.query(Company).filter(
-        Company.id == company_id,
-        Company.active.is_(True),
-    ).first()
-    if company is None:
-        raise HTTPException(404, "Company workspace not found")
-    return company
+@router.get("/current")
+def current_employee(current_user: User = Depends(require_customer_manager)):
+    db = SessionLocal()
+    try:
+        agent = _existing_employee(db, current_user.company_id)
+        if agent is None:
+            return {"employee": None}
+        config = db.query(AgentConfig).filter(AgentConfig.agent_id == agent.id).first()
+        builder = ((config.settings or {}).get("employee_builder") or {}) if config else {}
+        return {
+            "employee": {
+                "agent_id": agent.id,
+                "name": agent.name,
+                "description": agent.description,
+                "enabled": agent.enabled,
+                "lifecycle": "live" if agent.enabled else "draft",
+                "capabilities": [key for key, value in (config.capabilities or {}).items() if value] if config else [],
+                "requested_channels": builder.get("requested_channels", []),
+                "permissions": builder.get("permissions", {}),
+                "missing_information": builder.get("missing_information", []),
+            }
+        }
+    finally:
+        db.close()
 
 
 @router.post("/preview")
@@ -178,6 +210,16 @@ def create_employee(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
+        existing = _existing_employee(db, company.id)
+        if existing is not None:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "This workspace already has an AI employee",
+                    "agent_id": existing.id,
+                },
+            )
+
         try:
             blueprint = _build_final_blueprint(data)
         except ValueError as exc:
@@ -199,27 +241,20 @@ def create_employee(
             "dialect": "auto",
             "response_length": "concise",
             "clarification_style": "smart",
-            "off_topic_behavior": (
-                "brief_friendly" if blueprint.audience == "personal"
-                else "business_redirect"
-            ),
+            "off_topic_behavior": "brief_friendly" if blueprint.audience == "personal" else "business_redirect",
         }
-        capability_flags = {item: True for item in blueprint.capabilities}
 
         agent = agent_factory.create_custom_agent(
             db=db,
             company_id=company.id,
             name=blueprint.name,
             description=blueprint.description,
-            system_prompt=build_employee_system_prompt(
-                owner_name=company.name,
-                blueprint=blueprint,
-            ),
+            system_prompt=build_employee_system_prompt(owner_name=company.name, blueprint=blueprint),
             provider=provider,
             model=model,
             agent_type="employee",
             settings=settings,
-            capabilities=capability_flags,
+            capabilities={item: True for item in blueprint.capabilities},
             customer_controls=dict(DEFAULT_CUSTOMER_CONTROLS),
         )
 
@@ -278,7 +313,7 @@ def test_draft_employee(
     data: EmployeeBuilderTestRequest,
     current_user: User = Depends(require_customer_manager),
 ):
-    """Safely test a created employee without enabling channels or tools."""
+    """Test the employee safely without enabling channels or executing tools."""
     db = SessionLocal()
     try:
         _company_or_404(db, current_user.company_id)
@@ -340,7 +375,7 @@ def test_draft_employee(
         db.commit()
         return {
             "agent_id": agent.id,
-            "lifecycle": "draft" if not agent.enabled else "live",
+            "lifecycle": "live" if agent.enabled else "draft",
             "message": response.text,
             "usage": {
                 "input_tokens": response.input_tokens,
