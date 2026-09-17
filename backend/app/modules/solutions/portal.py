@@ -68,12 +68,6 @@ SERVICE_PORTAL_REGISTRY = {
         "group": "AI Workforce",
         "items": [
             {
-                "id": "employee-builder",
-                "label": "My AI Employee",
-                "loader": "employee-builder",
-                "group": "AI Workforce",
-            },
-            {
                 "id": "agents",
                 "label": "AI Employees",
                 "loader": "agents",

@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -29,6 +29,15 @@ class Company(Base):
     lifecycle_status: Mapped[str] = mapped_column(
         String(30),
         default="onboarding",
+        nullable=False,
+        index=True,
+    )
+
+    # How this workspace entered Xvond. Existing/manual customers remain
+    # managed; public signup creates self_service workspaces.
+    onboarding_source: Mapped[str] = mapped_column(
+        String(30),
+        default="managed",
         nullable=False,
         index=True,
     )

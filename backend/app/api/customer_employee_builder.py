@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 
 from backend.app.core.ai.engine import ProviderExecutionError, ai_engine
 from backend.app.core.ai.provider_policy import runtime_selections
+from backend.app.core.company_lifecycle import portal_access_allowed
 from backend.app.core.database.connection import SessionLocal
 from backend.app.core.dependencies import require_customer_manager
 from backend.app.models.company import Company
@@ -32,6 +33,8 @@ router = APIRouter(
     prefix="/customer/employee-builder",
     tags=["Customer Employee Builder"],
 )
+
+SELF_SERVICE_FREE_TEST_MESSAGES = 5
 
 
 class EmployeeBuilderPreviewRequest(BaseModel):
@@ -72,13 +75,20 @@ def _ensure_module(db, company_id: int, name: str):
 
 
 def _company_or_404(db, company_id: int) -> Company:
-    company = db.query(Company).filter(
-        Company.id == company_id,
-        Company.active.is_(True),
-    ).first()
-    if company is None:
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if company is None or not portal_access_allowed(company):
         raise HTTPException(404, "Company workspace not found")
     return company
+
+
+def _has_ai_agents_entitlement(db, company_id: int) -> bool:
+    try:
+        service_limits.entitlement(db, company_id, "ai_agents")
+        return True
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            return False
+        raise
 
 
 def _existing_employee(db, company_id: int) -> AIAgent | None:
@@ -200,7 +210,10 @@ def create_employee(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        service_limits.entitlement(db, company.id, "ai_agents")
+        has_entitlement = _has_ai_agents_entitlement(db, company.id)
+        is_self_service = str(company.onboarding_source or "managed") == "self_service"
+        if not has_entitlement and not is_self_service:
+            service_limits.entitlement(db, company.id, "ai_agents")
 
         existing = _existing_employee(db, company.id)
         if existing is not None:
@@ -229,6 +242,7 @@ def create_employee(
                 "requested_channels": list(blueprint.channels),
                 "permissions": dict(blueprint.permissions),
                 "missing_information": list(blueprint.missing_information),
+                "onboarding_source": company.onboarding_source,
             },
             "dialect": "auto",
             "response_length": "concise",
@@ -248,6 +262,7 @@ def create_employee(
             settings=settings,
             capabilities={item: True for item in blueprint.capabilities},
             customer_controls=dict(DEFAULT_CUSTOMER_CONTROLS),
+            enforce_capacity=has_entitlement,
         )
 
         db.add(
@@ -282,6 +297,7 @@ def create_employee(
             "agent_id": agent.id,
             "name": agent.name,
             "enabled": agent.enabled,
+            "subscription_required_for_go_live": not has_entitlement,
             "blueprint": blueprint.as_dict(),
             "readiness": blueprint_readiness(blueprint),
             "config_id": config.id if config else None,
@@ -308,7 +324,7 @@ def test_draft_employee(
     """Test the employee safely without enabling channels or executing tools."""
     db = SessionLocal()
     try:
-        _company_or_404(db, current_user.company_id)
+        company = _company_or_404(db, current_user.company_id)
         agent = db.query(AIAgent).filter(
             AIAgent.id == agent_id,
             AIAgent.company_id == current_user.company_id,
@@ -320,7 +336,29 @@ def test_draft_employee(
         if config is None or config.agent_type != "employee":
             raise HTTPException(404, "Employee Builder employee not found")
 
-        limits_service.check_token_limit(db, current_user.company_id)
+        has_entitlement = _has_ai_agents_entitlement(db, current_user.company_id)
+        is_self_service = str(company.onboarding_source or "managed") == "self_service"
+        free_tests_remaining = None
+        if has_entitlement:
+            limits_service.check_token_limit(db, current_user.company_id)
+        elif is_self_service:
+            used = db.query(AIUsage).filter(
+                AIUsage.company_id == current_user.company_id,
+                AIUsage.agent_id == agent.id,
+                AIUsage.status == "success",
+            ).count()
+            if used >= SELF_SERVICE_FREE_TEST_MESSAGES:
+                raise HTTPException(
+                    403,
+                    detail={
+                        "message": "Free AI employee test limit reached",
+                        "subscription_required": True,
+                    },
+                )
+            free_tests_remaining = SELF_SERVICE_FREE_TEST_MESSAGES - used - 1
+        else:
+            service_limits.entitlement(db, current_user.company_id, "ai_agents")
+
         selections = runtime_selections(
             db,
             current_user.company_id,
@@ -374,6 +412,7 @@ def test_draft_employee(
                 "output_tokens": response.output_tokens,
                 "total_tokens": response.total_tokens,
             },
+            "free_tests_remaining": free_tests_remaining,
             "tools_used": False,
             "channels_used": False,
         }
