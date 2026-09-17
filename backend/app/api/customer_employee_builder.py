@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -20,6 +22,11 @@ from backend.app.modules.ai_agent.employee_builder import (
     sanitize_capabilities,
     sanitize_channels,
 )
+from backend.app.modules.ai_agent.employee_compiler import (
+    COMPILER_SYSTEM_PROMPT,
+    build_compiler_user_message,
+    parse_compiler_response,
+)
 from backend.app.modules.ai_agent.factory import agent_factory
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
@@ -37,11 +44,8 @@ router = APIRouter(
 SELF_SERVICE_FREE_TEST_MESSAGES = 0
 
 
-class EmployeeBuilderPreviewRequest(BaseModel):
+class EmployeeBuilderCreateRequest(BaseModel):
     description: str = Field(min_length=8, max_length=4000)
-
-
-class EmployeeBuilderCreateRequest(EmployeeBuilderPreviewRequest):
     name: str | None = Field(default=None, max_length=200)
     capabilities: list[str] | None = None
     channels: list[str] | None = None
@@ -104,6 +108,13 @@ def _existing_employee(db, company_id: int) -> AIAgent | None:
     )
 
 
+def _employee_config_or_404(db, agent: AIAgent) -> AgentConfig:
+    config = db.query(AgentConfig).filter(AgentConfig.agent_id == agent.id).first()
+    if config is None or config.agent_type != "employee":
+        raise HTTPException(404, "Employee Builder employee not found")
+    return config
+
+
 def _select_model(db, company_id: int) -> tuple[str, str]:
     profile = db.query(CompanyAIProfile).filter(
         CompanyAIProfile.company_id == company_id
@@ -159,6 +170,91 @@ def _build_final_blueprint(data: EmployeeBuilderCreateRequest) -> EmployeeBluepr
     )
 
 
+def _record_ai_usage(db, *, company_id: int, agent_id: int, selected, response):
+    db.add(
+        AIUsage(
+            company_id=company_id,
+            agent_id=agent_id,
+            provider=selected.provider,
+            model=selected.model,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            total_tokens=response.total_tokens,
+            provider_cost=response.cost,
+            status="success",
+            latency_ms=0,
+        )
+    )
+
+
+def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: AgentConfig) -> dict:
+    settings = dict(config.settings or {})
+    builder = dict(settings.get("employee_builder") or {})
+    existing = builder.get("compiled_spec")
+    if isinstance(existing, dict) and existing.get("job_brief"):
+        return existing
+
+    job_brief = str(builder.get("source_description") or agent.description or "").strip()
+    if not job_brief:
+        raise HTTPException(400, "Employee job brief is missing")
+    requested_channels = list(builder.get("requested_channels") or [])
+
+    selections = runtime_selections(
+        db,
+        company_id,
+        agent.provider,
+        agent.model,
+        message=job_brief,
+    )
+    if not selections:
+        raise HTTPException(503, "No eligible AI provider/model is available")
+
+    response = None
+    selected = None
+    compiled_spec = None
+    for candidate in selections:
+        try:
+            candidate_response = ai_engine.generate(
+                provider_name=candidate.provider,
+                system_prompt=COMPILER_SYSTEM_PROMPT,
+                user_message=build_compiler_user_message(
+                    job_brief=job_brief,
+                    requested_channels=requested_channels,
+                ),
+                model=candidate.model,
+                tools=None,
+            )
+            candidate_spec = parse_compiler_response(
+                candidate_response.text,
+                job_brief=job_brief,
+            )
+            response = candidate_response
+            selected = candidate
+            compiled_spec = candidate_spec
+            break
+        except (ProviderExecutionError, ValueError):
+            continue
+
+    if response is None or selected is None or compiled_spec is None:
+        raise HTTPException(502, "AI employee compiler could not produce a valid specification")
+
+    builder["compiled_spec"] = compiled_spec
+    builder["compiled_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    builder["compiler_provider"] = selected.provider
+    builder["compiler_model"] = selected.model
+    settings["employee_builder"] = builder
+    config.settings = settings
+
+    _record_ai_usage(
+        db,
+        company_id=company_id,
+        agent_id=agent.id,
+        selected=selected,
+        response=response,
+    )
+    return compiled_spec
+
+
 @router.get("/current")
 def current_employee(current_user: User = Depends(require_customer_manager)):
     db = SessionLocal()
@@ -166,8 +262,10 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
         agent = _existing_employee(db, current_user.company_id)
         if agent is None:
             return {"employee": None}
-        config = db.query(AgentConfig).filter(AgentConfig.agent_id == agent.id).first()
-        builder = ((config.settings or {}).get("employee_builder") or {}) if config else {}
+        config = _employee_config_or_404(db, agent)
+        builder = (config.settings or {}).get("employee_builder") or {}
+        compiled_spec = builder.get("compiled_spec") if isinstance(builder, dict) else None
+        has_entitlement = _has_ai_agents_entitlement(db, current_user.company_id)
         return {
             "employee": {
                 "agent_id": agent.id,
@@ -175,31 +273,17 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
                 "description": agent.description,
                 "enabled": agent.enabled,
                 "lifecycle": "live" if agent.enabled else "draft",
-                "capabilities": [key for key, value in (config.capabilities or {}).items() if value] if config else [],
+                "capabilities": [key for key, value in (config.capabilities or {}).items() if value],
                 "requested_channels": builder.get("requested_channels", []),
                 "permissions": builder.get("permissions", {}),
                 "missing_information": builder.get("missing_information", []),
+                "compiled": isinstance(compiled_spec, dict),
+                "compiled_spec": compiled_spec if isinstance(compiled_spec, dict) else None,
+                "can_compile": has_entitlement,
             }
         }
     finally:
         db.close()
-
-
-@router.post("/preview")
-def preview_employee(
-    data: EmployeeBuilderPreviewRequest,
-    current_user: User = Depends(require_customer_manager),
-):
-    try:
-        blueprint = build_employee_blueprint(data.description)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    return {
-        "company_id": current_user.company_id,
-        "blueprint": blueprint.as_dict(),
-        "readiness": blueprint_readiness(blueprint),
-        "lifecycle": "preview",
-    }
 
 
 @router.post("/create")
@@ -236,13 +320,15 @@ def create_employee(
         provider, model = _select_model(db, company.id)
         settings = {
             "employee_builder": {
-                "version": 1,
+                "version": 2,
                 "source_description": blueprint.description,
+                "job_brief": blueprint.description,
                 "audience": blueprint.audience,
                 "requested_channels": list(blueprint.channels),
                 "permissions": dict(blueprint.permissions),
                 "missing_information": list(blueprint.missing_information),
                 "onboarding_source": company.onboarding_source,
+                "compiled_spec": None,
             },
             "dialect": "auto",
             "response_length": "concise",
@@ -298,6 +384,7 @@ def create_employee(
             "name": agent.name,
             "enabled": agent.enabled,
             "subscription_required_for_go_live": not has_entitlement,
+            "subscription_required_for_compile": not has_entitlement,
             "blueprint": blueprint.as_dict(),
             "readiness": blueprint_readiness(blueprint),
             "config_id": config.id if config else None,
@@ -308,6 +395,48 @@ def create_employee(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/compile")
+def compile_employee(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Turn an open-ended paid Job Brief into a structured employee specification."""
+    db = SessionLocal()
+    try:
+        _company_or_404(db, current_user.company_id)
+        service_limits.entitlement(db, current_user.company_id, "ai_agents")
+        limits_service.check_token_limit(db, current_user.company_id)
+
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == agent_id,
+            AIAgent.company_id == current_user.company_id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+
+        compiled_spec = _compile_employee_spec(
+            db,
+            company_id=current_user.company_id,
+            agent=agent,
+            config=config,
+        )
+        db.commit()
+        return {
+            "agent_id": agent.id,
+            "compiled": True,
+            "spec": compiled_spec,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         raise
@@ -332,15 +461,21 @@ def test_draft_employee(
         if agent is None:
             raise HTTPException(404, "AI employee not found")
 
-        config = db.query(AgentConfig).filter(AgentConfig.agent_id == agent.id).first()
-        if config is None or config.agent_type != "employee":
-            raise HTTPException(404, "Employee Builder employee not found")
+        config = _employee_config_or_404(db, agent)
 
         has_entitlement = _has_ai_agents_entitlement(db, current_user.company_id)
         is_self_service = str(company.onboarding_source or "managed") == "self_service"
         free_tests_remaining = None
         if has_entitlement:
             limits_service.check_token_limit(db, current_user.company_id)
+            builder = (config.settings or {}).get("employee_builder") or {}
+            if not isinstance(builder.get("compiled_spec"), dict):
+                _compile_employee_spec(
+                    db,
+                    company_id=current_user.company_id,
+                    agent=agent,
+                    config=config,
+                )
         elif is_self_service:
             used = db.query(AIUsage).filter(
                 AIUsage.company_id == current_user.company_id,
@@ -388,19 +523,12 @@ def test_draft_employee(
         if response is None or selected is None:
             raise HTTPException(503, "AI provider is temporarily unavailable")
 
-        db.add(
-            AIUsage(
-                company_id=current_user.company_id,
-                agent_id=agent.id,
-                provider=selected.provider,
-                model=selected.model,
-                input_tokens=response.input_tokens,
-                output_tokens=response.output_tokens,
-                total_tokens=response.total_tokens,
-                provider_cost=response.cost,
-                status="success",
-                latency_ms=0,
-            )
+        _record_ai_usage(
+            db,
+            company_id=current_user.company_id,
+            agent_id=agent.id,
+            selected=selected,
+            response=response,
         )
         db.commit()
         return {
