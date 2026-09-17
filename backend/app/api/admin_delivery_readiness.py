@@ -10,6 +10,7 @@ from backend.app.core.readiness import _channel_customer_accepted
 from backend.app.models.company import Company
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.profile_models import AIAgentProfile
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.channels.catalog import validate_channel_config
@@ -266,6 +267,25 @@ def _delivery_state(db, company_id: int, agent_id: int) -> dict:
     )
 
     setup_blockers = []
+    employee_config = db.query(AgentConfig).filter(AgentConfig.agent_id == agent_id).first()
+    if employee_config is not None and employee_config.agent_type == "employee":
+        builder = (employee_config.settings or {}).get("employee_builder") or {}
+        spec = builder.get("compiled_spec") or {}
+        if (spec.get("delivery") or {}).get("provisioning_version") != 1:
+            setup_blockers.append("Compile the employee to provision its action contracts before Go Live")
+        else:
+            managed_keys = {
+                item["key"] for item in spec.get("requirements", [])
+                if item.get("status") == "xvond_managed"
+            }
+            if managed_keys:
+                assignment = db.query(AgentToolAssignment).filter(
+                    AgentToolAssignment.agent_id == agent_id,
+                    AgentToolAssignment.tool_name == "action_request",
+                ).first()
+                stored_actions = ((assignment.config or {}).get("actions") or {}) if assignment else {}
+                if any(not isinstance(stored_actions.get(key), dict) for key in managed_keys):
+                    setup_blockers.append("Compile the employee again to restore missing action contracts")
     if not profile_ready:
         setup_blockers.append("Complete employee identity and behavior")
     if not knowledge_ready:

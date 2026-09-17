@@ -141,7 +141,7 @@ def test_paid_compile_endpoint_is_part_of_customer_employee_builder_contract():
     assert 'builder["compiled_spec"] = compiled_spec' in source
     assert 'builder["missing_information"] = list(compiled_spec.get("setup_required") or [])' in source
     assert "agent.system_prompt = build_compiled_employee_system_prompt" in source
-    assert 'if not isinstance(builder.get("compiled_spec"), dict):' in source
+    assert "provision_compiled_capabilities" in source
 
 
 def test_customer_portal_shows_xvond_owned_build_instead_of_unsupported_features():

@@ -2,7 +2,7 @@
 import hashlib
 import hmac
 import json
-from datetime import timedelta
+from datetime import timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
@@ -192,6 +192,8 @@ def test_delayed_old_echo_cannot_undo_explicit_return_to_ai(database):
     with database() as db:
         resumed_at = db.query(WhatsAppSession).one().ai_resumed_at
         assert resumed_at is not None
+        # The database stores naive UTC; timestamp() otherwise uses the host zone.
+        resumed_at = resumed_at.replace(tzinfo=timezone.utc)
 
     old_timestamp = int((resumed_at - timedelta(seconds=10)).timestamp())
     stale = process("manual-old", "Old delayed reply", echo=True, timestamp=old_timestamp)

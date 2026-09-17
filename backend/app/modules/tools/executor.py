@@ -35,7 +35,8 @@ def _enabled_actions(config: dict | None) -> dict:
 def _operation_config_ready(action: dict) -> bool:
     destination = action.get("destination") or {}
     destination_type = str(destination.get("type") or "unconfigured").strip()
-    if destination_type == "unconfigured":
+    if destination_type in {"unconfigured", "workflow_engine"}:
+        # Generated workflow contracts still need an actual execution adapter.
         return False
     if destination_type == "integration" and not destination.get("integration_id"):
         return False
