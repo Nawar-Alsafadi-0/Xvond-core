@@ -523,6 +523,16 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         scope = "hybrid"
     summary = _bounded_text(payload.get("summary"), limit=1000) or _bounded_text(job_brief, limit=1000)
     intake = _normalize_smart_intake(payload.get("intake"), job_brief=job_brief)
+    intake_known = {
+        str(item.get("key") or ""): item.get("value")
+        for item in (intake.get("known") or [])
+        if isinstance(item, dict) and str(item.get("key") or "")
+    }
+    intake_missing_keys = {
+        str(item.get("key") or "")
+        for item in (intake.get("missing") or [])
+        if isinstance(item, dict) and str(item.get("key") or "")
+    }
 
     tasks: list[dict] = []
     for item in payload.get("tasks") or []:
@@ -592,6 +602,19 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         # dynamic setup fields.
         if key == "booking" and not requires_connection:
             fulfillment_mode = "xvond_internal"
+            for grounded_field in (
+                "working_days",
+                "opening_time",
+                "closing_time",
+                "slot_minutes",
+                "capacity",
+            ):
+                if (
+                    grounded_field not in runtime_inputs
+                    and str(intake_known.get(grounded_field) or "").strip()
+                ):
+                    runtime_inputs[grounded_field] = intake_known[grounded_field]
+
             for booking_field in (
                 "working_days",
                 "opening_time",
@@ -600,6 +623,13 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
             ):
                 if booking_field not in runtime_inputs and booking_field not in customer_inputs:
                     customer_inputs.append(booking_field)
+
+            if (
+                {"booking_capacity", "capacity"} & intake_missing_keys
+                and "capacity" not in runtime_inputs
+                and "capacity" not in customer_inputs
+            ):
+                customer_inputs.append("capacity")
 
         after_input_status = None
         # Explicit customer prerequisites take precedence over build defaults.
@@ -636,6 +666,31 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
             break
 
     intake_missing = list(intake.get("missing") or [])
+    internal_booking = next(
+        (
+            item for item in requirements
+            if isinstance(item, dict)
+            and item.get("key") == "booking"
+            and item.get("fulfillment_mode") == "xvond_internal"
+        ),
+        None,
+    )
+    if internal_booking is not None:
+        booking_owned_intake = {
+            "working_hours",
+            "working_days",
+            "opening_time",
+            "closing_time",
+            "slot_minutes",
+            "booking_capacity",
+            "capacity",
+        }
+        intake_missing = [
+            item
+            for item in intake_missing
+            if str(item.get("key") or "") not in booking_owned_intake
+        ]
+
     if intake_missing and "employee_context" not in seen_keys:
         input_fields = [item["key"] for item in intake_missing]
         input_labels = {item["key"]: item["label"] for item in intake_missing}
