@@ -361,3 +361,82 @@ def test_recurring_scheduler_is_disabled_until_both_tap_flags_are_enabled(
 
     assert summary["enabled"] is False
     assert summary["checked"] == 0
+
+
+def test_sync_captured_response_stays_submitted_until_verified_webhook(
+    renewal_database,
+    monkeypatch,
+):
+    factory, now = renewal_database
+    _add_profile(factory)
+    original_end = now + timedelta(hours=1)
+
+    monkeypatch.setattr(
+        renewal.tap_gateway,
+        "create_recurring_charge",
+        lambda **kwargs: {
+            "provider": "tap",
+            "transaction_id": "chg_sync_captured",
+            "status": "captured",
+        },
+    )
+
+    summary = renewal.run_due_service_renewals_once(now=now)
+
+    assert summary["submitted"] == 1
+    assert summary["captured"] == 0
+    with factory() as db:
+        attempt = db.query(ServiceRenewalAttempt).one()
+        subscription = db.get(ServiceSubscription, 1)
+        checkout = db.query(ServiceCheckout).one()
+        assert attempt.status == "submitted"
+        assert checkout.status == "pending"
+        assert subscription.current_period_end == original_end
+
+
+def test_verified_recurring_webhook_advances_period_and_captures_attempt(
+    renewal_database,
+    monkeypatch,
+):
+    factory, now = renewal_database
+    _add_profile(factory)
+    monkeypatch.setattr(
+        renewal.tap_gateway,
+        "create_recurring_charge",
+        lambda **kwargs: {
+            "provider": "tap",
+            "transaction_id": "chg_webhook_renewal",
+            "status": "initiated",
+        },
+    )
+
+    renewal.run_due_service_renewals_once(now=now)
+
+    with factory() as db:
+        subscription = db.get(ServiceSubscription, 1)
+        old_end = subscription.current_period_end
+        result = billing_webhooks._process_tap_charge(
+            db,
+            {
+                "id": "chg_webhook_renewal",
+                "status": "CAPTURED",
+                "metadata": {
+                    "xvond_company_id": "1",
+                    "xvond_service_subscription_id": "1",
+                    "xvond_plan_id": "1",
+                    "xvond_service_code": "ai_agents",
+                    "xvond_renewal": "true",
+                },
+                "customer": {"id": "cus_live_123"},
+                "card": {"id": "card_live_456"},
+                "payment_agreement": {"id": "payagree_live_789"},
+            },
+        )
+        db.commit()
+
+        attempt = db.query(ServiceRenewalAttempt).one()
+        subscription = db.get(ServiceSubscription, 1)
+        assert result["renewal_attempt_id"] == attempt.id
+        assert attempt.status == "captured"
+        assert subscription.current_period_start == old_end
+        assert subscription.current_period_end > old_end
