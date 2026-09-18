@@ -40,12 +40,14 @@ from backend.app.modules.ai_agent.self_service_policy import (
     communication_channels,
     is_self_service_company,
     self_service_channel_activation_blockers,
+    self_service_channel_slots,
     self_service_readiness,
     self_service_spec_view,
 )
 from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
+from backend.app.modules.channels.delivery import reconcile_managed_channel_requests
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord, CompanyAIProfile
 from backend.app.modules.tools.models import AgentToolAssignment
@@ -231,6 +233,14 @@ def _store_provisioned_spec(
     settings["employee_builder"] = builder
     config.settings = settings
     company = db.query(Company).filter(Company.id == company_id).first()
+    if is_self_service_company(company):
+        reconcile_managed_channel_requests(
+            db,
+            company_id=company_id,
+            agent_id=agent.id,
+            desired_channel_types=self_service_channel_slots(builder),
+            request_source="compiled_employee_contract",
+        )
     agent.system_prompt = build_compiled_employee_system_prompt(
         owner_name=company.name if company else "the owner",
         spec=compiled_spec,
@@ -894,6 +904,15 @@ def create_employee(
                 )
             )
 
+        if is_self_service:
+            reconcile_managed_channel_requests(
+                db,
+                company_id=company.id,
+                agent_id=agent.id,
+                desired_channel_types=requested_channels,
+                request_source="job_brief",
+            )
+
         db.commit()
         db.refresh(agent)
         config = db.query(AgentConfig).filter(AgentConfig.agent_id == agent.id).first()
@@ -1002,6 +1021,13 @@ def revise_self_service_job_brief(
         )
 
         desired_channels = set(communication_channels(blueprint.channels))
+        managed_reconcile = reconcile_managed_channel_requests(
+            db,
+            company_id=company.id,
+            agent_id=agent.id,
+            desired_channel_types=desired_channels,
+            request_source="job_brief_revision",
+        )
         deactivated_channels = []
         channel_rows = (
             db.query(AgentChannel)
@@ -1054,6 +1080,7 @@ def revise_self_service_job_brief(
             "job_brief": blueprint.description,
             "requested_channels": list(communication_channels(blueprint.channels)),
             "deactivated_channels": deactivated_channels,
+            "managed_channel_requests": managed_reconcile,
             "missing_information": list(blueprint.missing_information),
         }
     except HTTPException:
