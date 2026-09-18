@@ -71,7 +71,12 @@ function renderManagedChannelRequests(agentId){
   if(!items.length)return '';
   return `<div class="workspace-panel" style="margin-top:14px"><div class="workspace-panel-head"><div><h4>Managed Channel Requests</h4><p>Requested by the employee contract. A request is not a live integration.</p></div></div><div class="channel-grid">${items.map(channel=>{
     const state=wsManagedChannelPresentation(channel);
-    return `<div class="channel-card"><div><span class="channel-name">${f(channel.channel_name||channel.channel_type)}</span>${wsPill(state.label,state.kind)}</div><p>${f(wsManagedChannelDetail(channel))}</p><div class="meta">Runtime: ${f(channel.runtime_state||'unknown')} · Setup: Xvond managed · Local: ${channel.enabled?'Active':'Inactive'}</div></div>`;
+    const n8nManaged=channel.runtime_adapter==='n8n_channel_bridge';
+    const routeReady=String(channel?.config?.provisioning_state||'').toLowerCase()==='connected';
+    const controls=n8nManaged&&channel.runtime_state==='live'&&String(channel?.config?.provisioning_state||'').toLowerCase()!=='cancelled'
+      ? `<div class="agent-actions">${routeReady?'':`<button class="primary-button" onclick="verifyManagedChannelRoute(${channel.id})">Verify Xvond Route</button>`}${routeReady?`<button class="table-button" onclick="setWorkspaceChannelStatus(${channel.id},${!channel.enabled})">${channel.enabled?'Deactivate':'Activate'}</button>`:''}</div>`
+      : '';
+    return `<div class="channel-card"><div><span class="channel-name">${f(channel.channel_name||channel.channel_type)}</span>${wsPill(state.label,state.kind)}</div><p>${f(wsManagedChannelDetail(channel))}</p><div class="meta">Runtime: ${f(channel.runtime_state||'unknown')} · Setup: Xvond managed · Local: ${channel.enabled?'Active':'Inactive'}</div>${controls}</div>`;
   }).join('')}</div></div>`;
 }
 function wsActiveOperations(){return (xvondWorkspace.data?.requests||[]).filter(x=>!['completed','cancelled'].includes(x.status))}
@@ -173,6 +178,12 @@ function renderLogsTab(){const logs=xvondWorkspace.data.audit||[];return `<div c
 async function toggleWorkspaceCompany(active){try{if(active)await api(`/admin/production/companies/${xvondWorkspace.companyId}/activate`,{method:'POST'});else await api(`/admin/production/companies/${xvondWorkspace.companyId}/deactivate`,{method:'POST'});await loadCompanyControlCenter(xvondWorkspace.companyId,'overview')}catch(e){alert(e.message)}}
 async function toggleWorkspaceCapability(name,enable){try{const row=wsModuleMap().get(name);if(enable){if(row)await api(`/admin/companies/${xvondWorkspace.companyId}/modules/${name}/enable`,{method:'POST'});else await api(`/admin/companies/${xvondWorkspace.companyId}/modules/${name}`,{method:'POST'})}else{const used=wsEnabledOperationCount(name);if(used&&!confirm(`This capability is used by ${used} enabled action(s). Continue?`))return;await api(`/admin/companies/${xvondWorkspace.companyId}/modules/${name}/disable`,{method:'POST'})}await loadCompanyControlCenter(xvondWorkspace.companyId,'capabilities')}catch(e){alert(e.message)}}
 async function setWorkspaceChannelStatus(channelId,enabled){try{await api(`/admin/channels/${channelId}`,{method:'PUT',body:JSON.stringify({enabled})});await loadCompanyControlCenter(xvondWorkspace.companyId,'channels')}catch(e){alert(e.message)}}
+async function verifyManagedChannelRoute(channelId){
+  try{
+    await api(`/admin/channels/${channelId}/verify-managed-route`,{method:'POST',body:'{}'});
+    await loadCompanyControlCenter(xvondWorkspace.companyId,'channels');
+  }catch(e){alert(e.message)}
+}
 async function deleteWorkspaceEmployee(agentId,live){if(live){alert('Deactivate all live channels first.');return}if(!confirm('Permanently delete this AI employee?'))return;try{await api(`/admin/ai-employees/companies/${xvondWorkspace.companyId}/${agentId}`,{method:'DELETE'});await loadCompanyControlCenter(xvondWorkspace.companyId,'agents')}catch(e){alert(e.message)}}
 async function updateWorkspaceOperation(id,status){try{await api(`/admin/agent-actions/requests/${id}`,{method:'PATCH',body:JSON.stringify({status})});await loadCompanyControlCenter(xvondWorkspace.companyId,'operations')}catch(e){alert(e.message)}}
 async function reconcileWorkspaceOperation(id,outcome){const note=prompt('Optional reconciliation note:')||'';if(!confirm(`Confirm external reconciliation outcome: ${outcome}?`))return;try{await api(`/admin/operations/requests/${id}/reconcile`,{method:'PATCH',body:JSON.stringify({outcome,note})});await loadCompanyControlCenter(xvondWorkspace.companyId,'operations')}catch(e){alert(e.message)}}
