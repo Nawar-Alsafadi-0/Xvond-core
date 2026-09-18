@@ -23,6 +23,7 @@ from backend.app.modules.ai_agent.employee_compiler import normalize_compiled_sp
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
+from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.tools.business_models import ActionRequest
 from backend.app.modules.tools.models import AgentToolAssignment
 from backend.app.modules.tools.executor import ToolExecutor
@@ -612,6 +613,13 @@ def test_self_service_job_brief_revision_clears_only_generated_build_artifacts(d
                 config={"url": "https://operator.example.com/hook"},
                 enabled=True,
             ),
+            AgentChannel(
+                company_id=1,
+                agent_id=1,
+                channel_type="whatsapp",
+                config={"phone_number_id": "old-phone"},
+                enabled=True,
+            ),
         ])
 
         generated = AutomationWorkflow(
@@ -657,6 +665,7 @@ def test_self_service_job_brief_revision_clears_only_generated_build_artifacts(d
     assert result["status"] == "updated"
     assert result["compiled"] is False
     assert result["job_brief"] == revised
+    assert result["deactivated_channels"] == ["whatsapp"]
     assert calls and len(calls) == 1
 
     with factory() as db:
@@ -689,6 +698,12 @@ def test_self_service_job_brief_revision_clears_only_generated_build_artifacts(d
         ).one()
         assert manual_webhook.enabled is True
         assert reveal_config(manual_webhook.config)["url"] == "https://operator.example.com/hook"
+
+        whatsapp = db.query(AgentChannel).filter_by(
+            company_id=1, agent_id=1, channel_type="whatsapp"
+        ).one()
+        assert whatsapp.enabled is False
+        assert reveal_config(whatsapp.config)["phone_number_id"] == "old-phone"
 
         workflows = {item.name: item for item in db.query(AutomationWorkflow).all()}
         assert set(workflows) == {"Generated old schedule", "Manual schedule"}
@@ -738,4 +753,38 @@ def test_live_self_service_employee_must_be_deactivated_before_job_brief_revisio
     assert "Deactivate" in str(exc.value.detail)
     with factory() as db:
         assert _builder(db)["source_description"] == BRIEF
+    assert calls == []
+
+
+def test_job_brief_revision_keeps_still_requested_channel_active(database):
+    factory, calls = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.add(
+            AgentChannel(
+                company_id=1,
+                agent_id=1,
+                channel_type="whatsapp",
+                config={"phone_number_id": "keep-phone"},
+                enabled=True,
+            )
+        )
+        db.commit()
+
+    revised = "Reply to customers on WhatsApp and help with their questions."
+    result = api.revise_self_service_job_brief(
+        1,
+        api.EmployeeBuilderReviseRequest(description=revised),
+        USER,
+    )
+
+    assert result["requested_channels"] == ["whatsapp"]
+    assert result["deactivated_channels"] == []
+    with factory() as db:
+        whatsapp = db.query(AgentChannel).filter_by(
+            company_id=1, agent_id=1, channel_type="whatsapp"
+        ).one()
+        assert whatsapp.enabled is True
+        assert reveal_config(whatsapp.config)["phone_number_id"] == "keep-phone"
     assert calls == []
