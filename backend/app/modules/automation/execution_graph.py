@@ -135,3 +135,24 @@ def resolve_graph_value(value: Any, *, state: dict, node_outputs: dict) -> Any:
             for item in value
         ]
     return value
+
+
+
+def graph_action_types(graph: dict) -> list[str]:
+    result: list[str] = []
+
+    def visit(current: dict) -> None:
+        for node in (current or {}).get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            if node.get("type") == "action":
+                action_type = str((node.get("params") or {}).get("action_type") or "").strip()
+                if action_type and action_type not in result:
+                    result.append(action_type)
+            elif node.get("type") == "foreach":
+                nested = (node.get("params") or {}).get("graph")
+                if isinstance(nested, dict):
+                    visit(normalize_execution_graph(nested))
+
+    visit(normalize_execution_graph(graph or {}))
+    return result
