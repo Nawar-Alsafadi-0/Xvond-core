@@ -1,10 +1,11 @@
 (() => {
     const CHANNELS = [
         ["xvond", "Xvond Workspace"],
-        ["website", "Website"],
+        ["website", "Website Chat"],
         ["whatsapp", "WhatsApp"],
-        ["instagram", "Instagram"],
-        ["email", "Email"],
+        ["voice", "Voice"],
+        ["telegram", "Telegram"],
+        ["custom", "Custom Channel"],
     ];
 
     function root() {
@@ -79,6 +80,59 @@
         }).join("")}</div>`;
     }
 
+    function selfServiceMarkup(employee) {
+        if (employee.delivery_mode !== "self_service") return "";
+        const state = employee.self_service_readiness || {};
+        const subscription = state.subscription || {};
+        const limit = state.channel_limit == null ? "—" : String(state.channel_limit);
+        const used = Number(state.channel_slots_used || 0);
+        const blockers = (state.blockers || []).map(item => \`<li>\${escapeHtml(item)}</li>\`).join("");
+        const modeLabels = {
+            personal: "Personal agent",
+            background: "Background worker",
+            customer_facing: "Customer-facing employee",
+            hybrid: "Hybrid employee",
+            workspace: "Workspace employee",
+        };
+        return \`
+            <div class="panel">
+                <div class="employee-builder-kicker">SELF-SERVICE DELIVERY</div>
+                <div class="employee-builder-summary-grid">
+                    <div>
+                        <h3>Work mode</h3>
+                        <div class="employee-builder-missing">\${badge(modeLabels[state.mode] || state.mode || "Pending")}</div>
+                        <p class="muted">\${state.channels_required ? "This job needs a communication channel." : "This job can run with 0 communication channels."}</p>
+                    </div>
+                    <div>
+                        <h3>Channel slots</h3>
+                        <div class="employee-builder-missing">\${badge(\`\${used}/\${limit}\`, used > 0 ? "neutral" : "ready")}</div>
+                        <p class="muted">Communication channels use plan slots. Gmail, email actions, Instagram publishing and other connected systems are integrations, not channel slots.</p>
+                    </div>
+                    <div>
+                        <h3>Subscription</h3>
+                        <div class="employee-builder-missing">\${badge(subscription.active ? (subscription.plan_name || "Active") : "Subscription required", subscription.active ? "ready" : "setup")}</div>
+                    </div>
+                </div>
+                \${blockers ? \`
+                    <div class="employee-builder-section">
+                        <h3>Before launch</h3>
+                        <ul>\${blockers}</ul>
+                    </div>
+                \` : \`
+                    <div class="employee-builder-section">
+                        <p class="muted">Everything required for this self-service employee is ready.</p>
+                    </div>
+                \`}
+                \${employee.can_launch ? \`
+                    <div class="employee-builder-actions">
+                        <button type="button" id="launch-employee-btn">Launch employee</button>
+                    </div>
+                    <div id="launch-employee-error" class="error"></div>
+                \` : ""}
+            </div>
+        \`;
+    }
+
     function compiledMarkup(spec) {
         if (!spec) return "";
         const tasks = (spec.tasks || []).map(item => `
@@ -150,8 +204,9 @@
 
                     <div class="employee-builder-summary-grid">
                         <div>
-                            <h3>Channels</h3>
+                            <h3>Communication channels</h3>
                             <div class="employee-builder-missing">${channels}</div>
+                            <p class="muted">Optional unless this employee needs to talk with customers or users.</p>
                         </div>
                         <div>
                             <h3>Preparation</h3>
@@ -182,6 +237,7 @@
                 </div>
 
                 ${compiledMarkup(employee.compiled_spec)}
+                ${selfServiceMarkup(employee)}
 
                 ${employee.enabled ? `
                     <div class="panel">
@@ -203,6 +259,10 @@
         if (prepareButton) {
             prepareButton.addEventListener("click", () => prepareEmployee(employee.agent_id));
         }
+        const launchButton = document.getElementById("launch-employee-btn");
+        if (launchButton) {
+            launchButton.addEventListener("click", () => launchEmployee(employee.agent_id));
+        }
     }
 
     async function prepareEmployee(agentId) {
@@ -218,6 +278,24 @@
             await loadEmployeeBuilder();
         } catch (err) {
             if (error) error.textContent = err?.message || "Could not build employee.";
+        } finally {
+            if (button) button.disabled = false;
+        }
+    }
+
+    async function launchEmployee(agentId) {
+        const button = document.getElementById("launch-employee-btn");
+        const error = document.getElementById("launch-employee-error");
+        if (button) button.disabled = true;
+        if (error) error.textContent = "";
+        try {
+            await api(\`/customer/employee-builder/\${agentId}/launch\`, {
+                method: "POST",
+                body: "{}"
+            });
+            await loadEmployeeBuilder();
+        } catch (err) {
+            if (error) error.textContent = err?.message || "Could not launch employee.";
         } finally {
             if (button) button.disabled = false;
         }
