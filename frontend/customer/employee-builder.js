@@ -319,7 +319,7 @@
                 </div>
                 <div id="employee-builder-test-panel" class="employee-builder-section hidden">
                     <h3>Preview & Test</h3>
-                    <p class="muted">Talk to the current draft. Xvond will not use live channels or execute business actions in this preview.</p>
+                    <p class="muted">${employee.pending_revision ? "Test the pending revision safely while the current employee stays live. No live channels or business actions are used in preview." : "Talk to the current draft. Xvond will not use live channels or execute business actions in this preview."}</p>
                     <div id="employee-builder-test-log" class="chat-box"></div>
                     <div class="chat-input">
                         <input id="employee-builder-test-message" maxlength="12000" placeholder="Try a real customer question...">
@@ -555,7 +555,7 @@
                                 <div id="job-brief-error" class="error"></div>
                             </div>
                         ` : ""}
-                        ${employee.delivery_mode === "self_service" && !employee.enabled ? `
+                        ${employee.delivery_mode === "self_service" ? `
                             <div class="employee-builder-section">
                                 <h3>Tell Xvond what to change</h3>
                                 <p class="muted">Refine the same employee with a short instruction. Xvond keeps the rest of the Job Brief unless your new instruction overrides it.</p>
@@ -565,7 +565,7 @@
                                 </div>
                                 <div id="employee-refine-error" class="error"></div>
                             </div>
-                            ${(employee.versions || []).length ? `
+                            ${!employee.enabled && (employee.versions || []).length ? `
                                 <details class="employee-builder-section">
                                     <summary><strong>Version history</strong> · ${Number((employee.versions || []).length)} saved</summary>
                                     <div style="margin-top:12px">
@@ -625,6 +625,7 @@
 
                 ${journeyMarkup(employee)}
                 ${compiledMarkup(employee.compiled_spec)}
+                ${pendingRevisionMarkup(employee)}
                 ${selfServiceMarkup(employee)}
 
                 ${employee.enabled ? `
@@ -1064,6 +1065,42 @@
                 }
             });
         }
+
+        document.getElementById("pending-revision-test")?.addEventListener("click", () => {
+            const panel = document.getElementById("employee-builder-test-panel");
+            panel?.classList.remove("hidden");
+            panel?.scrollIntoView({behavior: "smooth", block: "center"});
+            document.getElementById("employee-builder-test-message")?.focus();
+        });
+
+        document.getElementById("pending-revision-apply")?.addEventListener("click", async event => {
+            const button = event.currentTarget;
+            const error = document.getElementById("pending-revision-error");
+            if (error) error.textContent = "";
+            button.disabled = true;
+            try {
+                await api("/customer/employee-builder/" + Number(employee.agent_id) + "/apply-pending-revision", {method: "POST"});
+                await loadEmployeeBuilder();
+            } catch (err) {
+                if (error) error.textContent = err?.message || "Could not apply this revision.";
+                if (document.body.contains(button)) button.disabled = false;
+            }
+        });
+
+        document.getElementById("pending-revision-discard")?.addEventListener("click", async event => {
+            if (!confirm("Discard this pending revision? The live employee will not change.")) return;
+            const button = event.currentTarget;
+            const error = document.getElementById("pending-revision-error");
+            if (error) error.textContent = "";
+            button.disabled = true;
+            try {
+                await api("/customer/employee-builder/" + Number(employee.agent_id) + "/discard-pending-revision", {method: "POST"});
+                await loadEmployeeBuilder();
+            } catch (err) {
+                if (error) error.textContent = err?.message || "Could not discard this revision.";
+                if (document.body.contains(button)) button.disabled = false;
+            }
+        });
 
         document.querySelectorAll("[data-rollback-version]").forEach(button => {
             button.addEventListener("click", async () => {
