@@ -18,7 +18,12 @@ from backend.app.modules.channels.catalog import (
     get_channel_capability,
 )
 from backend.app.modules.channels.acceptance import mark_customer_roundtrip
-from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.channels.managed_delivery import (
+    attempt_delivery as attempt_managed_delivery,
+    delivery_payload as managed_delivery_payload,
+    ensure_delivery as ensure_managed_delivery,
+)
+from backend.app.modules.channels.models import AgentChannel, ManagedChannelOutboundDelivery
 from backend.app.modules.tools.business_models import HumanHandoff
 
 
@@ -131,6 +136,7 @@ def _channel_response(
     response_message_id: int | None = None,
     mode: str,
     duplicate: bool = False,
+    delivery: dict | None = None,
 ) -> dict:
     config = reveal_config(channel.config) or {}
     return {
@@ -147,7 +153,33 @@ def _channel_response(
         "mode": mode,
         "duplicate": duplicate,
         "reply": reply,
+        "delivery": delivery,
     }
+
+
+def _deliver_ai_reply(
+    db,
+    *,
+    channel: AgentChannel,
+    conversation_id: int,
+    external_contact_id: str,
+    external_message_id: str,
+    response_message: AIMessage,
+) -> dict:
+    key = f"channel-reply:{channel.id}:{external_message_id}"
+    delivery = ensure_managed_delivery(
+        db,
+        idempotency_key=key,
+        company_id=channel.company_id,
+        agent_id=channel.agent_id,
+        conversation_id=conversation_id,
+        channel_id=channel.id,
+        message_id=response_message.id,
+        external_contact_id=external_contact_id,
+        inbound_external_message_id=external_message_id,
+    )
+    db.commit()
+    return attempt_managed_delivery(db, delivery_id=delivery.id)
 
 
 @router.post("/message")
@@ -208,6 +240,14 @@ def receive_channel_message(
                 )
             existing_reply = _existing_reply(db, existing_message)
             if existing_reply is not None:
+                delivery_result = _deliver_ai_reply(
+                    db,
+                    channel=channel,
+                    conversation_id=existing_message.conversation_id,
+                    external_contact_id=payload.external_contact_id,
+                    external_message_id=payload.external_message_id,
+                    response_message=existing_reply,
+                )
                 return _channel_response(
                     channel=channel,
                     conversation_id=existing_message.conversation_id,
@@ -217,6 +257,7 @@ def receive_channel_message(
                     response_message_id=existing_reply.id,
                     mode="ai",
                     duplicate=True,
+                    delivery=delivery_result,
                 )
             conversation = db.get(AIConversation, existing_message.conversation_id)
             if conversation is None:
@@ -292,6 +333,18 @@ def receive_channel_message(
             external_contact_id=payload.external_contact_id,
             user_message_source_key=source_key,
         )
+        response_data = result.get("response") or {}
+        response_message = db.get(AIMessage, response_data.get("id"))
+        if response_message is None:
+            raise HTTPException(500, "AI response message was not persisted")
+        delivery_result = _deliver_ai_reply(
+            db,
+            channel=channel,
+            conversation_id=result["conversation_id"],
+            external_contact_id=payload.external_contact_id,
+            external_message_id=payload.external_message_id,
+            response_message=response_message,
+        )
         audit_service.log(
             db=db,
             company_id=payload.company_id,
@@ -303,6 +356,8 @@ def receive_channel_message(
                 "conversation_id": result["conversation_id"],
                 "channel_type": channel_type,
                 "external_message_id": payload.external_message_id,
+                "delivery_id": delivery_result.get("delivery_id"),
+                "delivery_status": delivery_result.get("status"),
             },
         )
         db.commit()
@@ -311,9 +366,10 @@ def receive_channel_message(
             conversation_id=result["conversation_id"],
             external_contact_id=payload.external_contact_id,
             external_message_id=payload.external_message_id,
-            reply=str((result.get("response") or {}).get("content") or ""),
-            response_message_id=(result.get("response") or {}).get("id"),
+            reply=str(response_data.get("content") or ""),
+            response_message_id=response_message.id,
             mode="ai",
+            delivery=delivery_result,
         )
     except HTTPException:
         db.rollback()
