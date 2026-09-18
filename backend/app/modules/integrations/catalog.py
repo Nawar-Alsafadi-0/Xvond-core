@@ -1,5 +1,82 @@
 INTEGRATION_CATALOG = {
 
+    "email_smtp": {
+        "name": "Email (SMTP)",
+        "description": "Send email securely through the customer's SMTP provider",
+        "config_fields": [
+            {
+                "name": "smtp_host",
+                "label": "SMTP Host",
+                "required": True,
+                "secret": False,
+            },
+            {
+                "name": "smtp_port",
+                "label": "SMTP Port",
+                "required": True,
+                "secret": False,
+                "default": 465,
+            },
+            {
+                "name": "username",
+                "label": "SMTP Username",
+                "required": True,
+                "secret": False,
+            },
+            {
+                "name": "password",
+                "label": "SMTP Password / App Password",
+                "required": True,
+                "secret": True,
+            },
+            {
+                "name": "from_address",
+                "label": "From Email",
+                "required": True,
+                "secret": False,
+            },
+        ],
+    },
+
+    "email_imap": {
+        "name": "Email Inbox (IMAP)",
+        "description": "Read email securely from the customer's inbox without marking messages as read",
+        "config_fields": [
+            {
+                "name": "imap_host",
+                "label": "IMAP Host",
+                "required": True,
+                "secret": False,
+            },
+            {
+                "name": "imap_port",
+                "label": "IMAP Port",
+                "required": True,
+                "secret": False,
+                "default": 993,
+            },
+            {
+                "name": "username",
+                "label": "IMAP Username",
+                "required": True,
+                "secret": False,
+            },
+            {
+                "name": "password",
+                "label": "IMAP Password / App Password",
+                "required": True,
+                "secret": True,
+            },
+            {
+                "name": "mailbox",
+                "label": "Mailbox",
+                "required": False,
+                "secret": False,
+                "default": "INBOX",
+            },
+        ],
+    },
+
     "instagram_publish": {
         "name": "Instagram Publishing",
         "description": "Publish media and captions to an Instagram professional account",
