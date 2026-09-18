@@ -90,8 +90,13 @@ def test_generic_action_key_is_not_hardcoded_to_business_templates():
 def test_universal_channel_send_is_routed_by_xvond_connection_key():
     contracts = json.loads(CONTRACTS_PATH.read_text(encoding="utf-8"))
     code = _workflow_code()
+    channel_check = contracts["actions"]["channel.check"]
     channel = contracts["actions"]["channel.send"]
 
+    assert channel_check["adapter"] == "channel"
+    assert channel_check["side_effect"] is False
+    assert "connection_key" in channel_check["required_data"]
+    assert "channel.check" in code
     assert channel["adapter"] == "channel"
     assert channel["side_effect"] is True
     assert "connection_key" in channel["required_data"]
