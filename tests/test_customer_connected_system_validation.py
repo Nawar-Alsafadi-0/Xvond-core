@@ -147,6 +147,10 @@ def test_google_calendar_secrets_are_not_exposed_in_customer_config():
     assert rendered["config"]["calendar_id"] == "primary"
     assert rendered["config"]["timezone"] == "Asia/Muscat"
     assert rendered["config"]["client_id"] == "public-client-id"
+    assert rendered["execution_adapter"] == "google_calendar"
+    assert rendered["requirement_keys"] == ["booking"]
+    assert rendered["allow_generic_alternatives"] is True
+    assert rendered["operation_endpoints"] is False
     assert "access_token" not in rendered["config"]
     assert "refresh_token" not in rendered["config"]
     assert "client_secret" not in rendered["config"]
