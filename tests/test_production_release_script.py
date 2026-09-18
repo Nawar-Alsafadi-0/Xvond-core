@@ -147,6 +147,26 @@ def test_workflow_engine_has_real_http_healthcheck_before_release_continues():
     assert "start_period: 30s" in workflow
 
 
+def test_release_requires_public_https_route_after_internal_health():
+    internal_health = SOURCE.index(
+        "http://127.0.0.1:8000/health/ready"
+    )
+    public_probe = SOURCE.index(
+        'probe_public_api_route "$public_base_url"',
+        internal_health,
+    )
+    acceptance = SOURCE.index(
+        'if [ -n "$ACCEPTANCE_COMPANY_ID" ]; then',
+        public_probe,
+    )
+
+    assert internal_health < public_probe < acceptance
+    assert 'url = sys.argv[1].rstrip("/") + "/health/ready"' in SOURCE
+    assert "urllib.request.urlopen(url, timeout=5)" in SOURCE
+    assert "Public API route did not become healthy" in SOURCE
+    assert "python3 -c" in SOURCE
+
+
 def test_release_has_mandatory_health_and_optional_customer_acceptance():
     assert "/health/ready" in SOURCE
     assert "ACCEPTANCE_COMPANY_ID" in SOURCE
