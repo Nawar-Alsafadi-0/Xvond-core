@@ -33,6 +33,36 @@ wait_healthy() {
     return 1
 }
 
+wait_whatsapp_worker_lease() {
+    attempts="${1:-30}"
+    count=0
+    while [ "$count" -lt "$attempts" ]; do
+        if compose exec -T whatsapp-worker python -c "from backend.app.modules.channels.whatsapp_queue import whatsapp_job_queue; status=whatsapp_job_queue.stats(); raise SystemExit(0 if status.get('configured') and status.get('worker_active') else 1)" >/dev/null 2>&1; then
+            return 0
+        fi
+        count=$((count + 1))
+        sleep 1
+    done
+    echo "WhatsApp worker did not acquire its Redis lease" >&2
+    docker logs --tail 100 xvond-whatsapp-worker >&2 || true
+    return 1
+}
+
+wait_scheduler_heartbeat() {
+    attempts="${1:-30}"
+    count=0
+    while [ "$count" -lt "$attempts" ]; do
+        if compose exec -T automation-scheduler python -c "from backend.app.modules.automation.scheduler_health import automation_scheduler_health; status=automation_scheduler_health.status(); raise SystemExit(0 if status.get('configured') and status.get('active') else 1)" >/dev/null 2>&1; then
+            return 0
+        fi
+        count=$((count + 1))
+        sleep 1
+    done
+    echo "Automation scheduler did not publish a healthy heartbeat" >&2
+    docker logs --tail 100 xvond-automation-scheduler >&2 || true
+    return 1
+}
+
 probe_workflow_contract() {
     docker exec xvond-workflow-engine node -e '
 const url = "http://127.0.0.1:5678/webhook/xvond-actions";
@@ -61,6 +91,25 @@ fetch(url, {
   console.error(`Workflow contract probe failed: ${String(error && error.message || "unknown")}`);
   process.exit(1);
 });'
+}
+
+probe_workflow_to_app_health() {
+    docker exec xvond-workflow-engine node -e '
+fetch("http://app:8000/health/ready")
+  .then(async response => {
+    const text = await response.text();
+    if (!response.ok) throw new Error(`http_${response.status}:${text.slice(0, 200)}`);
+    let result;
+    try { result = JSON.parse(text); }
+    catch (_error) { throw new Error(`invalid_json_response:${text.slice(0, 200)}`); }
+    if (!result || result.status !== "healthy") {
+      throw new Error(`api_not_ready:${text.slice(0, 200)}`);
+    }
+  })
+  .catch(error => {
+    console.error(`Workflow-to-API probe failed: ${String(error && error.message || "unknown")}`);
+    process.exit(1);
+  });'
 }
 
 env_value() {
@@ -122,6 +171,13 @@ case "$(git status --porcelain 2>/dev/null || true)" in
     "") ;;
     *) echo "Refusing production deploy from a dirty Git working tree" >&2; exit 1 ;;
 esac
+
+required_release_branch="${DEPLOY_RELEASE_BRANCH:-main}"
+current_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+if [ "$current_branch" != "$required_release_branch" ]; then
+    echo "Refusing production deploy: current branch '${current_branch:-detached}' is not required release branch '$required_release_branch'" >&2
+    exit 1
+fi
 
 if [ ! -f .env ]; then
     echo "Refusing production deploy: .env is missing" >&2
@@ -185,16 +241,24 @@ if [ "$workflow_enabled" = "true" ]; then
     probe_workflow_contract
 fi
 
-compose stop whatsapp-worker >/dev/null 2>&1 || true
+compose stop whatsapp-worker automation-scheduler >/dev/null 2>&1 || true
 compose up -d --no-deps --force-recreate app
 wait_healthy xvond-core
-compose up -d --no-deps --force-recreate whatsapp-worker
+if [ "$workflow_enabled" = "true" ]; then
+    probe_workflow_to_app_health
+fi
+compose up -d --no-deps --force-recreate whatsapp-worker automation-scheduler
+wait_healthy xvond-whatsapp-worker
+wait_healthy xvond-automation-scheduler
+wait_whatsapp_worker_lease
+wait_scheduler_heartbeat
 
 app_image="$(docker inspect --format '{{.Image}}' xvond-core)"
 worker_image="$(docker inspect --format '{{.Image}}' xvond-whatsapp-worker)"
-if [ -z "$app_image" ] || [ "$app_image" != "$worker_image" ]; then
-    echo "Release rejected: API and WhatsApp worker are not running the same image" >&2
-    echo "app=$app_image worker=$worker_image" >&2
+scheduler_image="$(docker inspect --format '{{.Image}}' xvond-automation-scheduler)"
+if [ -z "$app_image" ] || [ "$app_image" != "$worker_image" ] || [ "$app_image" != "$scheduler_image" ]; then
+    echo "Release rejected: API, WhatsApp worker and automation scheduler are not running the same image" >&2
+    echo "app=$app_image worker=$worker_image scheduler=$scheduler_image" >&2
     exit 1
 fi
 
@@ -212,4 +276,5 @@ fi
 printf 'Xvond release complete: %s\n' "$release_sha"
 printf 'API image: %s\n' "$app_image"
 printf 'WhatsApp worker image: %s\n' "$worker_image"
+printf 'Automation scheduler image: %s\n' "$scheduler_image"
 printf 'Workflow engine enabled: %s\n' "$workflow_enabled"
