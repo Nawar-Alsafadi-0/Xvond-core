@@ -810,5 +810,6 @@ def test_owner_never_disables_generated_action_contract():
         },
         spec=effective,
     )
-    assert action["enabled"] is False
+    assert action["enabled"] is True
+    assert action["_xvond_permission_mode"] == "never"
     assert action["confirmation_required"] is True
