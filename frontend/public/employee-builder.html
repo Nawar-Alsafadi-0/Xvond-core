@@ -31,8 +31,9 @@
       <input id="employee-name" value="My AI Employee" maxlength="200">
 
       <div style="margin-top:20px">
-        <h3>وين بدك يشتغل؟ <span class="muted" style="font-size:14px;font-weight:400">(اختياري الآن)</span></h3>
-        <p class="muted">اختار قناة إذا بتعرفها من هلق. فيك تتركهم كلهم بدون اختيار وتكمّل الربط لاحقًا.</p>
+        <h3>قنوات المحادثة <span class="muted" style="font-size:14px;font-weight:400">(اختياري)</span></h3>
+        <p class="muted">إذا الموظف رح يحكي مع عملاء أو أشخاص، اختار القناة. إذا هو شخصي، محتوى، مراقبة أو شغل خلفي، فيك تترك القنوات كلها فاضية.</p>
+        <p class="muted">Gmail، قراءة البريد، Instagram Publishing وباقي الأنظمة تنربط كـ Integrations حسب الوظيفة وما بتنحسب قناة محادثة. عدد القنوات المتاحة لاحقًا حسب الباقة.</p>
         <div id="channels" class="chips"></div>
       </div>
 
@@ -76,10 +77,8 @@
 (() => {
   const CHANNEL_LABELS = {
     xvond: "Xvond Workspace",
-    website: "الموقع",
-    whatsapp: "واتساب",
-    instagram: "إنستغرام",
-    email: "الإيميل"
+    website: "Website Chat",
+    whatsapp: "WhatsApp"
   };
 
   const $ = id => document.getElementById(id);
