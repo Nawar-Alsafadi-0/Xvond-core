@@ -1,5 +1,6 @@
 from datetime import datetime
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from backend.app.api.admin_ai_employee_files import upload_pdf_knowledge
@@ -32,6 +33,7 @@ from backend.app.core.database.connection import SessionLocal
 from backend.app.core.http_security import safe_http_request, validate_public_http_url
 from backend.app.models.user import User
 from backend.app.models.company import Company
+from backend.app.models.company_profile import CompanyProfile
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.integrations.catalog import (
     get_integration_definition,
@@ -48,6 +50,18 @@ from backend.app.modules.integrations.email_imap import (
     EmailReadConnectorError,
     validate_imap_connection,
 )
+from backend.app.modules.integrations.google_calendar import (
+    GoogleCalendarError,
+    build_google_calendar_authorization_url,
+    exchange_google_calendar_code,
+    google_calendar_oauth_ready,
+    validate_google_calendar_connection,
+)
+from backend.app.modules.integrations.oauth_state import (
+    create_integration_oauth_state,
+    decode_integration_oauth_state,
+)
+from backend.app.core.execution_claims import execution_claims
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.audit.service import audit_service
@@ -66,6 +80,11 @@ class CustomerIntegrationUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     config: dict | None = None
     enabled: bool | None = None
+
+
+class GoogleCalendarOAuthStartRequest(BaseModel):
+    name: str = Field(default="Google Calendar", min_length=1, max_length=200)
+    calendar_id: str = Field(default="primary", min_length=1, max_length=500)
 
 
 def _validate_live_connection(item: CompanyIntegration) -> dict:
@@ -91,6 +110,15 @@ def _validate_live_connection(item: CompanyIntegration) -> dict:
             return validate_smtp_connection(config, timeout=10.0)
         except EmailConnectorError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    if integration_type == "google_calendar":
+        try:
+            evidence, token_updates = validate_google_calendar_connection(config)
+        except GoogleCalendarError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if token_updates:
+            item.config = {**config, **token_updates}
+        return evidence
 
     if integration_type == "instagram_publish":
         instagram_user_id = str(config.get("instagram_user_id") or "").strip()
@@ -570,6 +598,188 @@ def customer_integration_catalog(
     return {"integrations": list_integration_definitions()}
 
 
+@router.post("/integrations/google-calendar/oauth/start")
+def customer_google_calendar_oauth_start(
+    payload: GoogleCalendarOAuthStartRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company = _self_service_company(db, current_user)
+        if current_user.id is None:
+            raise HTTPException(403, "Authenticated customer user is required")
+        if not google_calendar_oauth_ready():
+            raise HTTPException(
+                409,
+                "Google Calendar OAuth is not configured on Xvond yet",
+            )
+
+        current = (
+            db.query(CompanyIntegration)
+            .filter(CompanyIntegration.company_id == company.id)
+            .count()
+        )
+        service_limits.check_current(
+            db,
+            company.id,
+            "ai_agents",
+            "integrations",
+            current,
+        )
+
+        profile = (
+            db.query(CompanyProfile)
+            .filter(CompanyProfile.company_id == company.id)
+            .first()
+        )
+        timezone = str(profile.timezone or "").strip() if profile else ""
+        if not timezone:
+            raise HTTPException(
+                409,
+                "Set the company timezone before connecting Google Calendar",
+            )
+
+        calendar_id = str(payload.calendar_id or "primary").strip() or "primary"
+        item = CompanyIntegration(
+            company_id=company.id,
+            integration_type="google_calendar",
+            name=str(payload.name or "Google Calendar").strip(),
+            config={
+                "calendar_id": calendar_id,
+                "timezone": timezone,
+                "_xvond_oauth_status": "pending",
+            },
+            enabled=False,
+        )
+        db.add(item)
+        db.flush()
+
+        state = create_integration_oauth_state(
+            company_id=company.id,
+            user_id=current_user.id,
+            provider="google_calendar",
+            integration_id=item.id,
+        )
+        state_payload = decode_integration_oauth_state(state)
+        config = reveal_config(item.config) or {}
+        config["_xvond_oauth_state_jti"] = state_payload["jti"]
+        item.config = config
+
+        audit_service.log(
+            db=db,
+            action="customer.integration_oauth_started",
+            resource_type="integration",
+            resource_id=item.id,
+            user_id=current_user.id,
+            company_id=company.id,
+            details={"integration_type": "google_calendar"},
+        )
+        db.commit()
+        return {
+            "status": "authorization_required",
+            "integration_id": item.id,
+            "authorization_url": build_google_calendar_authorization_url(
+                state=state
+            ),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except GoogleCalendarError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    finally:
+        db.close()
+
+
+@router.get("/integrations/google-calendar/oauth/callback")
+def customer_google_calendar_oauth_callback(
+    state: str = "",
+    code: str = "",
+    error: str = "",
+):
+    redirect_url = "/customer-ui#integrations"
+    if error:
+        return RedirectResponse(url=redirect_url, status_code=303)
+
+    try:
+        state_payload = decode_integration_oauth_state(state)
+    except Exception:
+        return RedirectResponse(url=redirect_url, status_code=303)
+    if state_payload.get("provider") != "google_calendar":
+        return RedirectResponse(url=redirect_url, status_code=303)
+
+    claim_key = f"integration_oauth_state:{state_payload['jti']}"
+    if not execution_claims.claim(claim_key, ttl_seconds=900):
+        return RedirectResponse(url=redirect_url, status_code=303)
+
+    db = SessionLocal()
+    try:
+        integration_id = int(state_payload.get("integration_id") or 0)
+        item = (
+            db.query(CompanyIntegration)
+            .filter(
+                CompanyIntegration.id == integration_id,
+                CompanyIntegration.company_id == state_payload["company_id"],
+                CompanyIntegration.integration_type == "google_calendar",
+            )
+            .with_for_update()
+            .first()
+        )
+        if item is None:
+            raise GoogleCalendarError("Google Calendar connection no longer exists")
+
+        user = (
+            db.query(User)
+            .filter(
+                User.id == state_payload["user_id"],
+                User.company_id == state_payload["company_id"],
+            )
+            .first()
+        )
+        if user is None:
+            raise GoogleCalendarError("Google Calendar connection user is invalid")
+
+        config = reveal_config(item.config) or {}
+        if str(config.get("_xvond_oauth_state_jti") or "") != state_payload["jti"]:
+            raise GoogleCalendarError("Google Calendar OAuth state is stale")
+
+        tokens = exchange_google_calendar_code(code)
+        config.update(tokens)
+        config["_xvond_oauth_status"] = "connected"
+        config.pop("_xvond_oauth_state_jti", None)
+
+        evidence, token_updates = validate_google_calendar_connection(config)
+        config.update(token_updates)
+        config["_xvond_validation"] = {
+            **evidence,
+            "validated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        item.config = config
+        item.enabled = True
+
+        audit_service.log(
+            db=db,
+            action="customer.integration_oauth_connected",
+            resource_type="integration",
+            resource_id=item.id,
+            user_id=user.id,
+            company_id=item.company_id,
+            details={
+                "integration_type": "google_calendar",
+                "validation_mode": evidence.get("mode"),
+            },
+        )
+        db.commit()
+        return RedirectResponse(url=redirect_url, status_code=303)
+    except Exception:
+        db.rollback()
+        execution_claims.release(claim_key)
+        return RedirectResponse(url=redirect_url, status_code=303)
+    finally:
+        db.close()
+
+
 @router.get("/integrations")
 def customer_integrations(
     current_user: User = Depends(require_customer_manager),
@@ -645,8 +855,14 @@ def customer_integration_create(
         company = _self_service_company(db, current_user)
         company_id = company.id
         integration_type = str(payload.integration_type or "").strip().lower()
-        if get_integration_definition(integration_type) is None:
+        definition = get_integration_definition(integration_type)
+        if definition is None:
             raise HTTPException(400, "Unsupported integration type")
+        if definition.get("connection_mode") == "oauth":
+            raise HTTPException(
+                409,
+                "Use the OAuth connection flow for this integration type",
+            )
         name = str(payload.name or "").strip()
         if not name:
             raise HTTPException(400, "Integration name is required")
