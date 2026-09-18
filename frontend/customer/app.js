@@ -349,13 +349,14 @@ async function renderIntegrations() {
                         <div class="service-card-head">
                             <div>
                                 <strong>${safe(item.name)}</strong>
-                                <p>${safe(item.integration_type)} · ${item.configured ? "Configured" : "Setup incomplete"}</p>
+                                <p>${safe(item.integration_type)} · ${item.validated ? "Validated" : item.configured ? "Configured · validation required" : "Setup incomplete"}</p>
                             </div>
                             <span class="pill">${item.enabled ? "Active" : "Inactive"}</span>
                         </div>
                         ${(item.configured_secret_fields || []).length
                             ? `<p class="muted">Protected credentials configured: ${safe((item.configured_secret_fields || []).join(", "))}</p>`
                             : ""}
+                        ${item.configured && !item.validated ? `<button type="button" onclick="validateCustomerIntegration(${Number(item.id)})">Validate connection</button>` : ""}
                         <button type="button" onclick="deleteCustomerIntegration(${Number(item.id)})">Remove</button>
                     </div>
                 `).join("") : '<p class="muted">No connected systems yet.</p>'}
@@ -415,6 +416,17 @@ async function renderIntegrations() {
         target.innerHTML = `<div class="panel"><p>${safe(error.message)}</p></div>`;
     }
 }
+
+async function validateCustomerIntegration(integrationId) {
+    try {
+        await api(`/manage/integrations/${Number(integrationId)}/validate`, {method: "POST"});
+        await renderIntegrations();
+    } catch (error) {
+        alert(error.message);
+    }
+}
+
+window.validateCustomerIntegration = validateCustomerIntegration;
 
 async function deleteCustomerIntegration(integrationId) {
     if (!confirm("Remove this connected system?")) return;
