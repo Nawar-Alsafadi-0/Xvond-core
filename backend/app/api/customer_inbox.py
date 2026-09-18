@@ -8,12 +8,15 @@ from sqlalchemy import func, or_
 from backend.app.core.config_secrets import reveal_config
 from backend.app.core.database.connection import SessionLocal
 from backend.app.core.dependencies import require_customer_operator
+from backend.app.core.n8n_channel_gateway import N8NChannelGatewayError, n8n_channel_gateway
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.customer_access import can_view_conversations
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIConversation, AIMessage
 from backend.app.modules.audit.service import audit_service
 from backend.app.modules.channels.catalog import (
+    CHANNEL_RUNTIME_LIVE,
+    N8N_CHANNEL_RUNTIME_ADAPTER,
     canonical_channel_type,
     get_channel_capability,
     live_managed_channel_types,
@@ -125,6 +128,16 @@ def _channel_label(channel_type: str | None) -> str:
 
 def _handoff_capabilities(channel_type: str | None) -> dict:
     value = canonical_channel_type(channel_type or "unknown")
+    capability = get_channel_capability(value) or {}
+    if (
+        capability.get("runtime_state") == CHANNEL_RUNTIME_LIVE
+        and capability.get("runtime_adapter") == N8N_CHANNEL_RUNTIME_ADAPTER
+    ):
+        return {
+            "handoff_supported": True,
+            "human_reply_supported": True,
+            "human_reply_delivery": "n8n_channel",
+        }
     capabilities = HANDOFF_CAPABILITIES.get(value)
     if capabilities is None:
         capabilities = {
@@ -673,6 +686,7 @@ def send_human_reply(
         audit_details = {"delivery": delivery, "assigned_user_id": current_user.id}
         message = None
         delivery_row = None
+        delivery_state = None
 
         if delivery == "whatsapp":
             session = _session(db, current_user.company_id, conversation.id)
@@ -759,6 +773,100 @@ def send_human_reply(
             db.add(message)
             handoff.status = "in_progress"
             handoff.updated_at = datetime.utcnow()
+        elif delivery == "n8n_channel":
+            channel = (
+                db.query(AgentChannel)
+                .filter(
+                    AgentChannel.id == conversation.channel_id,
+                    AgentChannel.company_id == current_user.company_id,
+                    AgentChannel.agent_id == conversation.agent_id,
+                    AgentChannel.enabled.is_(True),
+                )
+                .first()
+            )
+            capability = (
+                get_channel_capability(channel.channel_type)
+                if channel is not None
+                else None
+            ) or {}
+            if (
+                channel is None
+                or capability.get("runtime_state") != CHANNEL_RUNTIME_LIVE
+                or capability.get("runtime_adapter") != N8N_CHANNEL_RUNTIME_ADAPTER
+            ):
+                raise HTTPException(409, "The managed channel for this conversation is not active")
+            external_contact_id = str(conversation.external_contact_id or "").strip()
+            if not external_contact_id:
+                raise HTTPException(409, "The managed channel contact identity is unavailable")
+
+            client_message_id = data.client_message_id or str(uuid4())
+            source_key = (
+                f"portal-human-n8n:{current_user.company_id}:"
+                f"{conversation.id}:{current_user.id}:{client_message_id}"
+            )
+            if len(source_key) > 320:
+                raise HTTPException(400, "Client message identity is too long")
+            message = (
+                db.query(AIMessage)
+                .filter(AIMessage.source_key == source_key)
+                .first()
+            )
+            if message is not None and message.content != text:
+                raise HTTPException(
+                    409,
+                    "This client message identity is already used by a different reply",
+                )
+            if message is None:
+                message = AIMessage(
+                    conversation_id=conversation.id,
+                    role="human",
+                    content=text,
+                    source_key=source_key,
+                )
+                db.add(message)
+                db.flush()
+                handoff.status = "in_progress"
+                handoff.updated_at = datetime.utcnow()
+                _audit_handoff(
+                    db,
+                    action="customer_inbox.human_reply_prepared",
+                    conversation=conversation,
+                    current_user=current_user,
+                    details={
+                        **audit_details,
+                        "channel_id": channel.id,
+                        "message_id": message.id,
+                    },
+                )
+                db.commit()
+                db.refresh(message)
+
+            idempotency_key = source_key
+            try:
+                delivery_state = n8n_channel_gateway.send_message(
+                    company_id=current_user.company_id,
+                    agent_id=conversation.agent_id,
+                    channel_id=channel.id,
+                    channel_type=canonical_channel_type(channel.channel_type),
+                    external_contact_id=external_contact_id,
+                    message=text,
+                    idempotency_key=idempotency_key,
+                )
+            except N8NChannelGatewayError as exc:
+                raise HTTPException(
+                    503,
+                    "Managed channel delivery is temporarily unavailable",
+                ) from exc
+            if not delivery_state.get("success"):
+                raise HTTPException(502, "Managed channel delivery failed")
+            audit_details.update(
+                {
+                    "channel_id": channel.id,
+                    "provider_message_id": (
+                        delivery_state.get("data") or {}
+                    ).get("provider_message_id"),
+                }
+            )
         else:
             raise HTTPException(409, "No human reply delivery adapter exists for this channel")
 
@@ -778,7 +886,11 @@ def send_human_reply(
             "status": "sent",
             "mode": "human",
             "delivery": delivery,
-            "delivery_state": delivery_payload(delivery_row) if delivery_row is not None else None,
+            "delivery_state": (
+                delivery_payload(delivery_row)
+                if delivery_row is not None
+                else delivery_state
+            ),
             "message": {
                 "id": message.id,
                 "role": message.role,
