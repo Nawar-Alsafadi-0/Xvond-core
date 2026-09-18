@@ -16,6 +16,10 @@ class PaymentGatewayError(RuntimeError):
     pass
 
 
+class PaymentGatewayOutcomeUnknown(PaymentGatewayError):
+    """The provider may have accepted a side effect but Xvond cannot prove it."""
+
+
 class PaddleGateway:
     """Provider adapter for global Self-Service checkout.
 
@@ -391,7 +395,9 @@ class TapGateway:
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise PaymentGatewayError("Tap recurring charge could not be created") from exc
+            raise PaymentGatewayOutcomeUnknown(
+                "Tap recurring charge outcome is unknown"
+            ) from exc
 
         if not isinstance(payload, dict):
             raise PaymentGatewayError("Tap recurring charge returned an invalid response")
