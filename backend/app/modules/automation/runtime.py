@@ -267,11 +267,16 @@ class AutomationRuntime:
                         "values": params.get("values") or params,
                     }
                 elif node_type == "condition":
-                    matched = compare_values(
-                        params.get("left"),
-                        str(params.get("operator") or "eq"),
-                        params.get("right"),
-                    )
+                    try:
+                        matched = compare_values(
+                            params.get("left"),
+                            str(params.get("operator") or "eq"),
+                            params.get("right"),
+                        )
+                    except Exception as exc:
+                        raise ValueError(
+                            f"Execution graph condition node {node_id} failed: {exc}"
+                        ) from exc
                     node_outputs[node_id] = {"matched": bool(matched)}
                     continue
                 elif node_type == "select":
@@ -394,25 +399,30 @@ class AutomationRuntime:
                         )
                     results = []
                     for loop_index, loop_item in enumerate(items):
-                        nested_result = self.execute_step(
-                            db,
-                            company_id,
-                            {
-                                "type": "graph",
-                                "agent_id": graph_agent_id,
-                                "graph": nested_graph,
-                            },
-                            {
-                                **state,
-                                "_xvond_loop_item": loop_item,
-                                "_xvond_loop_index": loop_index,
-                            },
-                            run_id=run_id,
-                            step_index=(step_index * 100000)
-                            + (node_index * 1000)
-                            + loop_index
-                            + 1,
-                        )
+                        try:
+                            nested_result = self.execute_step(
+                                db,
+                                company_id,
+                                {
+                                    "type": "graph",
+                                    "agent_id": graph_agent_id,
+                                    "graph": nested_graph,
+                                },
+                                {
+                                    **state,
+                                    "_xvond_loop_item": loop_item,
+                                    "_xvond_loop_index": loop_index,
+                                },
+                                run_id=run_id,
+                                step_index=(step_index * 100000)
+                                + (node_index * 1000)
+                                + loop_index
+                                + 1,
+                            )
+                        except Exception as exc:
+                            raise ValueError(
+                                f"Execution graph foreach node {node_id} failed at item {loop_index}: {exc}"
+                            ) from exc
                         results.append(nested_result)
                     node_outputs[node_id] = {
                         "items": results,
@@ -422,22 +432,27 @@ class AutomationRuntime:
                 else:
                     raise ValueError(f"Unsupported execution graph node type: {node_type}")
 
-                node_result = self.execute_step(
-                    db,
-                    company_id,
-                    nested_step,
-                    {
-                        **state,
-                        **{
-                            key: value
-                            for output in node_outputs.values()
-                            if isinstance(output, dict)
-                            for key, value in output.items()
+                try:
+                    node_result = self.execute_step(
+                        db,
+                        company_id,
+                        nested_step,
+                        {
+                            **state,
+                            **{
+                                key: value
+                                for output in node_outputs.values()
+                                if isinstance(output, dict)
+                                for key, value in output.items()
+                            },
                         },
-                    },
-                    run_id=run_id,
-                    step_index=(step_index * 1000) + node_index + 1,
-                )
+                        run_id=run_id,
+                        step_index=(step_index * 1000) + node_index + 1,
+                    )
+                except Exception as exc:
+                    raise ValueError(
+                        f"Execution graph node {node_id} ({node_type}) failed: {exc}"
+                    ) from exc
                 node_outputs[node_id] = node_result if isinstance(node_result, dict) else {
                     "result": node_result
                 }
