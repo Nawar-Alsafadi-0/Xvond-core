@@ -328,19 +328,33 @@ def _sync_tap_renewal_attempt(
     *,
     transaction_id: str,
     charge_status: str,
+    renewal_key: str | None = None,
 ) -> ServiceRenewalAttempt | None:
+    query = db.query(ServiceRenewalAttempt).filter(
+        ServiceRenewalAttempt.provider == "tap"
+    )
     attempt = (
-        db.query(ServiceRenewalAttempt)
-        .filter(
-            ServiceRenewalAttempt.provider == "tap",
+        query.filter(
             ServiceRenewalAttempt.provider_transaction_id == transaction_id,
         )
         .order_by(ServiceRenewalAttempt.id.desc())
         .with_for_update()
         .first()
     )
+    if attempt is None and str(renewal_key or "").strip():
+        attempt = (
+            query.filter(
+                ServiceRenewalAttempt.idempotency_key == str(renewal_key).strip(),
+            )
+            .order_by(ServiceRenewalAttempt.id.desc())
+            .with_for_update()
+            .first()
+        )
     if attempt is None:
         return None
+
+    if transaction_id and not attempt.provider_transaction_id:
+        attempt.provider_transaction_id = transaction_id
 
     if charge_status == "CAPTURED":
         attempt.status = "captured"
@@ -377,6 +391,7 @@ def _process_tap_charge(db, data: dict) -> dict:
         db,
         transaction_id=transaction_id,
         charge_status=status,
+        renewal_key=str(metadata.get("xvond_renewal_key") or "").strip() or None,
     )
 
     if status == "CAPTURED":
