@@ -576,3 +576,117 @@ def test_self_service_schedule_blocks_when_required_runtime_input_is_missing(dat
     assert requirement["schedule_missing_inputs"] == ["threshold"]
     with factory() as db:
         assert db.query(AutomationWorkflow).count() == 0
+
+
+def test_self_service_job_brief_revision_clears_only_generated_build_artifacts(database):
+    factory, calls = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    api.compile_employee(1, USER)
+
+    with factory() as db:
+        assignment = _assignment(db)
+        assignment_config = reveal_config(assignment.config)
+        assignment_config["actions"]["operator_action"] = {
+            "enabled": True,
+            "confirmation_required": True,
+            "destination": {"type": "integration", "integration_id": 99},
+        }
+        assignment.config = assignment_config
+        db.add_all([
+            AutomationWorkflow(
+                company_id=1,
+                name="Generated old schedule",
+                trigger_type="schedule",
+                trigger_config={
+                    "_xvond_source": "self_service_employee",
+                    "_xvond_agent_id": 1,
+                    "_xvond_requirement_key": KEY,
+                },
+                steps=[],
+                enabled=False,
+            ),
+            AutomationWorkflow(
+                company_id=1,
+                name="Manual schedule",
+                trigger_type="schedule",
+                trigger_config={"schedule": {"kind": "interval", "every_minutes": 60}},
+                steps=[],
+                enabled=False,
+            ),
+        ])
+        db.commit()
+
+    revised = "Create content drafts for my social posts and organize the writing work."
+    result = api.revise_self_service_job_brief(
+        1,
+        api.EmployeeBuilderReviseRequest(description=revised),
+        USER,
+    )
+
+    assert result["status"] == "updated"
+    assert result["compiled"] is False
+    assert result["job_brief"] == revised
+    assert calls and len(calls) == 1
+
+    with factory() as db:
+        builder = _builder(db)
+        assert builder["source_description"] == revised
+        assert builder["job_brief"] == revised
+        assert builder["compiled_spec"] is None
+        assert "delivery" not in builder
+        assert "compiled_at" not in builder
+
+        agent = db.get(AIAgent, 1)
+        assert agent.description == revised
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        assert config.capabilities == {"content": True}
+
+        actions = reveal_config(_assignment(db).config)["actions"]
+        assert set(actions) == {"operator_action"}
+        assert actions["operator_action"]["destination"]["integration_id"] == 99
+
+        workflows = db.query(AutomationWorkflow).all()
+        assert [item.name for item in workflows] == ["Manual schedule"]
+
+
+def test_job_brief_revision_is_self_service_only(database):
+    factory, calls = database
+
+    with pytest.raises(HTTPException) as exc:
+        api.revise_self_service_job_brief(
+            1,
+            api.EmployeeBuilderReviseRequest(description="Create content drafts for my social posts."),
+            USER,
+        )
+
+    assert exc.value.status_code == 409
+    assert "Managed employees" in str(exc.value.detail)
+    with factory() as db:
+        assert _builder(db)["source_description"] == BRIEF
+    assert calls == []
+
+
+def test_live_self_service_employee_must_be_deactivated_before_job_brief_revision(database):
+    factory, calls = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.get(AIAgent, 1).enabled = True
+        db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        api.revise_self_service_job_brief(
+            1,
+            api.EmployeeBuilderReviseRequest(description="Create content drafts for my social posts."),
+            USER,
+        )
+
+    assert exc.value.status_code == 409
+    assert "Deactivate" in str(exc.value.detail)
+    with factory() as db:
+        assert _builder(db)["source_description"] == BRIEF
+    assert calls == []
