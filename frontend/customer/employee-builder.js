@@ -921,7 +921,10 @@
                         const encodedKey = String(select.dataset.integrationSelect || "");
                         const wrapper = document.querySelector(`[data-integration-endpoint-fields="${encodedKey}"]`);
                         const selectedType = String(select.selectedOptions?.[0]?.dataset?.integrationType || "");
-                        if (wrapper) wrapper.classList.toggle("hidden", selectedType === "instagram_publish");
+                        if (wrapper) wrapper.classList.toggle(
+                            "hidden",
+                            new Set(["instagram_publish", "email_smtp"]).has(selectedType)
+                        );
                     };
                     select.addEventListener("change", syncEndpointFields);
                     syncEndpointFields();
