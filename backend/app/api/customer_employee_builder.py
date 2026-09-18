@@ -1480,10 +1480,11 @@ def rollback_self_service_employee(
         if selected is None:
             raise HTTPException(404, "Employee version not found")
 
+        previous_capabilities = dict(config.capabilities or {})
         builder = _snapshot_builder_version(
             builder,
             reason="before_rollback",
-            capabilities=dict(config.capabilities or {}),
+            capabilities=previous_capabilities,
         )
         restored_brief = str(selected.get("source_description") or "").strip()
         if not restored_brief:
@@ -1505,7 +1506,7 @@ def rollback_self_service_employee(
         _clear_current_build_evidence(builder)
 
         if isinstance(restored_spec, dict):
-            restored_spec = dict(restored_spec)
+            restored_spec = deepcopy(restored_spec)
             restored_spec, delivery = provision_compiled_capabilities(
                 db,
                 agent_id=agent.id,
@@ -1537,9 +1538,38 @@ def rollback_self_service_employee(
             )
 
         config.capabilities = restored_capabilities
+        _reconcile_builder_runtime_tools(
+            db,
+            agent_id=agent.id,
+            previous_capabilities=previous_capabilities,
+            next_capabilities=tuple(
+                key
+                for key, enabled in restored_capabilities.items()
+                if enabled
+            ),
+        )
         settings_value["employee_builder"] = builder
         config.settings = settings_value
         agent.description = restored_brief
+
+        profile = (
+            db.query(AIAgentProfile)
+            .filter(
+                AIAgentProfile.company_id == company.id,
+                AIAgentProfile.agent_id == agent.id,
+            )
+            .first()
+        )
+        if profile is not None:
+            profile.instructions = restored_brief
+            if isinstance(restored_spec, dict):
+                profile.business_type = (
+                    "personal"
+                    if str(restored_spec.get("scope") or "").strip().lower() == "personal"
+                    else None
+                )
+            else:
+                profile.business_type = builder.get("business_type")
 
         reconcile_managed_channel_requests(
             db,
