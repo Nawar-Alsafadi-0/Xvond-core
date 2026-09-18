@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from backend.app.core.ai.engine import ProviderExecutionError, ai_engine
 from backend.app.core.ai.provider_policy import runtime_selections
 from backend.app.core.company_lifecycle import portal_access_allowed
+from backend.app.core.config_secrets import reveal_config
 from backend.app.core.database.connection import SessionLocal
 from backend.app.core.dependencies import require_customer_manager
 from backend.app.models.company import Company
@@ -38,6 +39,7 @@ from backend.app.modules.ai_agent.self_service_policy import (
     is_self_service_company,
     self_service_readiness,
 )
+from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord, CompanyAIProfile
@@ -60,6 +62,10 @@ class EmployeeBuilderCreateRequest(BaseModel):
 
 class EmployeeBuilderTestRequest(BaseModel):
     message: str = Field(min_length=1, max_length=12000)
+
+
+class EmployeeBuilderReviseRequest(BaseModel):
+    description: str = Field(min_length=8, max_length=4000)
 
 
 DEFAULT_CUSTOMER_CONTROLS = {
@@ -212,6 +218,107 @@ def _store_provisioned_spec(
     # Flush the spec and contracts together; the caller owns commit/rollback.
     db.flush()
     return compiled_spec
+
+
+def _clear_generated_self_service_build(db, *, company_id: int, agent_id: int) -> None:
+    """Remove only runtime artifacts generated from the previous Job Brief."""
+    assignment = (
+        db.query(AgentToolAssignment)
+        .filter(
+            AgentToolAssignment.agent_id == agent_id,
+            AgentToolAssignment.tool_name == "action_request",
+        )
+        .first()
+    )
+    if assignment is not None:
+        assignment_config = dict(reveal_config(assignment.config) or {})
+        actions = dict(assignment_config.get("actions") or {})
+        kept_actions = {
+            key: value
+            for key, value in actions.items()
+            if not (isinstance(value, dict) and value.get("xvond_generated"))
+        }
+        if kept_actions != actions:
+            assignment_config["actions"] = kept_actions
+            assignment.config = assignment_config
+
+    workflows = (
+        db.query(AutomationWorkflow)
+        .filter(
+            AutomationWorkflow.company_id == company_id,
+            AutomationWorkflow.trigger_type == "schedule",
+        )
+        .all()
+    )
+    for workflow in workflows:
+        trigger_config = workflow.trigger_config if isinstance(workflow.trigger_config, dict) else {}
+        if (
+            trigger_config.get("_xvond_source") == "self_service_employee"
+            and int(trigger_config.get("_xvond_agent_id") or 0) == int(agent_id)
+        ):
+            # Keep historical AutomationRun rows valid. A revised Job Brief
+            # retires generated schedules instead of deleting their history.
+            retired_config = dict(trigger_config)
+            retired_config["_xvond_source"] = "self_service_employee_retired"
+            retired_config["_xvond_retired_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            workflow.trigger_config = retired_config
+            workflow.enabled = False
+
+
+def _reconcile_builder_runtime_tools(
+    db,
+    *,
+    agent_id: int,
+    previous_capabilities: dict,
+    next_capabilities: tuple[str, ...],
+) -> None:
+    """Keep Builder-owned tools aligned without overriding operator-managed tools."""
+    previous = tuple(
+        key for key, enabled in (previous_capabilities or {}).items() if enabled
+    )
+    previous_builder_tools = set(runtime_tools_for(previous))
+    desired_tools = set(runtime_tools_for(next_capabilities))
+
+    assignments = (
+        db.query(AgentToolAssignment)
+        .filter(AgentToolAssignment.agent_id == agent_id)
+        .all()
+    )
+    by_name = {item.tool_name: item for item in assignments}
+
+    for assignment in assignments:
+        stored = dict(reveal_config(assignment.config) or {})
+        builder_owned = (
+            stored.get("_xvond_source") == "employee_builder"
+            or (assignment.tool_name in previous_builder_tools and not stored)
+        )
+        if not builder_owned:
+            continue
+
+        if stored.get("_xvond_source") != "employee_builder":
+            stored["_xvond_source"] = "employee_builder"
+
+        if assignment.tool_name in desired_tools:
+            if stored.pop("_xvond_retired_by_revision", None):
+                assignment.enabled = True
+            assignment.config = stored
+            continue
+
+        stored["_xvond_retired_by_revision"] = True
+        assignment.config = stored
+        assignment.enabled = False
+
+    for tool_name in desired_tools:
+        if tool_name in by_name:
+            continue
+        db.add(
+            AgentToolAssignment(
+                agent_id=agent_id,
+                tool_name=tool_name,
+                config={"_xvond_source": "employee_builder"},
+                enabled=True,
+            )
+        )
 
 
 def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: AgentConfig) -> dict:
@@ -438,7 +545,7 @@ def create_employee(
                 AgentToolAssignment(
                     agent_id=agent.id,
                     tool_name=tool_name,
-                    config={},
+                    config={"_xvond_source": "employee_builder"},
                     enabled=True,
                 )
             )
@@ -464,6 +571,129 @@ def create_employee(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.patch("/{agent_id}/job-brief")
+def revise_self_service_job_brief(
+    agent_id: int,
+    data: EmployeeBuilderReviseRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Revise a draft Self-Service Job Brief and invalidate only generated build artifacts."""
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Xvond Managed employees must use the managed delivery flow",
+            )
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == agent_id,
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        # Keep the same lock order as compilation: config first, then agent.
+        # This serializes revision with launch/build without creating a lock cycle.
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+        if agent.enabled:
+            raise HTTPException(
+                409,
+                "Deactivate this employee before revising its Job Brief",
+            )
+        try:
+            blueprint = _build_final_blueprint(
+                EmployeeBuilderCreateRequest(
+                    description=data.description,
+                    name=agent.name,
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        settings = dict(config.settings or {})
+        builder = dict(settings.get("employee_builder") or {})
+        builder.update(
+            {
+                "version": 2,
+                "source_description": blueprint.description,
+                "job_brief": blueprint.description,
+                "audience": blueprint.audience,
+                "requested_channels": communication_channels(blueprint.channels),
+                "permissions": dict(blueprint.permissions),
+                "missing_information": list(blueprint.missing_information),
+                "onboarding_source": company.onboarding_source,
+                "delivery_mode": "self_service",
+                "compiled_spec": None,
+            }
+        )
+        for stale_key in (
+            "delivery",
+            "compiled_at",
+            "compiler_provider",
+            "compiler_model",
+        ):
+            builder.pop(stale_key, None)
+        settings["employee_builder"] = builder
+
+        _clear_generated_self_service_build(
+            db,
+            company_id=company.id,
+            agent_id=agent.id,
+        )
+
+        _reconcile_builder_runtime_tools(
+            db,
+            agent_id=agent.id,
+            previous_capabilities=dict(config.capabilities or {}),
+            next_capabilities=blueprint.capabilities,
+        )
+        config.settings = settings
+        config.capabilities = {item: True for item in blueprint.capabilities}
+        agent.description = blueprint.description
+        agent.system_prompt = build_employee_system_prompt(
+            owner_name=company.name,
+            blueprint=blueprint,
+        )
+
+        profile = (
+            db.query(AIAgentProfile)
+            .filter(
+                AIAgentProfile.company_id == company.id,
+                AIAgentProfile.agent_id == agent.id,
+            )
+            .first()
+        )
+        if profile is not None:
+            profile.instructions = blueprint.description
+            profile.business_type = "personal" if blueprint.audience == "personal" else None
+
+        db.commit()
+        return {
+            "status": "updated",
+            "agent_id": agent.id,
+            "compiled": False,
+            "job_brief": blueprint.description,
+            "requested_channels": list(communication_channels(blueprint.channels)),
+            "missing_information": list(blueprint.missing_information),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         raise
@@ -560,6 +790,9 @@ def launch_self_service_employee(
         if agent is None:
             raise HTTPException(404, "AI employee not found")
         config = _employee_config_or_404(db, agent)
+        # Match compile/revise lock ordering to avoid config↔agent deadlocks.
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
 
         state = self_service_readiness(
             db,

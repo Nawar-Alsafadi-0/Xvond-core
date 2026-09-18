@@ -22,7 +22,7 @@ from backend.app.modules.ai_agent.employee_capability_builder import build_manag
 from backend.app.modules.ai_agent.employee_compiler import normalize_compiled_spec
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
-from backend.app.modules.automation.models import AutomationWorkflow
+from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.tools.business_models import ActionRequest
 from backend.app.modules.tools.models import AgentToolAssignment
 from backend.app.modules.tools.executor import ToolExecutor
@@ -576,3 +576,166 @@ def test_self_service_schedule_blocks_when_required_runtime_input_is_missing(dat
     assert requirement["schedule_missing_inputs"] == ["threshold"]
     with factory() as db:
         assert db.query(AutomationWorkflow).count() == 0
+
+
+def test_self_service_job_brief_revision_clears_only_generated_build_artifacts(database):
+    factory, calls = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    api.compile_employee(1, USER)
+
+    with factory() as db:
+        assignment = _assignment(db)
+        assignment_config = reveal_config(assignment.config)
+        assignment_config["actions"]["operator_action"] = {
+            "enabled": True,
+            "confirmation_required": True,
+            "destination": {"type": "integration", "integration_id": 99},
+        }
+        assignment.config = assignment_config
+
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        config.capabilities = {"customer_support": True}
+        db.add_all([
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="human_handoff",
+                config={},
+                enabled=True,
+            ),
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="webhook",
+                config={"url": "https://operator.example.com/hook"},
+                enabled=True,
+            ),
+        ])
+
+        generated = AutomationWorkflow(
+            company_id=1,
+            name="Generated old schedule",
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_requirement_key": KEY,
+            },
+            steps=[],
+            enabled=False,
+        )
+        manual = AutomationWorkflow(
+            company_id=1,
+            name="Manual schedule",
+            trigger_type="schedule",
+            trigger_config={"schedule": {"kind": "interval", "every_minutes": 60}},
+            steps=[],
+            enabled=False,
+        )
+        db.add_all([generated, manual])
+        db.flush()
+        db.add(
+            AutomationRun(
+                company_id=1,
+                workflow_id=generated.id,
+                status="completed",
+                input_data={},
+                output_data={"historical": True},
+            )
+        )
+        db.commit()
+
+    revised = "Create content drafts for my social posts and organize the writing work."
+    result = api.revise_self_service_job_brief(
+        1,
+        api.EmployeeBuilderReviseRequest(description=revised),
+        USER,
+    )
+
+    assert result["status"] == "updated"
+    assert result["compiled"] is False
+    assert result["job_brief"] == revised
+    assert calls and len(calls) == 1
+
+    with factory() as db:
+        builder = _builder(db)
+        assert builder["source_description"] == revised
+        assert builder["job_brief"] == revised
+        assert builder["compiled_spec"] is None
+        assert "delivery" not in builder
+        assert "compiled_at" not in builder
+
+        agent = db.get(AIAgent, 1)
+        assert agent.description == revised
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        assert config.capabilities == {"content": True}
+
+        actions = reveal_config(_assignment(db).config)["actions"]
+        assert set(actions) == {"operator_action"}
+        assert actions["operator_action"]["destination"]["integration_id"] == 99
+
+        handoff = db.query(AgentToolAssignment).filter_by(
+            agent_id=1, tool_name="human_handoff"
+        ).one()
+        assert handoff.enabled is False
+        handoff_config = reveal_config(handoff.config)
+        assert handoff_config["_xvond_source"] == "employee_builder"
+        assert handoff_config["_xvond_retired_by_revision"] is True
+
+        manual_webhook = db.query(AgentToolAssignment).filter_by(
+            agent_id=1, tool_name="webhook"
+        ).one()
+        assert manual_webhook.enabled is True
+        assert reveal_config(manual_webhook.config)["url"] == "https://operator.example.com/hook"
+
+        workflows = {item.name: item for item in db.query(AutomationWorkflow).all()}
+        assert set(workflows) == {"Generated old schedule", "Manual schedule"}
+        retired = workflows["Generated old schedule"]
+        assert retired.enabled is False
+        assert retired.trigger_config["_xvond_source"] == "self_service_employee_retired"
+        assert retired.trigger_config["_xvond_retired_at"]
+        assert db.query(AutomationRun).filter_by(workflow_id=retired.id).count() == 1
+        assert workflows["Manual schedule"].trigger_config == {
+            "schedule": {"kind": "interval", "every_minutes": 60}
+        }
+
+
+def test_job_brief_revision_is_self_service_only(database):
+    factory, calls = database
+
+    with pytest.raises(HTTPException) as exc:
+        api.revise_self_service_job_brief(
+            1,
+            api.EmployeeBuilderReviseRequest(description="Create content drafts for my social posts."),
+            USER,
+        )
+
+    assert exc.value.status_code == 409
+    assert "Managed employees" in str(exc.value.detail)
+    with factory() as db:
+        assert _builder(db)["source_description"] == BRIEF
+    assert calls == []
+
+
+def test_live_self_service_employee_must_be_deactivated_before_job_brief_revision(database):
+    factory, calls = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.get(AIAgent, 1).enabled = True
+        db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        api.revise_self_service_job_brief(
+            1,
+            api.EmployeeBuilderReviseRequest(description="Create content drafts for my social posts."),
+            USER,
+        )
+
+    assert exc.value.status_code == 409
+    assert "Deactivate" in str(exc.value.detail)
+    with factory() as db:
+        assert _builder(db)["source_description"] == BRIEF
+    assert calls == []

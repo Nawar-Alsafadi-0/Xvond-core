@@ -213,6 +213,21 @@
                         <h3>Job brief</h3>
                         <p>${escapeHtml(employee.description || "")}</p>
                         <p class="muted">This brief is the source of truth. Xvond builds the employee around the requested job instead of limiting it to a predefined agent type.</p>
+                        ${employee.delivery_mode === "self_service" && !employee.enabled ? `
+                            <div class="employee-builder-actions">
+                                <button type="button" id="revise-job-brief-btn">Revise job brief</button>
+                            </div>
+                            <div id="job-brief-editor" class="employee-builder-revision hidden">
+                                <label for="job-brief-editor-input"><strong>Updated Job Brief</strong></label>
+                                <textarea id="job-brief-editor-input" rows="8" maxlength="4000"></textarea>
+                                <p class="muted">Saving a revision clears only Xvond-generated build artifacts from the old brief. Manual settings and connected external systems stay intact.</p>
+                                <div class="employee-builder-actions">
+                                    <button type="button" id="save-job-brief-btn">${employee.can_compile ? "Save & rebuild" : "Save job brief"}</button>
+                                    <button type="button" id="cancel-job-brief-btn">Cancel</button>
+                                </div>
+                                <div id="job-brief-error" class="error"></div>
+                            </div>
+                        ` : ""}
                     </div>
 
                     <div class="employee-builder-summary-grid">
@@ -268,6 +283,31 @@
             </div>
         `;
 
+        const reviseButton = document.getElementById("revise-job-brief-btn");
+        const revisionEditor = document.getElementById("job-brief-editor");
+        const revisionInput = document.getElementById("job-brief-editor-input");
+        const cancelRevisionButton = document.getElementById("cancel-job-brief-btn");
+        const saveRevisionButton = document.getElementById("save-job-brief-btn");
+        if (reviseButton && revisionEditor && revisionInput) {
+            reviseButton.addEventListener("click", () => {
+                revisionInput.value = employee.description || "";
+                revisionEditor.classList.remove("hidden");
+                reviseButton.disabled = true;
+                revisionInput.focus();
+            });
+        }
+        if (cancelRevisionButton && revisionEditor && reviseButton) {
+            cancelRevisionButton.addEventListener("click", () => {
+                revisionEditor.classList.add("hidden");
+                reviseButton.disabled = false;
+            });
+        }
+        if (saveRevisionButton && revisionInput) {
+            saveRevisionButton.addEventListener("click", () => {
+                saveJobBrief(employee.agent_id, revisionInput.value, employee.can_compile);
+            });
+        }
+
         const prepareButton = document.getElementById("prepare-employee-btn");
         if (prepareButton) {
             prepareButton.addEventListener("click", () => prepareEmployee(employee.agent_id));
@@ -275,6 +315,41 @@
         const launchButton = document.getElementById("launch-employee-btn");
         if (launchButton) {
             launchButton.addEventListener("click", () => launchEmployee(employee.agent_id));
+        }
+    }
+
+    async function saveJobBrief(agentId, description, rebuild) {
+        const button = document.getElementById("save-job-brief-btn");
+        const error = document.getElementById("job-brief-error");
+        const clean = String(description || "").trim();
+        if (error) error.textContent = "";
+        if (clean.length < 8) {
+            if (error) error.textContent = "Describe the employee job in a little more detail.";
+            return;
+        }
+        if (button) button.disabled = true;
+        let saved = false;
+        try {
+            await api(`/customer/employee-builder/${agentId}/job-brief`, {
+                method: "PATCH",
+                body: JSON.stringify({ description: clean })
+            });
+            saved = true;
+            if (rebuild) {
+                await api(`/customer/employee-builder/${agentId}/compile`, {
+                    method: "POST",
+                    body: "{}"
+                });
+            }
+            await loadEmployeeBuilder();
+        } catch (err) {
+            if (error) {
+                error.textContent = saved && rebuild
+                    ? `Job Brief saved, but rebuild failed: ${err?.message || "Could not rebuild employee."}`
+                    : (err?.message || "Could not update Job Brief.");
+            }
+        } finally {
+            if (button) button.disabled = false;
         }
     }
 
