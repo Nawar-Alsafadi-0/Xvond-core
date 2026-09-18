@@ -97,7 +97,8 @@ url = sys.argv[1].rstrip("/") + "/health/ready"
 try:
     with urllib.request.urlopen(url, timeout=5) as response:
         payload = json.load(response)
-    print(f"Public route response: status={payload.get('status')!r}", file=sys.stderr)
+    status = payload.get("status")
+    print(f"Public route response: status={status!r}", file=sys.stderr)
 except Exception as exc:
     print(f"Public route probe error: {type(exc).__name__}: {exc}", file=sys.stderr)
 ' "$base_url" >&2 || true
