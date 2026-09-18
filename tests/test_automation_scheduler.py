@@ -18,6 +18,10 @@ from backend.app.modules.automation.schedule import (
 )
 from backend.app.modules.automation import scheduler
 from backend.app.modules.automation import runtime as automation_runtime_module
+from backend.app.modules.automation.webhook_auth import (
+    automation_webhook_key,
+    verify_automation_webhook_key,
+)
 from backend.app.modules.tools.models import AgentToolAssignment
 
 
@@ -629,3 +633,64 @@ def test_graph_runtime_rejects_unbounded_foreach():
         assert "exceeds 100 items" in str(exc)
     else:
         raise AssertionError("foreach over 100 items must fail closed")
+
+
+
+def test_webhook_trigger_accepts_general_graph_but_rejects_raw_tool():
+    trigger = validate_workflow(
+        "webhook",
+        [
+            {
+                "type": "graph",
+                "agent_id": 1,
+                "graph": {
+                    "version": 1,
+                    "nodes": [
+                        {
+                            "id": "notify",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "received"},
+                        }
+                    ],
+                },
+            }
+        ],
+        {},
+    )
+    assert trigger == "webhook"
+
+    with __import__("pytest").raises(HTTPException) as exc:
+        validate_workflow(
+            "webhook",
+            [{"type": "tool", "agent_id": 1, "tool_name": "action_request"}],
+            {},
+        )
+    assert exc.value.status_code == 400
+    assert "not production-safe yet" in str(exc.value.detail)
+
+
+def test_automation_webhook_key_is_stable_and_scoped(monkeypatch):
+    import backend.app.modules.automation.webhook_auth as webhook_auth
+
+    monkeypatch.setattr(
+        webhook_auth.settings,
+        "JWT_SECRET",
+        "unit-test-secret-" * 4,
+    )
+    first = automation_webhook_key(workflow_id=10, company_id=20)
+    second = automation_webhook_key(workflow_id=10, company_id=20)
+    other = automation_webhook_key(workflow_id=11, company_id=20)
+
+    assert first == second
+    assert first != other
+    assert verify_automation_webhook_key(
+        first,
+        workflow_id=10,
+        company_id=20,
+    ) is True
+    assert verify_automation_webhook_key(
+        other,
+        workflow_id=10,
+        company_id=20,
+    ) is False
