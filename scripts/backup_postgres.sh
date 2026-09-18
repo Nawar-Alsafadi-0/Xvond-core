@@ -32,10 +32,14 @@ pg_dump \
     --no-privileges \
     --file="$partial_path"
 
+# A successful pg_dump exit is necessary but not sufficient: prove PostgreSQL
+# can parse the custom archive before promoting it to the final backup set.
+pg_restore --list "$partial_path" >/dev/null
+
 mv "$partial_path" "$final_path"
 sha256sum "$final_path" > "${final_path}.sha256"
 
-# Publish health only after the dump is complete and checksummed. Write via a
+# Publish health only after the dump is complete, readable and checksummed. Write via a
 # temporary file so the app never observes a partially-written status marker.
 # Backup contents remain private under umask 077; the timestamp marker contains
 # no secrets and must be readable by the unprivileged app health process.

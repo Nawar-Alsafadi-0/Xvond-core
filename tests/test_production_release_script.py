@@ -177,3 +177,19 @@ def test_release_requires_whatsapp_worker_lease_before_completion():
     worker_lease = SOURCE.index("wait_whatsapp_worker_lease", worker_ready)
     scheduler_image = SOURCE.index("scheduler_image=")
     assert worker_ready < worker_lease < scheduler_image
+
+
+def test_release_requires_public_https_origin_after_local_health():
+    local_health = SOURCE.index("http://127.0.0.1:8000/health/ready")
+    public_probe = SOURCE.index(
+        'python3 scripts/public_origin_probe.py --base-url "$public_base_url"'
+    )
+    acceptance = SOURCE.index("scripts/production_acceptance.py")
+    assert local_health < public_probe < acceptance
+    assert 'public_base_url="$(env_value PUBLIC_BASE_URL)"' in SOURCE
+    assert "Public Core origin:" in SOURCE
+
+
+def test_public_origin_probe_uses_host_network_not_app_container():
+    assert 'python3 scripts/public_origin_probe.py --base-url "$public_base_url"' in SOURCE
+    assert 'compose exec -T app python scripts/public_origin_probe.py' not in SOURCE
