@@ -125,7 +125,7 @@ def test_channel_gateway_runs_same_employee_and_deduplicates_provider_retries(
         db.commit()
         return {
             "conversation_id": conversation.id,
-            "response": {"content": reply.content},
+            "response": {"id": reply.id, "content": reply.content},
         }
 
     monkeypatch.setattr(api.agent_runtime, "chat", fake_chat)
@@ -142,7 +142,9 @@ def test_channel_gateway_runs_same_employee_and_deduplicates_provider_retries(
     assert first["mode"] == "ai"
     assert first["reply"] == "reply:hello"
     assert first["connection_key"] == "telegram-main"
+    assert first["response_message_id"] is not None
     assert second["duplicate"] is True
+    assert second["response_message_id"] == first["response_message_id"]
     assert second["reply"] == "reply:hello"
     assert calls == ["hello"]
 
@@ -210,3 +212,84 @@ def test_channel_gateway_requires_internal_shared_secret(channel_gateway_databas
         )
 
     assert exc.value.status_code == 401
+
+
+def test_channel_delivery_confirmation_marks_real_customer_roundtrip(
+    channel_gateway_database,
+):
+    with channel_gateway_database() as db:
+        conversation = AIConversation(
+            company_id=1,
+            agent_id=1,
+            channel_id=10,
+            channel_type="telegram",
+            external_contact_id="chat-confirm",
+            title="Delivery confirmation",
+        )
+        db.add(conversation)
+        db.flush()
+        reply = AIMessage(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="Confirmed reply",
+        )
+        db.add(reply)
+        db.commit()
+        conversation_id = conversation.id
+        reply_id = reply.id
+
+    result = api.confirm_channel_delivery(
+        api.ChannelDeliveryConfirmation(
+            channel_id=10,
+            conversation_id=conversation_id,
+            response_message_id=reply_id,
+            provider_message_id="provider-msg-1",
+        ),
+        x_xvond_n8n_secret="test-channel-secret",
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "verified"
+
+    with channel_gateway_database() as db:
+        channel = db.get(AgentChannel, 10)
+        assert channel.customer_roundtrip_verified_at is not None
+        assert channel.customer_roundtrip_source == "xvond_managed:telegram"
+
+
+def test_channel_delivery_confirmation_rejects_wrong_conversation(
+    channel_gateway_database,
+):
+    with channel_gateway_database() as db:
+        other = AIConversation(
+            company_id=1,
+            agent_id=1,
+            channel_id=None,
+            channel_type="portal_test",
+            external_contact_id="other",
+            title="Other",
+        )
+        db.add(other)
+        db.flush()
+        reply = AIMessage(
+            conversation_id=other.id,
+            role="assistant",
+            content="Wrong route",
+        )
+        db.add(reply)
+        db.commit()
+        other_id = other.id
+        reply_id = reply.id
+
+    with pytest.raises(HTTPException) as exc:
+        api.confirm_channel_delivery(
+            api.ChannelDeliveryConfirmation(
+                channel_id=10,
+                conversation_id=other_id,
+                response_message_id=reply_id,
+                provider_message_id="provider-msg-wrong",
+            ),
+            x_xvond_n8n_secret="test-channel-secret",
+        )
+
+    assert exc.value.status_code == 404
