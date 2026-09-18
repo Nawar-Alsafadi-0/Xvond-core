@@ -500,11 +500,12 @@ def test_self_service_recurring_capability_provisions_one_real_schedule_workflow
             "url": "https://prices.example.com",
             "threshold": 100,
         }
-        assert workflow.steps == [{
-            "type": "scheduled_action",
-            "agent_id": 1,
-            "action_type": KEY,
-        }]
+        assert len(workflow.steps) == 1
+        graph_step = workflow.steps[0]
+        assert graph_step["type"] == "graph"
+        assert graph_step["agent_id"] == 1
+        assert [node["type"] for node in graph_step["graph"]["nodes"]] == ["action"]
+        assert graph_step["graph"]["nodes"][0]["params"]["action_type"] == KEY
 
     # Cached compilation repairs/reuses the same generated workflow instead of
     # creating duplicates or paying for another compiler call.
@@ -549,17 +550,15 @@ def test_self_service_content_generation_schedule_builds_ai_then_action(database
 
     with factory() as db:
         workflow = db.query(AutomationWorkflow).one()
-        assert [step["type"] for step in workflow.steps] == [
-            "ai",
-            "scheduled_action",
-        ]
-        assert workflow.steps[0]["agent_id"] == 1
-        assert "Create and publish the daily social post" in workflow.steps[0]["prompt"]
-        assert workflow.steps[1] == {
-            "type": "scheduled_action",
-            "agent_id": 1,
-            "action_type": KEY,
-        }
+        assert len(workflow.steps) == 1
+        graph_step = workflow.steps[0]
+        assert graph_step["type"] == "graph"
+        assert graph_step["agent_id"] == 1
+        nodes = graph_step["graph"]["nodes"]
+        assert [node["type"] for node in nodes] == ["ai", "action"]
+        assert "Create and publish the daily social post" in nodes[0]["params"]["prompt"]
+        assert nodes[1]["params"]["action_type"] == KEY
+        assert nodes[1]["params"]["arguments"]["caption"] == "$nodes.generate_content.ai_response"
 
 
 def test_self_service_media_generation_schedule_builds_ai_media_then_action(database):
@@ -598,17 +597,14 @@ def test_self_service_media_generation_schedule_builds_ai_media_then_action(data
 
     with factory() as db:
         workflow = db.query(AutomationWorkflow).one()
-        assert [step["type"] for step in workflow.steps] == [
-            "ai",
-            "media_generation",
-            "scheduled_action",
-        ]
-        assert workflow.steps[1]["size"] == "1024x1024"
-        assert workflow.steps[2] == {
-            "type": "scheduled_action",
-            "agent_id": 1,
-            "action_type": KEY,
-        }
+        assert len(workflow.steps) == 1
+        graph_step = workflow.steps[0]
+        assert graph_step["type"] == "graph"
+        nodes = graph_step["graph"]["nodes"]
+        assert [node["type"] for node in nodes] == ["ai", "media", "action"]
+        assert nodes[1]["params"]["size"] == "1024x1024"
+        assert nodes[2]["params"]["action_type"] == KEY
+        assert nodes[2]["params"]["arguments"]["media_url"] == "$nodes.generate_media.media_url"
 
 
 def test_self_service_schedule_requires_explicit_automatic_permission(database):
