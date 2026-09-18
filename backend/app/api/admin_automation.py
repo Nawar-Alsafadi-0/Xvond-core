@@ -16,7 +16,7 @@ from backend.app.modules.billing.service_limits import service_limits
 router = APIRouter(prefix="/admin/automation", tags=["Xvond Admin - Automation"])
 
 ALLOWED_TRIGGERS = {"manual", "webhook", "schedule", "event"}
-IMPLEMENTED_TRIGGERS = {"manual", "schedule", "webhook"}
+IMPLEMENTED_TRIGGERS = {"manual", "schedule", "webhook", "event"}
 ALLOWED_STEP_TYPES = {"ai", "tool", "condition", "webhook", "transform", "scheduled_action", "media_generation", "graph"}
 TERMINAL_SIDE_EFFECT_TYPES = {"tool", "webhook", "scheduled_action"}
 SCHEDULE_SAFE_STEP_TYPES = {"transform", "condition", "scheduled_action", "graph"}
