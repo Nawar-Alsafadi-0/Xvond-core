@@ -59,7 +59,9 @@ class N8NChannelGateway:
                 "route_key",
             ):
                 value = data.get(key)
-                if isinstance(value, (str, int, float, bool)) or value is None:
+                if value is None:
+                    continue
+                if isinstance(value, (str, int, float, bool)):
                     safe_data[key] = value
             safe["data"] = safe_data
             return safe
