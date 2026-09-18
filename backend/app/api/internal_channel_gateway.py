@@ -20,10 +20,9 @@ from backend.app.modules.channels.catalog import (
 from backend.app.modules.channels.acceptance import mark_customer_roundtrip
 from backend.app.modules.channels.managed_delivery import (
     attempt_delivery as attempt_managed_delivery,
-    delivery_payload as managed_delivery_payload,
     ensure_delivery as ensure_managed_delivery,
 )
-from backend.app.modules.channels.models import AgentChannel, ManagedChannelOutboundDelivery
+from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.tools.business_models import HumanHandoff
 
 
