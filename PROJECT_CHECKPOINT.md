@@ -70,6 +70,11 @@ Canonical sequence:
 
 Important Self-Service rules:
 
+- The Customer Portal exposes **Build your employee** as a first-class Self-Service workspace and opens Draft employees there by default.
+- The Builder presents one canonical journey: **Job Brief -> Plan -> Build -> Setup -> Launch**. Runtime readiness remains authoritative; the UI does not infer readiness by parsing blocker text.
+- Owner-provided setup data is collected inside the Builder only for the exact compiled requirement fields. All required fields must be complete before the requirement resolves.
+- Password/token/API-key/credential-shaped requirements never use generic setup fields; they stay on a protected Xvond/provider connection path.
+- A `files` requirement resolves only from an enabled PDF actually attached to that employee; generic text knowledge does not falsely satisfy it.
 - A personal/background employee may legitimately require **zero communication channels**.
 - Customer-facing channel slots are derived from the current Job Brief plus compiled channel requirements.
 - Stale configured channels from an older Job Brief do not override the current employee contract.
