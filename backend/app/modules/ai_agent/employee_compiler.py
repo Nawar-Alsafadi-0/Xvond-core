@@ -562,11 +562,23 @@ def build_compiled_employee_system_prompt(*, owner_name: str, spec: dict) -> str
     ) or "- No additional requirements were identified."
 
     customer_inputs = spec.get("customer_inputs") or {}
-    customer_input_lines = "\n".join(
-        f"- {str(key).replace('_', ' ')}: {value}"
-        for key, value in customer_inputs.items()
-        if str(value or "").strip()
-    ) or "- No additional owner-provided setup data."
+    rendered_customer_inputs: list[str] = []
+    for key, value in customer_inputs.items():
+        if isinstance(value, dict):
+            fields = "; ".join(
+                f"{str(field).replace('_', ' ')}={field_value}"
+                for field, field_value in value.items()
+                if str(field_value or "").strip()
+            )
+            if fields:
+                rendered_customer_inputs.append(
+                    f"- {str(key).replace('_', ' ')}: {fields}"
+                )
+        elif str(value or "").strip():
+            rendered_customer_inputs.append(
+                f"- {str(key).replace('_', ' ')}: {value}"
+            )
+    customer_input_lines = "\n".join(rendered_customer_inputs) or "- No additional owner-provided setup data."
 
     return f"""You are one persistent Xvond AI employee for {owner_name}.
 
