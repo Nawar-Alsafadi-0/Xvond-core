@@ -9,6 +9,7 @@ from backend.app.modules.ai_agent.employee_compiler import (
     build_compiled_employee_system_prompt,
     build_compiler_user_message,
     is_sensitive_requirement_key,
+    normalize_compiled_spec,
     parse_compiler_response,
 )
 
@@ -542,3 +543,150 @@ def test_external_booking_action_keeps_real_integration_and_provider_endpoints()
     assert action["destination"]["validation_required"] is True
     assert action["destination"]["operations"]["execute"]["endpoint"] == "/bookings"
     assert action["availability"]["mode"] == "integration"
+
+
+
+def test_content_generation_is_native_and_does_not_create_fake_execution_setup():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Content assistant",
+            "scope": "personal",
+            "requirements": [
+                {
+                    "key": "content_generation",
+                    "kind": "tool",
+                    "purpose": "Draft social content on demand",
+                }
+            ],
+        },
+        job_brief="Draft social content for me inside Xvond.",
+    )
+
+    requirement = spec["requirements"][0]
+    assert requirement["key"] == "content_generation"
+    assert requirement["status"] == "available"
+    assert requirement["delivery_mode"] == "native"
+    assert requirement["primitives"] == ["content_generation"]
+    assert requirement["execution_plan"] == []
+    assert "content_generation" in spec["ready_requirements"]
+    assert "content_generation" not in spec["build_required"]
+
+
+
+def test_instagram_publish_includes_media_generation_primitive():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Social publisher",
+            "requirements": [
+                {
+                    "key": "instagram_publish",
+                    "kind": "integration",
+                    "purpose": "Generate and publish an Instagram post",
+                    "requires_connection": True,
+                }
+            ],
+        },
+        job_brief="Generate and publish an Instagram post every day.",
+    )
+
+    requirement = spec["requirements"][0]
+    assert requirement["key"] == "instagram_publish"
+    assert requirement["status"] == "connection_required"
+    assert "content_generation" in requirement["primitives"]
+    assert "media_generation" in requirement["primitives"]
+    assert "messaging" in requirement["primitives"]
+
+
+
+def test_compiler_normalizes_general_execution_graph():
+    spec = normalize_compiled_spec(
+        {
+            "role": "General worker",
+            "requirements": [
+                {
+                    "key": "custom_publish",
+                    "kind": "custom",
+                    "purpose": "Publish a generated result",
+                }
+            ],
+            "execution_graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "draft",
+                        "type": "ai",
+                        "depends_on": [],
+                        "params": {"prompt": "Create the final content"},
+                    },
+                    {
+                        "id": "publish",
+                        "type": "action",
+                        "depends_on": ["draft"],
+                        "params": {
+                            "action_type": "custom_publish",
+                            "arguments": {
+                                "body": "$nodes.draft.ai_response"
+                            },
+                        },
+                    },
+                ],
+            },
+        },
+        job_brief="Create content and publish the result.",
+    )
+
+    graph = spec["execution_graph"]
+    assert graph["version"] == 1
+    assert [node["id"] for node in graph["nodes"]] == ["draft", "publish"]
+    assert graph["nodes"][1]["depends_on"] == ["draft"]
+    assert (
+        graph["nodes"][1]["params"]["arguments"]["body"]
+        == "$nodes.draft.ai_response"
+    )
+
+
+
+def test_web_research_is_native_browser_ability_without_fake_action_setup():
+    payload = {
+        "role": "Research agent",
+        "scope": "business",
+        "summary": "Research public websites.",
+        "requirements": [
+            {
+                "key": "web_research",
+                "kind": "tool",
+                "purpose": "Research public websites",
+            }
+        ],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "research",
+                    "type": "browser",
+                    "depends_on": [],
+                    "params": {
+                        "url": "https://example.com",
+                        "actions": [
+                            {"op": "extract_text", "selector": "body"}
+                        ],
+                    },
+                }
+            ],
+        },
+    }
+
+    spec = normalize_compiled_spec(
+        payload,
+        job_brief="Research public websites.",
+    )
+    requirement = spec["requirements"][0]
+
+    assert requirement["key"] == "web_research"
+    assert requirement["status"] == "available"
+    assert requirement["delivery_mode"] == "native"
+    assert requirement["primitives"] == ["browser_web"]
+    assert requirement.get("execution_plan") == []
+    assert "web_research" in spec["ready_requirements"]
+    assert "web_research" not in spec["build_required"]

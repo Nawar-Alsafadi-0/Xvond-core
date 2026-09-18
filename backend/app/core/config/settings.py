@@ -31,6 +31,9 @@ class Settings:
     DATABASE_URL = os.getenv("DATABASE_URL", "")
     REDIS_URL = os.getenv("REDIS_URL", "")
     PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    MEDIA_STORAGE_DIR = os.getenv("MEDIA_STORAGE_DIR", "/tmp/xvond-media").strip() or "/tmp/xvond-media"
+    MEDIA_PUBLIC_TTL_SECONDS = max(300, min(86400, int(os.getenv("MEDIA_PUBLIC_TTL_SECONDS", "7200"))))
+    IMAGE_GENERATION_MODEL = os.getenv("IMAGE_GENERATION_MODEL", "gpt-image-2.5-flare").strip() or "gpt-image-2.5-flare"
     WHATSAPP_HUMAN_HANDOFF_MINUTES = max(5, int(os.getenv("WHATSAPP_HUMAN_HANDOFF_MINUTES", "60")))
     WEBSITE_VISITOR_TOKEN_TTL_SECONDS = max(300, int(os.getenv("WEBSITE_VISITOR_TOKEN_TTL_SECONDS", "2592000")))
     TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -50,6 +53,7 @@ class Settings:
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
     XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+    META_GRAPH_API_VERSION = os.getenv("META_GRAPH_API_VERSION", "v26.0").strip() or "v26.0"
     N8N_ENABLED = os.getenv("N8N_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "").strip()
     N8N_SHARED_SECRET = os.getenv("N8N_SHARED_SECRET", "")

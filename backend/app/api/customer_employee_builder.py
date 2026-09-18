@@ -8,6 +8,7 @@ from backend.app.core.ai.engine import ProviderExecutionError, ai_engine
 from backend.app.core.ai.provider_policy import runtime_selections
 from backend.app.core.company_lifecycle import portal_access_allowed
 from backend.app.core.config_secrets import reveal_config
+from backend.app.core.config.settings import settings
 from backend.app.core.database.connection import SessionLocal
 from backend.app.core.dependencies import require_customer_manager
 from backend.app.models.company import Company
@@ -46,7 +47,9 @@ from backend.app.modules.ai_agent.self_service_policy import (
     self_service_readiness,
     self_service_spec_view,
 )
-from backend.app.modules.automation.models import AutomationWorkflow
+from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
+from backend.app.modules.automation.runtime import automation_runtime
+from backend.app.modules.automation.webhook_auth import automation_webhook_key
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.channels.catalog import (
@@ -61,6 +64,7 @@ from backend.app.modules.channels.delivery import reconcile_managed_channel_requ
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord, CompanyAIProfile
 from backend.app.modules.tools.models import AgentToolAssignment
+from backend.app.modules.tools.business_models import ActionRequest
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.integrations.catalog import integration_validation_ready
 
@@ -105,6 +109,9 @@ class EmployeeBuilderIntegrationBindRequest(BaseModel):
 class EmployeeBuilderSetupAnswerRequest(BaseModel):
     value: str | None = Field(default=None, max_length=8000)
     values: dict[str, str] = Field(default_factory=dict)
+
+class EmployeeBuilderGraphRunRequest(BaseModel):
+    input_data: dict = Field(default_factory=dict)
 
 
 DEFAULT_CUSTOMER_CONTROLS = {
@@ -850,6 +857,43 @@ def _self_service_builder_journey(
                     waiting_reasons.append(
                         f"Xvond execution setup is still required for {key.replace('_', ' ')}."
                     )
+
+        graph_trigger = (
+            (compiled_spec.get("delivery") or {}).get("graph_trigger")
+            if isinstance(compiled_spec.get("delivery"), dict)
+            else None
+        )
+        if (
+            isinstance(graph_trigger, dict)
+            and graph_trigger.get("trigger_type") == "webhook"
+            and graph_trigger.get("status") == "ready"
+            and graph_trigger.get("workflow_id")
+        ):
+            setup_actions.append(
+                _builder_action(
+                    "setup_webhook",
+                    "Configure webhook trigger",
+                    target="builder",
+                    key="webhook_trigger",
+                    detail="Copy the Xvond webhook URL and key into the external system that should trigger this employee.",
+                )
+            )
+
+        if isinstance(graph_trigger, dict):
+            graph_trigger_status = str(graph_trigger.get("status") or "not_required")
+            if graph_trigger_status == "nested_approval_not_ready":
+                waiting_reasons.append(
+                    "This employee needs approval inside a foreach loop. Xvond must finish durable nested approval resume support before launch."
+                )
+            elif graph_trigger_status in {
+                "schedule_required",
+                "schedule_setup_required",
+                "setup_required",
+                "disabled",
+            }:
+                waiting_reasons.append(
+                    "Xvond execution trigger setup is not ready yet."
+                )
 
         for item in state.get("connected_system_setup") or []:
             if not isinstance(item, dict):
@@ -1721,7 +1765,16 @@ def bind_self_service_integration(
         if str(requirement.get("kind") or "").strip().lower() == "channel":
             raise HTTPException(409, "Communication channels use their dedicated connection flow")
 
-        executable_types = {"custom_api", "pos", "crm", "erp", "webhook"}
+        executable_types = {"custom_api", "pos", "crm", "erp", "webhook", "instagram_publish"}
+        required_connector_types = {
+            "instagram_publish": {"instagram_publish"},
+        }
+        allowed_for_requirement = required_connector_types.get(key)
+        if allowed_for_requirement and integration.integration_type not in allowed_for_requirement:
+            raise HTTPException(
+                409,
+                f"{key.replace('_', ' ').title()} requires its packaged Xvond connector.",
+            )
         if integration.integration_type not in executable_types:
             raise HTTPException(
                 409,
@@ -2398,5 +2451,450 @@ def test_draft_employee(
     except Exception:
         db.rollback()
         raise
+    finally:
+        db.close()
+
+
+@router.get("/{agent_id}/webhook")
+def customer_employee_webhook(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        company = _company_or_404(db, company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Webhook setup is available for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+        config = _employee_config_or_404(db, agent)
+        builder = (config.settings or {}).get("employee_builder") or {}
+        spec = builder.get("compiled_spec") if isinstance(builder, dict) else None
+        delivery = spec.get("delivery") if isinstance(spec, dict) else None
+        graph_trigger = delivery.get("graph_trigger") if isinstance(delivery, dict) else None
+        if not isinstance(graph_trigger, dict) or graph_trigger.get("trigger_type") != "webhook":
+            raise HTTPException(404, "This employee does not use a webhook trigger")
+        if graph_trigger.get("status") != "ready":
+            raise HTTPException(409, "Webhook trigger is not ready yet")
+
+        workflow_id = int(graph_trigger.get("workflow_id") or 0)
+        workflow = (
+            db.query(AutomationWorkflow)
+            .filter(
+                AutomationWorkflow.id == workflow_id,
+                AutomationWorkflow.company_id == company_id,
+                AutomationWorkflow.trigger_type == "webhook",
+                AutomationWorkflow.enabled.is_(True),
+            )
+            .first()
+        )
+        if workflow is None:
+            raise HTTPException(409, "Webhook workflow is not active")
+        if not settings.PUBLIC_BASE_URL:
+            raise HTTPException(409, "PUBLIC_BASE_URL is not configured")
+
+        return {
+            "workflow_id": workflow.id,
+            "url": f"{settings.PUBLIC_BASE_URL}/webhooks/automation/{workflow.id}",
+            "header": "X-Xvond-Webhook-Key",
+            "key": automation_webhook_key(
+                workflow_id=workflow.id,
+                company_id=company_id,
+            ),
+            "idempotency_header": "Idempotency-Key",
+        }
+    finally:
+        db.close()
+
+
+@router.get("/{agent_id}/automation-runs")
+def customer_employee_automation_runs(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        company = _company_or_404(db, company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Automation runs are available for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+
+        workflows = (
+            db.query(AutomationWorkflow)
+            .filter(AutomationWorkflow.company_id == company_id)
+            .order_by(AutomationWorkflow.id.asc())
+            .all()
+        )
+        workflow_ids = []
+        workflow_names = {}
+        for workflow in workflows:
+            config = workflow.trigger_config if isinstance(workflow.trigger_config, dict) else {}
+            if (
+                config.get("_xvond_source") == "self_service_employee"
+                and int(config.get("_xvond_agent_id") or 0) == int(agent_id)
+            ):
+                workflow_ids.append(workflow.id)
+                workflow_names[workflow.id] = workflow.name
+
+        if not workflow_ids:
+            return {"agent_id": agent.id, "runs": []}
+
+        runs = (
+            db.query(AutomationRun)
+            .filter(
+                AutomationRun.company_id == company_id,
+                AutomationRun.workflow_id.in_(workflow_ids),
+            )
+            .order_by(AutomationRun.id.desc())
+            .limit(50)
+            .all()
+        )
+        return {
+            "agent_id": agent.id,
+            "runs": [
+                {
+                    "id": run.id,
+                    "workflow_id": run.workflow_id,
+                    "workflow_name": workflow_names.get(run.workflow_id),
+                    "status": run.status,
+                    "input_data": run.input_data,
+                    "output_data": run.output_data,
+                    "error_message": run.error_message,
+                    "created_at": run.created_at,
+                    "finished_at": run.finished_at,
+                }
+                for run in runs
+            ],
+        }
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/run-graph")
+def customer_employee_run_graph(
+    agent_id: int,
+    data: EmployeeBuilderGraphRunRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        company = _company_or_404(db, company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Manual graph execution is available for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+        if not agent.enabled:
+            raise HTTPException(409, "Launch this employee before running its live execution graph")
+
+        workflow = None
+        for row in (
+            db.query(AutomationWorkflow)
+            .filter(
+                AutomationWorkflow.company_id == company_id,
+                AutomationWorkflow.trigger_type == "manual",
+                AutomationWorkflow.enabled.is_(True),
+            )
+            .order_by(AutomationWorkflow.id.asc())
+            .all()
+        ):
+            config = row.trigger_config if isinstance(row.trigger_config, dict) else {}
+            if (
+                config.get("_xvond_source") == "self_service_employee"
+                and int(config.get("_xvond_agent_id") or 0) == int(agent_id)
+                and config.get("_xvond_graph_trigger") is True
+            ):
+                workflow = row
+                break
+
+        if workflow is None:
+            raise HTTPException(409, "This employee does not have a ready manual execution graph")
+
+        try:
+            run = automation_runtime.execute(
+                db=db,
+                company_id=company_id,
+                workflow=workflow,
+                input_data=dict(data.input_data or {}),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        return {
+            "id": run.id,
+            "workflow_id": run.workflow_id,
+            "status": run.status,
+            "output_data": run.output_data,
+            "error_message": run.error_message,
+            "created_at": run.created_at,
+            "finished_at": run.finished_at,
+        }
+    finally:
+        db.close()
+
+
+def _automation_request_details(request: ActionRequest) -> dict:
+    details = request.details if isinstance(request.details, dict) else {}
+    return {
+        key: value
+        for key, value in details.items()
+        if not str(key).startswith("_xvond_")
+    }
+
+
+@router.get("/{agent_id}/automation-approvals")
+def customer_employee_automation_approvals(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        _company_or_404(db, company_id)
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+
+        rows = (
+            db.query(ActionRequest)
+            .filter(
+                ActionRequest.company_id == company_id,
+                ActionRequest.agent_id == int(agent_id),
+                ActionRequest.status == "awaiting_confirmation",
+            )
+            .order_by(ActionRequest.id.desc())
+            .limit(100)
+            .all()
+        )
+        approvals = []
+        for request in rows:
+            details = request.details if isinstance(request.details, dict) else {}
+            meta = details.get("_xvond_automation")
+            if not isinstance(meta, dict):
+                continue
+            approvals.append(
+                {
+                    "id": request.id,
+                    "run_id": meta.get("run_id"),
+                    "workflow_id": meta.get("workflow_id"),
+                    "node_id": meta.get("node_id"),
+                    "action_type": request.action_type,
+                    "summary": request.summary,
+                    "details": _automation_request_details(request),
+                    "status": request.status,
+                    "created_at": request.created_at,
+                }
+            )
+        return {"agent_id": agent.id, "approvals": approvals}
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/automation-approvals/{request_id}/approve")
+def customer_employee_approve_automation(
+    agent_id: int,
+    request_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        _company_or_404(db, company_id)
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+
+        request = (
+            db.query(ActionRequest)
+            .filter(
+                ActionRequest.id == int(request_id),
+                ActionRequest.company_id == company_id,
+                ActionRequest.agent_id == int(agent_id),
+                ActionRequest.status == "awaiting_confirmation",
+            )
+            .with_for_update()
+            .first()
+        )
+        if request is None:
+            raise HTTPException(404, "Pending automation approval not found")
+        details = request.details if isinstance(request.details, dict) else {}
+        meta = details.get("_xvond_automation")
+        if not isinstance(meta, dict):
+            raise HTTPException(409, "Request is not an automation approval")
+
+        run = (
+            db.query(AutomationRun)
+            .filter(
+                AutomationRun.id == int(meta.get("run_id") or 0),
+                AutomationRun.company_id == company_id,
+                AutomationRun.status == "waiting_approval",
+            )
+            .with_for_update()
+            .first()
+        )
+        workflow = (
+            db.query(AutomationWorkflow)
+            .filter(
+                AutomationWorkflow.id == int(meta.get("workflow_id") or 0),
+                AutomationWorkflow.company_id == company_id,
+                AutomationWorkflow.enabled.is_(True),
+            )
+            .first()
+        )
+        if run is None or workflow is None:
+            raise HTTPException(409, "Automation approval checkpoint is no longer runnable")
+
+        request.status = "approved"
+        db.flush()
+        try:
+            resumed = automation_runtime.resume_approval(
+                db,
+                company_id=company_id,
+                workflow=workflow,
+                run=run,
+                request=request,
+            )
+        except Exception as exc:
+            request = db.query(ActionRequest).filter(ActionRequest.id == int(request_id)).first()
+            if request is not None:
+                request.status = "approval_execution_failed"
+                db.commit()
+            raise HTTPException(409, str(exc)) from exc
+
+        request = db.query(ActionRequest).filter(ActionRequest.id == int(request_id)).first()
+        if request is not None:
+            request.status = "confirmed"
+            db.commit()
+
+        return {
+            "request_id": int(request_id),
+            "run_id": resumed.id,
+            "status": resumed.status,
+            "output_data": resumed.output_data,
+        }
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/automation-approvals/{request_id}/reject")
+def customer_employee_reject_automation(
+    agent_id: int,
+    request_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        _company_or_404(db, company_id)
+
+        request = (
+            db.query(ActionRequest)
+            .filter(
+                ActionRequest.id == int(request_id),
+                ActionRequest.company_id == company_id,
+                ActionRequest.agent_id == int(agent_id),
+                ActionRequest.status == "awaiting_confirmation",
+            )
+            .with_for_update()
+            .first()
+        )
+        if request is None:
+            raise HTTPException(404, "Pending automation approval not found")
+        details = request.details if isinstance(request.details, dict) else {}
+        meta = details.get("_xvond_automation")
+        if not isinstance(meta, dict):
+            raise HTTPException(409, "Request is not an automation approval")
+
+        run = (
+            db.query(AutomationRun)
+            .filter(
+                AutomationRun.id == int(meta.get("run_id") or 0),
+                AutomationRun.company_id == company_id,
+                AutomationRun.status == "waiting_approval",
+            )
+            .with_for_update()
+            .first()
+        )
+        request.status = "rejected"
+        if run is not None:
+            output = dict(run.output_data or {})
+            approval = output.get("approval")
+            if isinstance(approval, dict):
+                output["approval"] = {**approval, "status": "rejected"}
+            run.status = "rejected"
+            run.finished_at = datetime.utcnow()
+            trace = output.get("trace")
+            if isinstance(trace, dict):
+                trace = dict(trace)
+                trace["status"] = "rejected"
+                trace["finished_at"] = (
+                    run.finished_at.isoformat(timespec="milliseconds") + "Z"
+                )
+                output["trace"] = trace
+            run.output_data = output
+            run.error_message = None
+        db.commit()
+        return {
+            "request_id": request.id,
+            "run_id": run.id if run is not None else None,
+            "status": "rejected",
+        }
     finally:
         db.close()

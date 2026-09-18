@@ -60,6 +60,34 @@ def test_generic_api_validation_uses_read_only_get_and_auth(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer secret-key"
 
 
+def test_instagram_publish_validation_uses_bearer_token_without_exposing_it_in_url(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(api, "validate_public_http_url", lambda url: url)
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 200, "response": '{"id":"178414000","username":"brand"}'}
+
+    monkeypatch.setattr(api, "safe_http_request", fake_request)
+
+    result = api._validate_live_connection(
+        _integration(
+            "instagram_publish",
+            {
+                "instagram_user_id": "178414000",
+                "access_token": "secret-token",
+            },
+        )
+    )
+
+    assert result["validated"] is True
+    assert result["mode"] == "instagram_live_read_only_request"
+    assert captured["url"] == "https://graph.facebook.com/v26.0/178414000?fields=id,username"
+    assert "secret-token" not in captured["url"]
+    assert captured["headers"]["Authorization"] == "Bearer secret-token"
+
+
 def test_validation_endpoint_must_be_relative(monkeypatch):
     monkeypatch.setattr(api, "validate_public_http_url", lambda url: url)
 

@@ -1,5 +1,24 @@
 INTEGRATION_CATALOG = {
 
+    "instagram_publish": {
+        "name": "Instagram Publishing",
+        "description": "Publish media and captions to an Instagram professional account",
+        "config_fields": [
+            {
+                "name": "instagram_user_id",
+                "label": "Instagram User ID",
+                "required": True,
+                "secret": False,
+            },
+            {
+                "name": "access_token",
+                "label": "Access Token",
+                "required": True,
+                "secret": True,
+            },
+        ],
+    },
+
     "pos": {
         "name": "POS",
         "description": "Point of Sale system",

@@ -12,6 +12,11 @@ from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.integrations.catalog import integration_validation_ready
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.automation.models import AutomationWorkflow
+from backend.app.modules.automation.execution_graph import (
+    graph_action_types,
+    graph_nested_action_types,
+    normalize_execution_graph,
+)
 from backend.app.modules.automation.schedule import ScheduleConfigError, normalize_schedule_config
 from backend.app.modules.ai_agent.employee_compiler import normalize_requirement_key
 from backend.app.modules.tools.models import AgentToolAssignment
@@ -447,6 +452,129 @@ def _generated_schedule_workflow(
     return None
 
 
+def _generated_graph_trigger_workflow(
+    db,
+    *,
+    company_id: int,
+    agent_id: int,
+    trigger_type: str,
+) -> AutomationWorkflow | None:
+    rows = (
+        db.query(AutomationWorkflow)
+        .filter(
+            AutomationWorkflow.company_id == company_id,
+            AutomationWorkflow.trigger_type == trigger_type,
+        )
+        .all()
+    )
+    for row in rows:
+        config = row.trigger_config if isinstance(row.trigger_config, dict) else {}
+        if (
+            config.get("_xvond_source") == "self_service_employee"
+            and int(config.get("_xvond_agent_id") or 0) == int(agent_id)
+            and config.get("_xvond_graph_trigger") is True
+        ):
+            return row
+    return None
+
+
+def _provision_self_service_graph_trigger(
+    db,
+    *,
+    company: Company,
+    timezone: str | None,
+    agent_id: int,
+    execution_graph: dict | None,
+    actions: dict,
+    action_plan: dict,
+    runtime_inputs: dict | None = None,
+) -> tuple[str, int | None]:
+    if str(company.onboarding_source or "").strip().lower() != "self_service":
+        return "managed_delivery", None
+
+    graph = normalize_execution_graph(execution_graph or {})
+    if not graph.get("nodes"):
+        return "not_required", None
+    trigger = graph.get("trigger") or {"type": "manual"}
+    trigger_type = str(trigger.get("type") or "manual").strip().lower()
+    if trigger_type not in {"manual", "schedule", "webhook", "event"}:
+        return "not_required", None
+    normalized_graph_schedule = None
+    if trigger_type == "schedule":
+        raw_schedule = trigger.get("schedule")
+        if not isinstance(raw_schedule, dict):
+            return "schedule_required", None
+        try:
+            normalized_graph_schedule = normalize_schedule_config(
+                raw_schedule,
+                default_timezone=timezone,
+            )
+        except ScheduleConfigError:
+            return "schedule_setup_required", None
+    if trigger_type == "event" and not str(trigger.get("event") or "").strip():
+        return "setup_required", None
+
+    action_types = graph_action_types(graph)
+    nested_action_types = set(graph_nested_action_types(graph))
+    for action_type in action_types:
+        action = actions.get(action_type)
+        plan = action_plan.get(action_type) or {}
+        if not isinstance(action, dict):
+            return "setup_required", None
+        if (
+            action.get("confirmation_required", True)
+            and action_type in nested_action_types
+        ):
+            return "nested_approval_not_ready", None
+        if str(plan.get("execution_status") or "") != "ready":
+            return "setup_required", None
+
+    workflow = _generated_graph_trigger_workflow(
+        db,
+        company_id=company.id,
+        agent_id=agent_id,
+        trigger_type=trigger_type,
+    )
+    if workflow is not None and not workflow.enabled:
+        return "disabled", workflow.id
+    if workflow is None:
+        workflow = AutomationWorkflow(
+            company_id=company.id,
+            name="AI Employee Webhook Trigger",
+            trigger_type=trigger_type,
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": agent_id,
+                "_xvond_graph_trigger": True,
+                "_xvond_generated": True,
+                **(
+                    {"event_name": str(trigger.get("event") or "").strip()[:120]}
+                    if trigger_type == "event"
+                    else {}
+                ),
+                **(
+                    {
+                        "schedule": normalized_graph_schedule,
+                        "input_data": dict(runtime_inputs or {}),
+                    }
+                    if trigger_type == "schedule"
+                    else {}
+                ),
+            },
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": agent_id,
+                    "graph": graph,
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.flush()
+    return "ready", workflow.id
+
+
 def _provision_self_service_schedule(
     db,
     *,
@@ -455,6 +583,7 @@ def _provision_self_service_schedule(
     agent_id: int,
     requirement: dict,
     action: dict,
+    execution_graph: dict | None = None,
 ) -> tuple[str, int | None]:
     if str(company.onboarding_source or "").strip().lower() != "self_service":
         return "managed_delivery", None
@@ -494,9 +623,106 @@ def _provision_self_service_schedule(
     if workflow is not None and not workflow.enabled:
         return "disabled", workflow.id
     if workflow is None:
+        task_purpose = (
+            str(requirement.get("purpose") or key.replace("_", " ")).strip()
+            or "Scheduled employee task"
+        )
+        compiled_graph = normalize_execution_graph(execution_graph or {})
+        graph_nodes = list(compiled_graph.get("nodes") or [])
+        target_ids = {
+            str(node.get("id") or "")
+            for node in graph_nodes
+            if isinstance(node, dict)
+            and node.get("type") == "action"
+            and str((node.get("params") or {}).get("action_type") or "") == key
+        }
+        if target_ids:
+            by_id = {
+                str(node.get("id") or ""): node
+                for node in graph_nodes
+                if isinstance(node, dict)
+            }
+            keep = set(target_ids)
+            changed_deps = True
+            while changed_deps:
+                changed_deps = False
+                for node_id in list(keep):
+                    node = by_id.get(node_id) or {}
+                    for dep in node.get("depends_on") or []:
+                        if dep not in keep and dep in by_id:
+                            keep.add(dep)
+                            changed_deps = True
+            selected_graph = {
+                "version": compiled_graph.get("version") or 1,
+                "nodes": [
+                    node for node in graph_nodes
+                    if str(node.get("id") or "") in keep
+                ],
+            }
+        else:
+            fallback_nodes: list[dict] = []
+            previous_id = None
+            if "content_generation" in (requirement.get("primitives") or []):
+                previous_id = "generate_content"
+                fallback_nodes.append(
+                    {
+                        "id": previous_id,
+                        "type": "ai",
+                        "depends_on": [],
+                        "params": {
+                            "prompt": (
+                                "Perform this scheduled employee task now. "
+                                f"Task: {task_purpose}. "
+                                "Use the employee's current instructions and knowledge. "
+                                "Return the final content/result for the next step."
+                            )[:2000],
+                        },
+                    }
+                )
+            if "media_generation" in (requirement.get("primitives") or []):
+                deps = [previous_id] if previous_id else []
+                previous_id = "generate_media"
+                fallback_nodes.append(
+                    {
+                        "id": previous_id,
+                        "type": "media",
+                        "depends_on": deps,
+                        "params": {
+                            "prompt": (
+                                "Create the publishable visual for this task."
+                            ),
+                            "size": "1024x1024",
+                        },
+                    }
+                )
+            action_args = {}
+            if any(node.get("id") == "generate_content" for node in fallback_nodes):
+                action_args["caption"] = "$nodes.generate_content.ai_response"
+            if any(node.get("id") == "generate_media" for node in fallback_nodes):
+                action_args["media_url"] = "$nodes.generate_media.media_url"
+            fallback_nodes.append(
+                {
+                    "id": "execute_action",
+                    "type": "action",
+                    "depends_on": [previous_id] if previous_id else [],
+                    "params": {
+                        "action_type": key,
+                        "arguments": action_args,
+                    },
+                }
+            )
+            selected_graph = {"version": 1, "nodes": fallback_nodes}
+
+        workflow_steps = [
+            {
+                "type": "graph",
+                "agent_id": agent_id,
+                "graph": selected_graph,
+            }
+        ]
         workflow = AutomationWorkflow(
             company_id=company.id,
-            name=(str(requirement.get("purpose") or key.replace("_", " ")) or "Scheduled employee task")[:200],
+            name=task_purpose[:200],
             trigger_type="schedule",
             trigger_config={
                 "_xvond_source": "self_service_employee",
@@ -506,13 +732,7 @@ def _provision_self_service_schedule(
                 "schedule": schedule,
                 "input_data": runtime_inputs,
             },
-            steps=[
-                {
-                    "type": "scheduled_action",
-                    "agent_id": agent_id,
-                    "action_type": key,
-                }
-            ],
+            steps=workflow_steps,
             enabled=True,
         )
         db.add(workflow)
@@ -562,6 +782,14 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
     automation_plan = {}
     changed = False
     company, company_timezone = _company_context(db, agent_id)
+    normalized_graph = normalize_execution_graph(prepared.get("execution_graph") or {})
+    graph_trigger_type = str(
+        (normalized_graph.get("trigger") or {}).get("type") or "manual"
+    ).strip().lower()
+    graph_owns_schedule = bool(
+        graph_trigger_type == "schedule"
+        and normalized_graph.get("nodes")
+    )
     for item in requirements:
         if not isinstance(item, dict):
             continue
@@ -639,6 +867,7 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             company is not None
             and execution_status == "ready"
             and "scheduler" in (item.get("primitives") or [])
+            and not graph_owns_schedule
         ):
             schedule_status, schedule_workflow_id = _provision_self_service_schedule(
                 db,
@@ -647,6 +876,7 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                 agent_id=agent_id,
                 requirement=item,
                 action=action,
+                execution_graph=prepared.get("execution_graph"),
             )
             if schedule_status not in {"ready", "not_required", "managed_delivery"}:
                 execution_status = "setup_required"
@@ -677,6 +907,25 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             "automation_workflow_id": schedule_workflow_id,
         }
 
+    graph_trigger_status = "not_required"
+    graph_trigger_workflow_id = None
+    graph_runtime_inputs: dict = {}
+    for requirement in requirements:
+        if isinstance(requirement, dict):
+            for key, value in (requirement.get("runtime_inputs") or {}).items():
+                graph_runtime_inputs.setdefault(str(key), value)
+    if company is not None:
+        graph_trigger_status, graph_trigger_workflow_id = _provision_self_service_graph_trigger(
+            db,
+            company=company,
+            timezone=company_timezone,
+            agent_id=agent_id,
+            execution_graph=prepared.get("execution_graph"),
+            actions=actions,
+            action_plan=action_plan,
+            runtime_inputs=graph_runtime_inputs,
+        )
+
     if changed:
         config["actions"] = actions
         if assignment is None:
@@ -695,6 +944,14 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
         "provisioning_version": 1,
         "action_plan": action_plan,
         "automation_plan": automation_plan,
+        "graph_trigger": {
+            "status": graph_trigger_status,
+            "workflow_id": graph_trigger_workflow_id,
+            "trigger_type": str(
+                ((prepared.get("execution_graph") or {}).get("trigger") or {}).get("type")
+                or "manual"
+            ),
+        },
         "managed_capabilities": [
             item.get("key")
             for item in requirements

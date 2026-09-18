@@ -19,3 +19,5 @@ Pillow==12.3.0
 beautifulsoup4==4.15.0
 pycountry==26.2.16
 tzdata==2026.3
+
+playwright==1.63.0

@@ -140,20 +140,22 @@
                             <option value="">Loading connections…</option>
                         </select>
                     </label>
-                    <label>
-                        <span>${isBooking ? "Create booking endpoint" : "Execute endpoint"}</span>
-                        <input type="text" data-integration-execute="${encodedKey}" placeholder="/api/bookings">
-                    </label>
-                    ${isBooking ? `
+                    <div data-integration-endpoint-fields="${encodedKey}">
                         <label>
-                            <span>Availability endpoint</span>
-                            <input type="text" data-integration-availability="${encodedKey}" placeholder="/api/availability">
+                            <span>${isBooking ? "Create booking endpoint" : "Execute endpoint"}</span>
+                            <input type="text" data-integration-execute="${encodedKey}" placeholder="/api/bookings">
                         </label>
-                    ` : ""}
-                    <label>
-                        <span>Cancel endpoint (optional)</span>
-                        <input type="text" data-integration-cancel="${encodedKey}" placeholder="/api/bookings/{id}/cancel">
-                    </label>
+                        ${isBooking ? `
+                            <label>
+                                <span>Availability endpoint</span>
+                                <input type="text" data-integration-availability="${encodedKey}" placeholder="/api/availability">
+                            </label>
+                        ` : ""}
+                        <label>
+                            <span>Cancel endpoint (optional)</span>
+                            <input type="text" data-integration-cancel="${encodedKey}" placeholder="/api/bookings/{id}/cancel">
+                        </label>
+                    </div>
                     <div class="employee-builder-actions">
                         <button type="button" data-bind-integration="${encodedKey}">Use this connection</button>
                         <button type="button" data-open-integrations>Manage connections</button>
@@ -210,6 +212,7 @@
             "manage_integrations",
             "setup_website",
             "setup_whatsapp",
+            "setup_webhook",
             "test_employee",
             "launch_employee",
         ]).has(type);
@@ -226,6 +229,13 @@
     function journeyMarkup(employee) {
         if (employee.delivery_mode !== "self_service") return "";
         const journey = employee.builder_journey || {};
+        const graphTrigger = employee.compiled_spec?.delivery?.graph_trigger || {};
+        const manualGraphReady = Boolean(
+            employee.enabled
+            && graphTrigger.trigger_type === "manual"
+            && graphTrigger.status === "ready"
+            && graphTrigger.workflow_id
+        );
         const stages = Array.isArray(journey.stages) ? journey.stages : [];
         if (!stages.length) return "";
         const progress = Number(journey.total_count || stages.length)
@@ -267,6 +277,46 @@
                 <div id="subscription-plans" class="employee-builder-section hidden"></div>
                 <div id="subscription-error" class="error"></div>
                 <div id="prepare-employee-error" class="error"></div>
+                ${manualGraphReady ? `
+                    <div id="employee-builder-manual-run-panel" class="employee-builder-section">
+                        <h3>Run now</h3>
+                        <p class="muted">Run this employee's live execution graph now. Optional JSON becomes the graph input.</p>
+                        <textarea id="employee-builder-manual-run-input" rows="4" placeholder='{"key":"value"}'></textarea>
+                        <button type="button" id="employee-builder-manual-run">Run employee</button>
+                        <pre id="employee-builder-manual-run-output" class="employee-builder-run-output hidden"></pre>
+                        <div id="employee-builder-manual-run-error" class="error"></div>
+                    </div>
+                ` : ""}
+                <div id="employee-builder-approvals-panel" class="employee-builder-section">
+                    <div class="employee-builder-current-head">
+                        <div>
+                            <h3>Approvals</h3>
+                            <p class="muted">Review consequential actions this employee is waiting to execute.</p>
+                        </div>
+                        <button type="button" id="employee-builder-approvals-refresh">Refresh</button>
+                    </div>
+                    <div id="employee-builder-approvals-list"><p class="muted">No approval data loaded yet.</p></div>
+                    <div id="employee-builder-approvals-error" class="error"></div>
+                </div>
+                <div id="employee-builder-runs-panel" class="employee-builder-section">
+                    <div class="employee-builder-current-head">
+                        <div>
+                            <h3>Execution history</h3>
+                            <p class="muted">Inspect recent automatic runs, outputs and the exact failing node when something goes wrong.</p>
+                        </div>
+                        <button type="button" id="employee-builder-runs-refresh">Refresh</button>
+                    </div>
+                    <div id="employee-builder-runs-list"><p class="muted">Load recent runs to inspect execution.</p></div>
+                    <div id="employee-builder-runs-error" class="error"></div>
+                </div>
+                <div id="employee-builder-webhook-panel" class="employee-builder-section hidden">
+                    <h3>Webhook trigger</h3>
+                    <p class="muted">Send JSON to this URL and include both headers below. Reuse a stable Idempotency-Key for retries of the same external event.</p>
+                    <label><span>Webhook URL</span><input id="employee-builder-webhook-url" type="text" readonly></label>
+                    <label><span>X-Xvond-Webhook-Key</span><input id="employee-builder-webhook-key" type="text" readonly></label>
+                    <label><span>Idempotency header</span><input id="employee-builder-webhook-idempotency" type="text" readonly></label>
+                    <div id="employee-builder-webhook-error" class="error"></div>
+                </div>
                 <div id="employee-builder-test-panel" class="employee-builder-section hidden">
                     <h3>Preview & Test</h3>
                     <p class="muted">Talk to the current draft. Xvond will not use live channels or execute business actions in this preview.</p>
@@ -544,6 +594,26 @@
                 await openJourneyPage("integrations");
                 return;
             }
+            if (actionType === "setup_webhook") {
+                const panel = document.getElementById("employee-builder-webhook-panel");
+                const error = document.getElementById("employee-builder-webhook-error");
+                if (error) error.textContent = "";
+                try {
+                    const result = await api(`/customer/employee-builder/${Number(employee.agent_id)}/webhook`);
+                    const url = document.getElementById("employee-builder-webhook-url");
+                    const key = document.getElementById("employee-builder-webhook-key");
+                    const idempotency = document.getElementById("employee-builder-webhook-idempotency");
+                    if (url) url.value = String(result.url || "");
+                    if (key) key.value = String(result.key || "");
+                    if (idempotency) idempotency.value = String(result.idempotency_header || "Idempotency-Key");
+                    panel?.classList.remove("hidden");
+                    panel?.scrollIntoView({behavior: "smooth", block: "center"});
+                } catch (err) {
+                    panel?.classList.remove("hidden");
+                    if (error) error.textContent = err?.message || "Could not load webhook setup.";
+                }
+                return;
+            }
             if (actionType === "setup_website" || actionType === "setup_whatsapp") {
                 await openJourneyPage("agents");
                 const index = (agents || []).findIndex(item => Number(item.id) === Number(employee.agent_id));
@@ -575,16 +645,190 @@
             });
         });
 
+        async function loadExecutionHistory() {
+            const list = document.getElementById("employee-builder-runs-list");
+            const error = document.getElementById("employee-builder-runs-error");
+            if (!list) return;
+            if (error) error.textContent = "";
+            list.innerHTML = '<p class="muted">Loading execution history...</p>';
+            try {
+                const result = await api(`/customer/employee-builder/${Number(employee.agent_id)}/automation-runs`);
+                const runs = Array.isArray(result.runs) ? result.runs : [];
+                if (!runs.length) {
+                    list.innerHTML = '<p class="muted">No automatic runs yet.</p>';
+                    return;
+                }
+                list.innerHTML = runs.map(run => {
+                    const output = run.output_data ? JSON.stringify(run.output_data, null, 2) : "";
+                    return `
+                        <div class="note">
+                            <div class="employee-builder-current-head">
+                                <strong>${escapeHtml(run.workflow_name || `Run #${run.id}`)}</strong>
+                                ${badge(String(run.status || "unknown"), run.status === "success" ? "ready" : (run.status === "failed" ? "setup" : "neutral"))}
+                            </div>
+                            <div class="muted">Run #${Number(run.id)} · ${escapeHtml(String(run.created_at || ""))}</div>
+                            ${run.error_message ? `<div class="error">${escapeHtml(run.error_message)}</div>` : ""}
+                            ${output ? `<pre class="employee-builder-run-output">${escapeHtml(output.slice(0, 6000))}</pre>` : ""}
+                        </div>
+                    `;
+                }).join("");
+            } catch (err) {
+                list.innerHTML = "";
+                if (error) error.textContent = err?.message || "Could not load execution history.";
+            }
+        }
+
+        document.getElementById("employee-builder-runs-refresh")?.addEventListener("click", loadExecutionHistory);
+        loadExecutionHistory();
+
+        async function loadAutomationApprovals() {
+            const list = document.getElementById("employee-builder-approvals-list");
+            const error = document.getElementById("employee-builder-approvals-error");
+            if (!list) return;
+            if (error) error.textContent = "";
+            list.innerHTML = '<p class="muted">Loading approvals...</p>';
+            try {
+                const result = await api(`/customer/employee-builder/${Number(employee.agent_id)}/automation-approvals`);
+                const approvals = Array.isArray(result.approvals) ? result.approvals : [];
+                if (!approvals.length) {
+                    list.innerHTML = '<p class="muted">No actions are waiting for approval.</p>';
+                    return;
+                }
+                list.innerHTML = approvals.map(item => `
+                    <div class="note" data-automation-approval-row="${Number(item.id)}">
+                        <div class="employee-builder-current-head">
+                            <strong>${escapeHtml(item.summary || item.action_type || "Pending action")}</strong>
+                            ${badge("Waiting approval", "setup")}
+                        </div>
+                        <div class="muted">
+                            ${escapeHtml(String(item.action_type || ""))}
+                            ${item.node_id ? ` · node ${escapeHtml(String(item.node_id))}` : ""}
+                            ${item.run_id ? ` · run #${Number(item.run_id)}` : ""}
+                        </div>
+                        <pre class="employee-builder-run-output">${escapeHtml(JSON.stringify(item.details || {}, null, 2).slice(0, 4000))}</pre>
+                        <div class="employee-builder-actions">
+                            <button type="button" data-approve-automation="${Number(item.id)}">Approve & continue</button>
+                            <button type="button" data-reject-automation="${Number(item.id)}">Reject</button>
+                        </div>
+                        <div class="error" data-approval-error="${Number(item.id)}"></div>
+                    </div>
+                `).join("");
+
+                list.querySelectorAll("[data-approve-automation]").forEach(button => {
+                    button.addEventListener("click", async () => {
+                        const requestId = Number(button.dataset.approveAutomation || 0);
+                        const rowError = list.querySelector(`[data-approval-error="${requestId}"]`);
+                        if (rowError) rowError.textContent = "";
+                        button.disabled = true;
+                        try {
+                            await api(
+                                `/customer/employee-builder/${Number(employee.agent_id)}/automation-approvals/${requestId}/approve`,
+                                {method: "POST"}
+                            );
+                            await Promise.all([
+                                loadAutomationApprovals(),
+                                loadExecutionHistory(),
+                            ]);
+                        } catch (err) {
+                            if (rowError) rowError.textContent = err?.message || "Could not approve this action.";
+                            button.disabled = false;
+                        }
+                    });
+                });
+
+                list.querySelectorAll("[data-reject-automation]").forEach(button => {
+                    button.addEventListener("click", async () => {
+                        const requestId = Number(button.dataset.rejectAutomation || 0);
+                        const rowError = list.querySelector(`[data-approval-error="${requestId}"]`);
+                        if (rowError) rowError.textContent = "";
+                        button.disabled = true;
+                        try {
+                            await api(
+                                `/customer/employee-builder/${Number(employee.agent_id)}/automation-approvals/${requestId}/reject`,
+                                {method: "POST"}
+                            );
+                            await Promise.all([
+                                loadAutomationApprovals(),
+                                loadExecutionHistory(),
+                            ]);
+                        } catch (err) {
+                            if (rowError) rowError.textContent = err?.message || "Could not reject this action.";
+                            button.disabled = false;
+                        }
+                    });
+                });
+            } catch (err) {
+                list.innerHTML = "";
+                if (error) error.textContent = err?.message || "Could not load approvals.";
+            }
+        }
+
+        document.getElementById("employee-builder-approvals-refresh")?.addEventListener("click", loadAutomationApprovals);
+        loadAutomationApprovals();
+
+        document.getElementById("employee-builder-manual-run")?.addEventListener("click", async () => {
+            const input = document.getElementById("employee-builder-manual-run-input");
+            const output = document.getElementById("employee-builder-manual-run-output");
+            const error = document.getElementById("employee-builder-manual-run-error");
+            if (error) error.textContent = "";
+            let inputData = {};
+            const raw = String(input?.value || "").trim();
+            if (raw) {
+                try {
+                    inputData = JSON.parse(raw);
+                    if (!inputData || Array.isArray(inputData) || typeof inputData !== "object") {
+                        throw new Error("Input must be a JSON object.");
+                    }
+                } catch (err) {
+                    if (error) error.textContent = err?.message || "Input must be valid JSON.";
+                    return;
+                }
+            }
+            try {
+                const result = await api(
+                    `/customer/employee-builder/${Number(employee.agent_id)}/run-graph`,
+                    {
+                        method: "POST",
+                        body: JSON.stringify({input_data: inputData}),
+                    }
+                );
+                if (output) {
+                    output.textContent = JSON.stringify(result.output_data || result, null, 2);
+                    output.classList.remove("hidden");
+                }
+                await loadExecutionHistory();
+            } catch (err) {
+                if (error) error.textContent = err?.message || "Could not run this employee.";
+            }
+        });
+
         async function loadBuilderConnections() {
             const selects = Array.from(document.querySelectorAll("[data-integration-select]"));
             if (!selects.length) return;
             try {
                 const result = await api("/manage/integrations");
                 const integrations = (result.integrations || []).filter(item => item.enabled && item.configured && item.validated);
-                const options = '<option value="">Choose a connected system</option>' + integrations.map(item =>
-                    `<option value="${Number(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(item.integration_type)}</option>`
-                ).join("");
-                for (const select of selects) select.innerHTML = options;
+                for (const select of selects) {
+                    const requirementKey = decodeURIComponent(String(select.dataset.integrationSelect || ""));
+                    const allowedTypes = requirementKey === "instagram_publish"
+                        ? new Set(["instagram_publish"])
+                        : null;
+                    const compatible = allowedTypes
+                        ? integrations.filter(item => allowedTypes.has(String(item.integration_type || "")))
+                        : integrations;
+                    const options = '<option value="">Choose a connected system</option>' + compatible.map(item =>
+                        `<option value="${Number(item.id)}" data-integration-type="${escapeHtml(item.integration_type)}">${escapeHtml(item.name)} · ${escapeHtml(item.integration_type)}</option>`
+                    ).join("");
+                    select.innerHTML = options;
+                    const syncEndpointFields = () => {
+                        const encodedKey = String(select.dataset.integrationSelect || "");
+                        const wrapper = document.querySelector(`[data-integration-endpoint-fields="${encodedKey}"]`);
+                        const selectedType = String(select.selectedOptions?.[0]?.dataset?.integrationType || "");
+                        if (wrapper) wrapper.classList.toggle("hidden", selectedType === "instagram_publish");
+                    };
+                    select.addEventListener("change", syncEndpointFields);
+                    syncEndpointFields();
+                }
             } catch (err) {
                 for (const select of selects) {
                     select.innerHTML = '<option value="">Could not load connections</option>';

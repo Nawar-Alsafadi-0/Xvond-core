@@ -500,11 +500,12 @@ def test_self_service_recurring_capability_provisions_one_real_schedule_workflow
             "url": "https://prices.example.com",
             "threshold": 100,
         }
-        assert workflow.steps == [{
-            "type": "scheduled_action",
-            "agent_id": 1,
-            "action_type": KEY,
-        }]
+        assert len(workflow.steps) == 1
+        graph_step = workflow.steps[0]
+        assert graph_step["type"] == "graph"
+        assert graph_step["agent_id"] == 1
+        assert [node["type"] for node in graph_step["graph"]["nodes"]] == ["action"]
+        assert graph_step["graph"]["nodes"][0]["params"]["action_type"] == KEY
 
     # Cached compilation repairs/reuses the same generated workflow instead of
     # creating duplicates or paying for another compiler call.
@@ -512,6 +513,421 @@ def test_self_service_recurring_capability_provisions_one_real_schedule_workflow
     with factory() as db:
         assert db.query(AutomationWorkflow).count() == 1
     assert calls == []
+
+
+def test_self_service_content_generation_schedule_builds_ai_then_action(database):
+    factory, _ = database
+    brief, payload = _scheduled_payload()
+    payload["requirements"][0]["purpose"] = "Create and publish the daily social post"
+    payload["requirements"][0]["primitives"] = [
+        "content_generation",
+        "scheduler",
+        "workflow_engine",
+    ]
+    payload["requirements"][0]["execution_plan"] = [
+        {
+            "id": "notify",
+            "op": "notify",
+            "title": "Content ready",
+            "message": "Scheduled content was generated.",
+        }
+    ]
+    payload["permissions"] = [
+        {"action": "Create and publish the daily social post", "mode": "automatic"}
+    ]
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+    requirement = result["spec"]["requirements"][0]
+
+    assert requirement["execution_status"] == "ready"
+    assert requirement["schedule_status"] == "ready"
+
+    with factory() as db:
+        workflow = db.query(AutomationWorkflow).one()
+        assert len(workflow.steps) == 1
+        graph_step = workflow.steps[0]
+        assert graph_step["type"] == "graph"
+        assert graph_step["agent_id"] == 1
+        nodes = graph_step["graph"]["nodes"]
+        assert [node["type"] for node in nodes] == ["ai", "action"]
+        assert "Create and publish the daily social post" in nodes[0]["params"]["prompt"]
+        assert nodes[1]["params"]["action_type"] == KEY
+        assert nodes[1]["params"]["arguments"]["caption"] == "$nodes.generate_content.ai_response"
+
+
+def test_self_service_graph_schedule_owns_the_full_pipeline(database):
+    factory, _ = database
+    brief = "Every 60 minutes generate a summary and save the result automatically."
+    payload = {
+        "role": "Scheduled graph worker",
+        "scope": "business",
+        "requirements": [
+            {
+                "key": KEY,
+                "kind": "custom",
+                "purpose": "Save the generated summary",
+                "primitives": [
+                    "content_generation",
+                    "scheduler",
+                    "workflow_engine",
+                ],
+                "schedule": {
+                    "kind": "interval",
+                    "every_minutes": 60,
+                    "source_text": "Every 60 minutes",
+                },
+                "execution_plan": [
+                    {
+                        "id": "notify",
+                        "op": "notify",
+                        "title": "Saved",
+                        "message": "Summary saved.",
+                    }
+                ],
+            }
+        ],
+        "permissions": [
+            {"action": "Save the generated summary", "mode": "automatic"}
+        ],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {
+                "type": "schedule",
+                "schedule": {
+                    "kind": "interval",
+                    "every_minutes": 60,
+                },
+            },
+            "nodes": [
+                {
+                    "id": "draft",
+                    "type": "ai",
+                    "depends_on": [],
+                    "params": {"prompt": "Generate the scheduled summary."},
+                },
+                {
+                    "id": "save",
+                    "type": "action",
+                    "depends_on": ["draft"],
+                    "params": {
+                        "action_type": KEY,
+                        "arguments": {
+                            "body": "$nodes.draft.ai_response"
+                        },
+                    },
+                },
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "ready"
+    assert trigger["trigger_type"] == "schedule"
+    assert trigger["workflow_id"]
+
+    requirement = result["spec"]["requirements"][0]
+    assert requirement.get("schedule_workflow_id") is None
+
+    with factory() as db:
+        workflows = db.query(AutomationWorkflow).all()
+        assert len(workflows) == 1
+        workflow = workflows[0]
+        assert workflow.trigger_type == "schedule"
+        assert workflow.trigger_config["schedule"] == {
+            "kind": "interval",
+            "every_minutes": 60,
+        }
+        assert workflow.trigger_config["_xvond_graph_trigger"] is True
+        assert workflow.steps[0]["type"] == "graph"
+        assert [node["id"] for node in workflow.steps[0]["graph"]["nodes"]] == [
+            "draft",
+            "save",
+        ]
+
+
+def test_self_service_media_generation_schedule_builds_ai_media_then_action(database):
+    factory, _ = database
+    brief, payload = _scheduled_payload()
+    payload["requirements"][0]["purpose"] = "Create and publish the daily Instagram post"
+    payload["requirements"][0]["primitives"] = [
+        "content_generation",
+        "media_generation",
+        "scheduler",
+        "workflow_engine",
+    ]
+    payload["requirements"][0]["execution_plan"] = [
+        {
+            "id": "notify",
+            "op": "notify",
+            "title": "Content ready",
+            "message": "Scheduled content was generated.",
+        }
+    ]
+    payload["permissions"] = [
+        {"action": "Create and publish the daily Instagram post", "mode": "automatic"}
+    ]
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+    requirement = result["spec"]["requirements"][0]
+
+    assert requirement["execution_status"] == "ready"
+    assert requirement["schedule_status"] == "ready"
+
+    with factory() as db:
+        workflow = db.query(AutomationWorkflow).one()
+        assert len(workflow.steps) == 1
+        graph_step = workflow.steps[0]
+        assert graph_step["type"] == "graph"
+        nodes = graph_step["graph"]["nodes"]
+        assert [node["type"] for node in nodes] == ["ai", "media", "action"]
+        assert nodes[1]["params"]["size"] == "1024x1024"
+        assert nodes[2]["params"]["action_type"] == KEY
+        assert nodes[2]["params"]["arguments"]["media_url"] == "$nodes.generate_media.media_url"
+
+
+def test_self_service_manual_graph_is_provisioned_for_dashboard_worker(database):
+    factory, _ = database
+    brief = "Give me an internal dashboard worker that summarizes the supplied data when I run it."
+    payload = {
+        "role": "Dashboard worker",
+        "scope": "personal",
+        "requirements": [],
+        "permissions": [],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "summarize",
+                    "type": "ai",
+                    "depends_on": [],
+                    "params": {
+                        "prompt": "Summarize the supplied data for the owner."
+                    },
+                }
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "ready"
+    assert trigger["trigger_type"] == "manual"
+    assert trigger["workflow_id"]
+
+    with factory() as db:
+        workflow = db.get(AutomationWorkflow, trigger["workflow_id"])
+        assert workflow.trigger_type == "manual"
+        assert workflow.enabled is True
+        assert workflow.steps[0]["type"] == "graph"
+        assert workflow.steps[0]["graph"]["nodes"][0]["type"] == "ai"
+
+
+def test_self_service_direct_approval_graph_is_provisioned(database):
+    factory, _ = database
+    brief = "When I run this employee, prepare the report and ask me before sending it."
+    payload = {
+        "role": "Approval worker",
+        "scope": "business",
+        "requirements": [
+            {
+                "key": KEY,
+                "kind": "custom",
+                "purpose": "Send the report",
+                "primitives": ["workflow_engine"],
+                "execution_plan": [
+                    {
+                        "id": "notify",
+                        "op": "notify",
+                        "title": "Report",
+                        "message": "Report ready.",
+                    }
+                ],
+            }
+        ],
+        "permissions": [{"action": "Send the report", "mode": "ask_before"}],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "send",
+                    "type": "action",
+                    "depends_on": [],
+                    "params": {
+                        "action_type": KEY,
+                        "arguments": {"report": "ready"},
+                    },
+                }
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "ready"
+    assert trigger["trigger_type"] == "manual"
+    assert trigger["workflow_id"]
+
+
+def test_self_service_nested_approval_graph_is_blocked(database):
+    factory, _ = database
+    brief = "For every lead, ask me before sending the message."
+    payload = {
+        "role": "Approval worker",
+        "scope": "business",
+        "requirements": [
+            {
+                "key": KEY,
+                "kind": "custom",
+                "purpose": "Send lead message",
+                "primitives": ["workflow_engine"],
+                "execution_plan": [
+                    {
+                        "id": "notify",
+                        "op": "notify",
+                        "title": "Lead",
+                        "message": "Lead message ready.",
+                    }
+                ],
+            }
+        ],
+        "permissions": [{"action": "Send lead message", "mode": "ask_before"}],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "each",
+                    "type": "foreach",
+                    "depends_on": [],
+                    "params": {
+                        "items": "$input.leads",
+                        "graph": {
+                            "version": 1,
+                            "nodes": [
+                                {
+                                    "id": "send",
+                                    "type": "action",
+                                    "depends_on": [],
+                                    "params": {
+                                        "action_type": KEY,
+                                        "arguments": {"lead": "$item"},
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                }
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "nested_approval_not_ready"
+    assert trigger["workflow_id"] is None
+
+
+def test_self_service_webhook_graph_is_provisioned_when_actions_are_ready(database):
+    factory, _ = database
+    brief = "When my external system sends an event, notify me automatically."
+    purpose = "Notify me from the external event"
+    payload = {
+        "role": "Event worker",
+        "scope": "business",
+        "requirements": [
+            {
+                "key": KEY,
+                "kind": "custom",
+                "purpose": purpose,
+                "primitives": ["workflow_engine"],
+                "execution_plan": [
+                    {
+                        "id": "notify",
+                        "op": "notify",
+                        "title": "External event",
+                        "message": "The external event arrived.",
+                    }
+                ],
+            }
+        ],
+        "permissions": [{"action": purpose, "mode": "automatic"}],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "webhook"},
+            "nodes": [
+                {
+                    "id": "act",
+                    "type": "action",
+                    "depends_on": [],
+                    "params": {"action_type": KEY, "arguments": {}},
+                }
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "ready"
+    assert trigger["trigger_type"] == "webhook"
+    assert trigger["workflow_id"]
+
+    with factory() as db:
+        workflow = db.get(AutomationWorkflow, trigger["workflow_id"])
+        assert workflow.trigger_type == "webhook"
+        assert workflow.enabled is True
+        assert workflow.trigger_config["_xvond_graph_trigger"] is True
+        assert workflow.steps[0]["type"] == "graph"
+        assert workflow.steps[0]["graph"]["nodes"][0]["params"]["action_type"] == KEY
 
 
 def test_self_service_schedule_requires_explicit_automatic_permission(database):

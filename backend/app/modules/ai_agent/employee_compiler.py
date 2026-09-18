@@ -5,6 +5,7 @@ import json
 import re
 from typing import Any
 
+from backend.app.modules.automation.execution_graph import normalize_execution_graph
 from backend.app.modules.channels.catalog import (
     canonical_channel_type,
     list_customer_channel_capabilities,
@@ -21,6 +22,7 @@ GENERIC_PRIMITIVES = {
     "scheduler",
     "storage",
     "content_generation",
+    "media_generation",
     "messaging",
     "human_approval",
 }
@@ -79,9 +81,9 @@ REQUIREMENT_CATALOG: dict[str, dict[str, Any]] = {
     },
     "web_research": {
         "kind": "tool",
-        "status": "xvond_build",
-        "delivery_mode": "compose",
-        "primitives": ["browser_web", "workflow_engine"],
+        "status": "available",
+        "delivery_mode": "native",
+        "primitives": ["browser_web"],
     },
     "email_read": {
         "kind": "integration",
@@ -105,7 +107,7 @@ REQUIREMENT_CATALOG: dict[str, dict[str, Any]] = {
         "kind": "integration",
         "status": "connection_required",
         "delivery_mode": "connect_and_compose",
-        "primitives": ["workflow_engine", "content_generation", "messaging"],
+        "primitives": ["workflow_engine", "content_generation", "media_generation", "messaging"],
     },
     "whatsapp": {
         "kind": "channel",
@@ -121,9 +123,9 @@ REQUIREMENT_CATALOG: dict[str, dict[str, Any]] = {
     },
     "content_generation": {
         "kind": "tool",
-        "status": "xvond_build",
-        "delivery_mode": "compose",
-        "primitives": ["content_generation", "workflow_engine"],
+        "status": "available",
+        "delivery_mode": "native",
+        "primitives": ["content_generation"],
     },
 }
 
@@ -233,6 +235,18 @@ Use this shape:
   "permissions": [
     {"action": "action description", "mode": "automatic|ask_before|never"}
   ],
+  "execution_graph": {
+    "version": 1,
+    "trigger": {"type":"manual|schedule|webhook|event","event":"internal event name when type=event"},
+    "nodes": [
+      {
+        "id": "stable_node_id",
+        "type": "ai|media|action|http_get_json|web_fetch|browser|transform|condition|notify|foreach|select|filter|aggregate|state_read|state_write|state_delete",
+        "depends_on": [],
+        "params": {}
+      }
+    ]
+  },
   "setup_questions": ["only information, account access or credentials genuinely required from the customer"]
 }
 
@@ -245,6 +259,23 @@ Rules:
 - Keep intake field keys stable snake_case identifiers. Labels should be short human-readable labels in the customer's language when practical.
 - intake.known values must be copied from information explicitly present in the Job Brief. Never invent values. Do not place passwords, API keys, access tokens or other credentials in intake.known; credentials belong to protected connection flows.
 - Never use a missing Xvond feature as a reason to reject the job. For a novel digital requirement, return it and give it useful generic primitives so Xvond can compose it.
+- Always describe executable work as execution_graph nodes whenever the job contains more than a single conversational response. The graph is the general execution plan; requirements describe capabilities/connections needed to make that graph runnable.
+- execution_graph.trigger describes what starts the graph. Use manual when the user starts it explicitly, schedule for recurring/time-based work, webhook for an incoming external JSON event, and event for an internal Xvond event. Never invent a webhook/event trigger when the user did not request event-driven behavior.
+- For type=event, set trigger.event to the stable internal event name the graph should consume. Event names are capabilities of the Xvond runtime, not provider-specific webhook URLs.
+- Use generic node types, not use-case names. Examples: ai for reasoning/generation, media for generated visual media, action for a side effect through a requirement/connector, http_get_json for read-only JSON fetches, transform for data shaping, condition for branching gates, notify for an internal owner update.
+- ai and media nodes may use params.context to consume structured output from $input.* or $nodes.<id>.* while keeping the instruction itself in params.prompt. Prefer this over embedding raw upstream data inside prompt strings. Xvond bounds context before sending it to providers.
+- action nodes must reference a requirement key in params.action_type. Do not encode provider-specific logic in the graph.
+- condition nodes use params.left, params.operator and params.right. Supported operators are eq, neq, gt, gte, lt, lte and contains. Any later node may use "when":"$nodes.<condition_id>.matched" to run only when that condition is true.
+- foreach nodes iterate over params.items, which may reference $input.* or a previous node output. Put the reusable per-item work in params.graph. Inside that nested graph, $item refers to the current item and $index to its zero-based index. Keep loops bounded to practical customer work; the runtime enforces a hard maximum.
+- web_fetch nodes read a public web page with params.url and return bounded page content. Use this for simple read-only public web research/monitoring when browser rendering is not needed.
+- browser nodes use params.url plus a bounded params.actions list. Supported actions are goto, wait_for, extract_text, extract_attribute, extract_html, click, fill, press and select. Use browser for rendered/public-site workflows that cannot be handled by web_fetch. Click/fill/press/select are consequential interactive actions and Xvond will pause at a durable approval checkpoint before running them. Never place credentials, passwords, access tokens or other secrets directly in browser params.
+- state_read/state_write/state_delete provide durable per-employee state across graph runs. Use params.namespace and params.key; state_write also uses params.value. Use state for compact operational memory such as last_processed_id, cursor, preferences or workflow checkpoints. Do not store credentials, large documents or arbitrary conversation transcripts in state.
+- select nodes project a list into requested fields using params.items and params.fields.
+- filter nodes keep matching list items using params.items, params.path, params.operator and params.value. Supported operators match condition nodes plus in.
+- aggregate nodes calculate count, sum, avg, min or max from params.items; numeric operations may use params.path to select the numeric field.
+- Node dependencies belong in depends_on. Keep the graph acyclic and order nodes so every dependency appears before the node that depends on it.
+- Text/content generation itself is a native employee capability and does not need a fake external action or execution_plan. When generated content must be published, sent, stored or otherwise acted on externally, represent that side effect as its own requirement (for example instagram_publish) and include content_generation in that side-effect requirement's primitives.
+- For recurring pipelines such as "generate and publish every day", attach the schedule to the requirement that performs the real side effect and include every needed primitive there. For Instagram feed publishing, include content_generation + media_generation + scheduler + messaging + workflow_engine so Xvond can create both the caption and publishable media. Do not emit a disconnected standalone scheduling requirement when it would separate one requested pipeline into pieces that cannot execute together.
 - Set requires_connection=true only when the customer explicitly wants to use an existing external account/system, or the requested work inherently depends on one.
 - For capabilities Xvond can provide internally (for example booking/reservations, simple lead capture, forms, lightweight records or schedules), prefer fulfillment_mode=xvond_internal when no external system is explicitly required. Do not force the customer to buy or connect a third-party system merely because one exists.
 - For booking/reservations specifically: if the Job Brief names an existing booking/calendar/provider that must be used, set requires_connection=true and fulfillment_mode=external_connection. Otherwise use fulfillment_mode=xvond_internal and let Xvond provide the booking capability. For internal booking, require only missing operational facts needed to make real slots: working_days, opening_time, closing_time and slot_minutes. Put explicitly stated values in runtime_inputs and only absent values in customer_inputs.
@@ -742,6 +773,8 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         if len(setup_questions) >= 30:
             break
 
+    execution_graph = normalize_execution_graph(payload.get("execution_graph"))
+
     return {
         "version": COMPILER_VERSION,
         "job_brief": job_brief.strip(),
@@ -752,6 +785,7 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         "tasks": tasks,
         "requirements": requirements,
         "permissions": permissions,
+        "execution_graph": execution_graph,
         "setup_questions": setup_questions,
         "ready_requirements": [x["key"] for x in requirements if x["status"] == "available"],
         "build_required": [x["key"] for x in requirements if x["status"] == "xvond_build"],
