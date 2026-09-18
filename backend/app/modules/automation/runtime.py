@@ -236,6 +236,31 @@ class AutomationRuntime:
                     node_result = {"result": body, "status_code": status}
                     node_outputs[node_id] = node_result
                     continue
+                elif node_type == "web_fetch":
+                    url = str(params.get("url") or "").strip()
+                    if not url:
+                        raise ValueError(f"Execution graph node {node_id} requires url")
+                    result = safe_http_request(
+                        url=url,
+                        method="GET",
+                        headers={
+                            "Accept": "text/html,text/plain,application/xhtml+xml;q=0.9,*/*;q=0.1",
+                            "User-Agent": "Xvond-Agent/1.0",
+                        },
+                        timeout=float(params.get("timeout") or 15),
+                        max_response_bytes=500_000,
+                    )
+                    status = int(result.get("status_code") or 0)
+                    if not 200 <= status < 300:
+                        raise ValueError(
+                            f"Execution graph web fetch node {node_id} returned HTTP {status}"
+                        )
+                    node_outputs[node_id] = {
+                        "content": str(result.get("response") or ""),
+                        "status_code": status,
+                        "truncated": bool(result.get("truncated")),
+                    }
+                    continue
                 elif node_type == "transform":
                     nested_step = {
                         "type": "transform",
