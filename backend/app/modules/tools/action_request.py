@@ -14,6 +14,10 @@ from backend.app.modules.channels.handoff import activate_human_handoff
 from backend.app.modules.channels.whatsapp_models import WhatsAppSession
 from backend.app.modules.integrations.catalog import integration_validation_ready
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.integrations.email_smtp import (
+    EmailConnectorError,
+    send_smtp_email,
+)
 from backend.app.modules.automation.event_outbox import enqueue_automation_event
 from backend.app.modules.tools.base import AgentTool, ToolResult
 from backend.app.modules.tools.business_models import ActionRequest, HumanHandoff
@@ -408,6 +412,77 @@ def _instagram_publish_call(
     )
 
 
+def _email_send_call(
+    *,
+    config: dict,
+    payload: dict,
+    operation: str,
+    idempotency_key: str | None = None,
+) -> ToolResult:
+    if operation != "execute":
+        return ToolResult(
+            success=False,
+            error="Email SMTP currently supports execute only",
+        )
+    stable_key = str(idempotency_key or "").strip()
+    if not stable_key:
+        return ToolResult(
+            success=False,
+            error="Email sending requires a stable idempotency key",
+        )
+    claim_key = f"email_send:{stable_key}"
+    if not execution_claims.claim(claim_key, ttl_seconds=86400):
+        return ToolResult(
+            success=False,
+            data={"reconciliation_required": True},
+            error="Email send is already claimed; reconciliation is required before retrying",
+        )
+
+    details = payload.get("details") if isinstance(payload, dict) else {}
+    if not isinstance(details, dict):
+        details = {}
+    recipient = str(
+        details.get("to")
+        or details.get("to_email")
+        or details.get("recipient")
+        or details.get("email")
+        or ""
+    ).strip()
+    subject = str(
+        details.get("subject")
+        or details.get("title")
+        or "Message from Xvond"
+    ).strip()
+    body = str(
+        details.get("body")
+        or details.get("text")
+        or details.get("message")
+        or details.get("ai_response")
+        or ""
+    )
+    reply_to = str(details.get("reply_to") or "").strip() or None
+
+    try:
+        result = send_smtp_email(
+            config=config,
+            to_address=recipient,
+            subject=subject,
+            body=body,
+            reply_to=reply_to,
+        )
+    except EmailConnectorError as exc:
+        execution_claims.release(claim_key)
+        return ToolResult(success=False, error=str(exc))
+
+    return ToolResult(
+        success=True,
+        data={
+            **result,
+            "idempotency_key": stable_key,
+        },
+    )
+
+
 def _integration_call(
     db,
     context: dict,
@@ -466,6 +541,14 @@ def _integration_call(
 
     if integration_type == "instagram_publish":
         return _instagram_publish_call(
+            config=config,
+            payload=payload,
+            operation=operation,
+            idempotency_key=idempotency_key,
+        )
+
+    if integration_type == "email_smtp":
+        return _email_send_call(
             config=config,
             payload=payload,
             operation=operation,
