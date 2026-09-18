@@ -6,6 +6,7 @@ import json
 from sqlalchemy import text
 
 from backend.app.core.config_secrets import reveal_config
+from backend.app.core.config.settings import settings
 from backend.app.core.http_security import safe_http_request, validate_public_http_url
 from backend.app.modules.ai_agent.models import AIMessage
 from backend.app.modules.channels.handoff import activate_human_handoff
@@ -313,7 +314,7 @@ def _instagram_publish_call(
     try:
         validate_public_http_url(image_url)
         container = safe_http_request(
-            url=f"https://graph.facebook.com/{instagram_user_id}/media",
+            url=f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}/{instagram_user_id}/media",
             method="POST",
             headers={"Authorization": f"Bearer {access_token}"},
             form_data={
@@ -351,7 +352,7 @@ def _instagram_publish_call(
 
     try:
         published = safe_http_request(
-            url=f"https://graph.facebook.com/{instagram_user_id}/media_publish",
+            url=f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}/{instagram_user_id}/media_publish",
             method="POST",
             headers={"Authorization": f"Bearer {access_token}"},
             form_data={"creation_id": creation_id},
