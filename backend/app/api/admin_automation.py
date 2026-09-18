@@ -10,15 +10,17 @@ from backend.app.models.user import User
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.automation.runtime import automation_runtime
 from backend.app.modules.automation.schedule import ScheduleConfigError, normalize_schedule_config
+from backend.app.modules.automation.webhook_auth import automation_webhook_key
 from backend.app.modules.billing.service_limits import service_limits
 
 router = APIRouter(prefix="/admin/automation", tags=["Xvond Admin - Automation"])
 
 ALLOWED_TRIGGERS = {"manual", "webhook", "schedule", "event"}
-IMPLEMENTED_TRIGGERS = {"manual", "schedule"}
+IMPLEMENTED_TRIGGERS = {"manual", "schedule", "webhook"}
 ALLOWED_STEP_TYPES = {"ai", "tool", "condition", "webhook", "transform", "scheduled_action", "media_generation", "graph"}
 TERMINAL_SIDE_EFFECT_TYPES = {"tool", "webhook", "scheduled_action"}
 SCHEDULE_SAFE_STEP_TYPES = {"transform", "condition", "scheduled_action", "graph"}
+WEBHOOK_SAFE_STEP_TYPES = {"transform", "condition", "scheduled_action", "graph"}
 SENSITIVE_WORKFLOW_KEYS = {
     "authorization",
     "password",
@@ -120,6 +122,14 @@ def validate_workflow(
                 detail=(
                     f"Scheduled step '{step_type}' is not production-safe yet. "
                     "Use the idempotent scheduled_action execution path."
+                ),
+            )
+        if trigger == "webhook" and step_type not in WEBHOOK_SAFE_STEP_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Webhook step '{step_type}' is not production-safe yet. "
+                    "Use a general execution graph or idempotent scheduled_action."
                 ),
             )
         if step_type in TERMINAL_SIDE_EFFECT_TYPES and index != len(steps) - 1:
@@ -275,6 +285,38 @@ def update_workflow(
     except HTTPException:
         db.rollback()
         raise
+    finally:
+        db.close()
+
+
+@router.get("/{workflow_id}/webhook-credentials")
+def webhook_credentials(
+    workflow_id: int,
+    current_admin: User = Depends(require_xvond_admin),
+):
+    db = SessionLocal()
+    try:
+        workflow = (
+            db.query(AutomationWorkflow)
+            .filter(AutomationWorkflow.id == workflow_id)
+            .first()
+        )
+        if workflow is None:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        if workflow.trigger_type != "webhook":
+            raise HTTPException(status_code=409, detail="Workflow is not webhook-triggered")
+        if not settings.PUBLIC_BASE_URL:
+            raise HTTPException(status_code=409, detail="PUBLIC_BASE_URL is not configured")
+        return {
+            "workflow_id": workflow.id,
+            "url": f"{settings.PUBLIC_BASE_URL}/webhooks/automation/{workflow.id}",
+            "header": "X-Xvond-Webhook-Key",
+            "key": automation_webhook_key(
+                workflow_id=workflow.id,
+                company_id=workflow.company_id,
+            ),
+            "idempotency_header": "Idempotency-Key",
+        }
     finally:
         db.close()
 
