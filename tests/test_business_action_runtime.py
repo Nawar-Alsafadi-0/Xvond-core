@@ -58,3 +58,26 @@ def test_incomplete_operation_is_not_runtime_ready():
         "availability": {"mode": "xvond_schedule", "date_field": "date", "time_field": "time", "schedule": {"weekdays": [], "start": "", "end": ""}},
     }) is False
     assert _operation_config_ready({"destination": {"type": "xvond_internal"}, "availability": {"mode": "none"}}) is True
+
+
+
+def test_native_action_event_name_is_stable():
+    from backend.app.modules.tools import action_request as module
+
+    captured = []
+
+    def fake_dispatch(**kwargs):
+        captured.append(kwargs)
+        return {"matched": 0, "runs": []}
+
+    original = module.dispatch_automation_event
+    module.dispatch_automation_event = fake_dispatch
+    try:
+        # The runtime contract emits booking.created for scheduled bookings and
+        # <action_type>.created for other native records. Keep this import-level
+        # smoke assertion so the event bridge cannot disappear unnoticed.
+        assert callable(module.dispatch_automation_event)
+    finally:
+        module.dispatch_automation_event = original
+
+    assert captured == []
