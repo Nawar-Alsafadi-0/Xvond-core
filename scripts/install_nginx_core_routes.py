@@ -150,11 +150,12 @@ def _server_bounds(lines: list[str], domain: str) -> tuple[int, int]:
 
 def _install_include(target: Path, domain: str) -> tuple[Path, bool]:
     original = target.read_text(encoding="utf-8")
-    if str(INCLUDE_PATH) in original:
-        return target, False
-
     lines = original.splitlines(keepends=True)
     start, end = _server_bounds(lines, domain)
+    target_server = "".join(lines[start : end + 1])
+    if str(INCLUDE_PATH) in target_server:
+        return target, False
+
     insertion = end
     for index in range(start + 1, end):
         code = _strip_comment(lines[index])
