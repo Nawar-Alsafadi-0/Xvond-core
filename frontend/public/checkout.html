@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Xvond — Secure Checkout</title>
+  <style>
+    :root{font-family:Inter,Arial,sans-serif;color:#0f172a;background:#f8fafc}
+    *{box-sizing:border-box}
+    body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}
+    .card{width:min(620px,100%);background:#fff;border:1px solid #e2e8f0;border-radius:22px;padding:30px;box-shadow:0 18px 50px rgba(15,23,42,.08)}
+    .brand{font-size:28px;font-weight:800;color:#2563eb;margin-bottom:24px}
+    h1{margin:0 0 12px;font-size:32px}
+    p{color:#475569;line-height:1.6}
+    .status{margin-top:18px;padding:14px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0}
+    .error{color:#b91c1c;background:#fef2f2;border-color:#fecaca}
+    a{color:#2563eb;font-weight:700}
+  </style>
+  <script src="https://cdn.paddle.com/paddle/v2/paddle.js"></script>
+</head>
+<body>
+  <main class="card">
+    <div class="brand">Xvond</div>
+    <h1>Complete your AI Employee plan</h1>
+    <p>Your subscription is activated by Xvond only after the payment provider confirms the payment securely.</p>
+    <div id="status" class="status">Preparing secure checkout…</div>
+    <p><a href="/customer-ui#employee-builder">Return to Xvond</a></p>
+  </main>
+<script>
+(async () => {
+  const status = document.getElementById("status");
+  const params = new URLSearchParams(window.location.search);
+  const transactionId = params.get("_ptxn") || params.get("transaction_id");
+
+  const fail = (message) => {
+    status.textContent = message;
+    status.classList.add("error");
+  };
+
+  if (!transactionId) {
+    fail("This checkout link is missing its transaction.");
+    return;
+  }
+
+  try {
+    const response = await fetch("/public/billing/config", {
+      headers: {"Accept": "application/json"},
+      credentials: "same-origin"
+    });
+    if (!response.ok) throw new Error("Billing configuration is unavailable.");
+    const config = await response.json();
+    if (!config.enabled || config.provider !== "paddle" || !config.client_token) {
+      throw new Error("Online checkout is not enabled.");
+    }
+    if (!window.Paddle) throw new Error("Secure checkout could not be loaded.");
+
+    if (config.environment === "sandbox") {
+      window.Paddle.Environment.set("sandbox");
+    }
+
+    window.Paddle.Initialize({
+      token: config.client_token,
+      eventCallback: (event) => {
+        if (event?.name === "checkout.completed") {
+          status.textContent = "Payment received. Returning to Xvond…";
+          window.setTimeout(() => {
+            window.location.assign(config.success_url || "/customer-ui#employee-builder");
+          }, 700);
+        }
+      }
+    });
+
+    status.textContent = "Secure checkout is ready.";
+    window.Paddle.Checkout.open({
+      transactionId,
+      settings: {
+        displayMode: "overlay",
+        theme: "light",
+        successUrl: config.success_url || "/customer-ui#employee-builder"
+      }
+    });
+  } catch (error) {
+    fail(error?.message || "Secure checkout is temporarily unavailable.");
+  }
+})();
+</script>
+</body>
+</html>
