@@ -39,7 +39,7 @@ def _grounded_https_hosts(spec: dict) -> list[str]:
     """Extract only HTTPS hosts that the customer actually wrote in the Job Brief."""
     text = str(spec.get("job_brief") or "")
     hosts: list[str] = []
-    for raw in re.findall(r"https://[^\\s<>'\\\"]+", text, flags=re.IGNORECASE):
+    for raw in re.findall(r"https://[^\s<>'\"]+", text, flags=re.IGNORECASE):
         parsed = urlparse(raw.rstrip(".,);]}"))
         host = str(parsed.hostname or "").rstrip(".").lower()
         if host and host not in hosts:
