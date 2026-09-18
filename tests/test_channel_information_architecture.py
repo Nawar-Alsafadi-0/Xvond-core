@@ -57,7 +57,8 @@ def test_customer_employee_cards_explain_shared_brain_across_channels():
         in ui
     )
     assert "Live" in ui
-    assert "Inactive" in ui
+    assert "Setup required" in ui
+    assert "Xvond adapter required" in ui
 
 
 def test_customer_business_profile_is_company_level_not_employee_level():
