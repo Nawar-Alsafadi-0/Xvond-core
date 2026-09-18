@@ -425,6 +425,99 @@
         `;
     }
 
+    function pendingRevisionMarkup(employee) {
+        const pending = employee?.pending_revision;
+        if (!pending) return "";
+
+        const spec = pending.compiled_spec || null;
+        const setupActions = [];
+        for (const requirement of (spec?.requirements || [])) {
+            if (!requirement || typeof requirement !== "object") continue;
+            const key = String(requirement.key || "");
+            const status = String(requirement.status || "");
+            const kind = String(requirement.kind || "");
+            if (status === "customer_input_required") {
+                const fields = Array.isArray(requirement.customer_inputs)
+                    ? requirement.customer_inputs.map(field => ({
+                        key: String(field || ""),
+                        label: String(field || "").replaceAll("_", " "),
+                    })).filter(field => field.key)
+                    : [];
+                setupActions.push({
+                    type: "provide_input",
+                    label: "Provide " + key.replaceAll("_", " "),
+                    key,
+                    detail: requirement.purpose || "",
+                    fields,
+                });
+            } else if (status === "connection_required" && kind !== "channel") {
+                setupActions.push({
+                    type: "connect_system",
+                    label: "Connect system for " + key.replaceAll("_", " "),
+                    key,
+                    detail: requirement.purpose || "",
+                });
+            }
+        }
+
+        const currentChannels = new Set(employee.requested_channels || []);
+        for (const channel of (pending.requested_channels || [])) {
+            if (currentChannels.has(channel)) continue;
+            if (channel === "website") {
+                setupActions.push({type: "setup_website", label: "Set up Website Chat", key: "website"});
+            } else if (channel === "whatsapp") {
+                setupActions.push({type: "setup_whatsapp", label: "Set up WhatsApp", key: "whatsapp"});
+            }
+        }
+
+        const statusBadge = badge(
+            pending.current_build_tested ? "Tested" : (pending.compiled ? "Built" : "Draft"),
+            pending.current_build_tested ? "ready" : "setup"
+        );
+        const channelBadges = (pending.requested_channels || []).map(item =>
+            badge(labelFor(CHANNELS, item))
+        ).join("") || '<span class="muted">No communication channel changes.</span>';
+        const specMarkup = spec ? [
+            '<div class="employee-builder-section">',
+            "<h3>" + escapeHtml(spec.role || "AI Employee") + "</h3>",
+            "<p>" + escapeHtml(spec.summary || "") + "</p>",
+            requirementMarkup(spec.requirements),
+            "</div>",
+        ].join("") : '<div class="employee-builder-section"><p class="muted">This revision is saved but has not been built yet.</p></div>';
+        const setupMarkup = setupActions.length ? [
+            '<div class="employee-builder-section">',
+            "<h3>Setup for this revision</h3>",
+            '<p class="muted">These changes affect only the pending revision until Apply.</p>',
+            '<div class="employee-builder-journey-actions">',
+            setupActions.map(journeyActionMarkup).join(""),
+            "</div></div>",
+        ].join("") : "";
+        const testButton = pending.compiled
+            ? '<button type="button" id="pending-revision-test">' + (pending.current_build_tested ? "Test again" : "Test revision") + "</button>"
+            : "";
+        const applyButton = '<button type="button" id="pending-revision-apply" ' + (pending.can_apply ? "" : "disabled") + ">" + (pending.can_apply ? "Apply revision" : "Test before apply") + "</button>";
+
+        return [
+            '<div class="panel employee-builder-pending-revision">',
+            '<div class="employee-builder-current-head"><div>',
+            '<div class="employee-builder-kicker">PENDING REVISION</div>',
+            "<h2>New version ready beside the live employee</h2>",
+            '<p class="muted">The current live employee keeps running until you explicitly apply this revision.</p>',
+            "</div>", statusBadge, "</div>",
+            '<div class="employee-builder-section"><h3>Revised Job Brief</h3><p>',
+            escapeHtml(pending.job_brief || ""),
+            '</p><div class="employee-builder-missing">', channelBadges, "</div></div>",
+            specMarkup,
+            setupMarkup,
+            '<div class="employee-builder-actions">',
+            testButton, applyButton,
+            '<button type="button" id="pending-revision-discard">Discard revision</button>',
+            "</div>",
+            '<div id="pending-revision-error" class="error"></div>',
+            "</div>",
+        ].join("");
+    }
+
     function renderCurrent(employee) {
         const target = root();
         if (!target) return;
