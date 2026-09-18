@@ -582,7 +582,7 @@ def launch_self_service_employee(
         limits_service.check_agent_limit(db, company.id)
         agent.enabled = True
         company.active = True
-        company.lifecycle_status = "active"
+        company.lifecycle_status = "live"
         company.lifecycle_updated_at = datetime.utcnow()
         db.commit()
 

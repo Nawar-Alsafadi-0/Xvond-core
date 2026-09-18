@@ -18,6 +18,7 @@ function xvondOnboardingState(){
 
 function xvondInjectOnboardingWorkflow(){
   if(typeof xvondWorkspace==='undefined'||xvondWorkspace.tab!=='overview'||!xvondWorkspace.data)return;
+  if(String(xvondWorkspace.data?.view?.company?.onboarding_source||'managed')==='self_service')return;
   const content=document.getElementById('workspace-content');
   if(!content||content.querySelector('[data-xvond-onboarding-workflow]'))return;
   const state=xvondOnboardingState();

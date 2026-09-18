@@ -6,7 +6,9 @@ from backend.app.core.dependencies import require_xvond_operator
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
 from backend.app.models.user import User
+from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIConversation, AIUsage
+from backend.app.modules.ai_agent.self_service_policy import is_self_service_company, self_service_readiness
 from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.integrations.models import CompanyIntegration
@@ -25,6 +27,13 @@ def company_full_view(company_id: int, current_admin: User = Depends(require_xvo
         users = db.query(User).filter(User.company_id == company_id).all()
         modules = db.query(CompanyModule).filter(CompanyModule.company_id == company_id).all()
         agents = db.query(AIAgent).filter(AIAgent.company_id == company_id).all()
+        agent_ids = [item.id for item in agents]
+        config_rows = (
+            db.query(AgentConfig).filter(AgentConfig.agent_id.in_(agent_ids)).all()
+            if agent_ids
+            else []
+        )
+        configs_by_agent = {item.agent_id: item for item in config_rows}
         channels = db.query(AgentChannel).filter(AgentChannel.company_id == company_id).all()
         integrations = db.query(CompanyIntegration).filter(
             CompanyIntegration.company_id == company_id
@@ -84,6 +93,26 @@ def company_full_view(company_id: int, current_admin: User = Depends(require_xvo
             func.coalesce(func.sum(AIUsage.provider_cost), 0),
         ).filter(AIUsage.company_id == company_id).first()
 
+        self_service_states = {}
+        if is_self_service_company(company):
+            for agent in agents:
+                config = configs_by_agent.get(agent.id)
+                if config is None:
+                    continue
+                try:
+                    self_service_states[agent.id] = self_service_readiness(
+                        db,
+                        company=company,
+                        agent=agent,
+                        config=config,
+                    )
+                except HTTPException as exc:
+                    self_service_states[agent.id] = {
+                        "ready": False,
+                        "blockers": [str(exc.detail)],
+                        "employee_source": "self_service",
+                    }
+
         support_view = current_admin.role == "support"
         user_payload = [] if support_view else [
             {
@@ -102,6 +131,7 @@ def company_full_view(company_id: int, current_admin: User = Depends(require_xvo
                 "name": company.name,
                 "active": company.active,
                 "lifecycle_status": company.lifecycle_status,
+                "onboarding_source": company.onboarding_source,
                 "lifecycle_updated_at": company.lifecycle_updated_at,
                 "created_at": company.created_at,
             },
@@ -118,6 +148,33 @@ def company_full_view(company_id: int, current_admin: User = Depends(require_xvo
                     "provider": item.provider,
                     "model": item.model,
                     "enabled": item.enabled,
+                    "agent_type": (
+                        configs_by_agent[item.id].agent_type
+                        if item.id in configs_by_agent
+                        else "custom"
+                    ),
+                    "creation_source": (
+                        "self_service"
+                        if (
+                            item.id in configs_by_agent
+                            and isinstance(configs_by_agent[item.id].settings, dict)
+                            and (
+                                configs_by_agent[item.id].settings.get("employee_builder") or {}
+                            ).get("onboarding_source") == "self_service"
+                        )
+                        else "managed"
+                    ),
+                    "compiled": bool(
+                        item.id in configs_by_agent
+                        and isinstance(configs_by_agent[item.id].settings, dict)
+                        and isinstance(
+                            (
+                                configs_by_agent[item.id].settings.get("employee_builder") or {}
+                            ).get("compiled_spec"),
+                            dict,
+                        )
+                    ),
+                    "self_service_readiness": self_service_states.get(item.id),
                 }
                 for item in agents
             ],
