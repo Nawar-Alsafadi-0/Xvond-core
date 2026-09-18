@@ -34,8 +34,12 @@ def public_employee_builder_channels():
             availability = "self_service_live"
             setup_label = "Connect yourself"
         elif runtime_state == CHANNEL_RUNTIME_LIVE and setup_mode == CHANNEL_SETUP_MANAGED:
-            availability = "xvond_managed_live"
-            setup_label = "Xvond sets it up"
+            if item.get("packaged_provider") is True:
+                availability = "xvond_managed_live"
+                setup_label = "Xvond sets it up"
+            else:
+                availability = "xvond_managed_custom"
+                setup_label = "Custom Xvond setup"
         else:
             availability = "xvond_managed_adapter"
             setup_label = "Xvond managed setup"
@@ -49,6 +53,7 @@ def public_employee_builder_channels():
                 "runtime_state": runtime_state,
                 "availability": availability,
                 "setup_label": setup_label,
+                "packaged_provider": bool(item.get("packaged_provider")),
             }
         )
 
