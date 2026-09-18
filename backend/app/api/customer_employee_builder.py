@@ -401,6 +401,296 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
     return compiled_spec
 
 
+
+def _builder_action(
+    action_type: str,
+    label: str,
+    *,
+    target: str | None = None,
+    key: str | None = None,
+    detail: str | None = None,
+) -> dict:
+    value = {"type": action_type, "label": label}
+    if target:
+        value["target"] = target
+    if key:
+        value["key"] = key
+    if detail:
+        value["detail"] = detail
+    return value
+
+
+def _self_service_builder_journey(
+    *,
+    agent: AIAgent,
+    has_entitlement: bool,
+    compiled_spec: dict | None,
+    state: dict | None,
+) -> dict:
+    """Render the Self-Service lifecycle as structured product steps.
+
+    Readiness remains the runtime authority. This view exists so the customer
+    portal never has to parse human blocker strings to decide what the customer
+    should do next.
+    """
+
+    state = dict(state or {})
+    subscription = dict(state.get("subscription") or {})
+    compiled = isinstance(compiled_spec, dict)
+    provisioned = bool(
+        compiled
+        and (compiled_spec.get("delivery") or {}).get("provisioning_version") == 1
+    )
+    stages: list[dict] = []
+
+    def add_stage(
+        stage_id: str,
+        label: str,
+        status: str,
+        detail: str,
+        actions: list[dict] | None = None,
+    ) -> None:
+        stages.append(
+            {
+                "id": stage_id,
+                "label": label,
+                "status": status,
+                "detail": detail,
+                "actions": list(actions or []),
+            }
+        )
+
+    add_stage(
+        "brief",
+        "Job Brief",
+        "complete",
+        "Your job description is saved as the source of truth for this employee.",
+    )
+
+    subscription_status = str(subscription.get("status") or "")
+    if subscription.get("active"):
+        add_stage(
+            "plan",
+            "Plan",
+            "complete",
+            f"{subscription.get('plan_name') or 'AI Employee plan'} is active.",
+        )
+    elif subscription_status == "pending_payment":
+        add_stage(
+            "plan",
+            "Plan",
+            "waiting",
+            "The selected paid plan is waiting for payment or Xvond approval.",
+        )
+    else:
+        add_stage(
+            "plan",
+            "Plan",
+            "action_required",
+            "Choose the AI Employee plan that will own runtime entitlement and limits.",
+            [_builder_action("choose_plan", "Choose plan", target="subscription")],
+        )
+
+    if provisioned:
+        add_stage(
+            "build",
+            "Build",
+            "complete",
+            "Xvond compiled the job and provisioned its employee capability plan.",
+        )
+    elif has_entitlement:
+        add_stage(
+            "build",
+            "Build",
+            "action_required",
+            "Xvond is ready to compile this Job Brief into an executable employee plan.",
+            [_builder_action("build_employee", "Build employee", target="builder")],
+        )
+    else:
+        add_stage(
+            "build",
+            "Build",
+            "blocked",
+            "Activate an AI Employee plan before AI-backed compilation.",
+        )
+
+    setup_actions: list[dict] = []
+    waiting_reasons: list[str] = []
+    if compiled:
+        missing_channels = {
+            str(item or "").strip().lower()
+            for item in (state.get("missing_channels") or [])
+            if str(item or "").strip()
+        }
+        for channel in sorted(missing_channels):
+            if channel == "website":
+                setup_actions.append(
+                    _builder_action(
+                        "setup_website",
+                        "Set up Website Chat",
+                        target="agents",
+                        key="website",
+                    )
+                )
+            elif channel == "whatsapp":
+                setup_actions.append(
+                    _builder_action(
+                        "setup_whatsapp",
+                        "Connect WhatsApp",
+                        target="agents",
+                        key="whatsapp",
+                    )
+                )
+            elif channel != "xvond":
+                waiting_reasons.append(
+                    f"{channel.replace('_', ' ').title()} needs an Xvond/provider adapter."
+                )
+
+        resolved = {
+            str(item or "").strip().lower()
+            for item in (state.get("resolved_requirements") or [])
+        }
+        for requirement in compiled_spec.get("requirements") or []:
+            if not isinstance(requirement, dict):
+                continue
+            key = str(requirement.get("key") or "requirement").strip().lower()
+            kind = str(requirement.get("kind") or "").strip().lower()
+            status = str(requirement.get("status") or "").strip().lower()
+            if status == "customer_input_required" and key not in resolved:
+                if key in {"knowledge", "files"}:
+                    if not any(item.get("type") == "manage_knowledge" for item in setup_actions):
+                        setup_actions.append(
+                            _builder_action(
+                                "manage_knowledge",
+                                "Add knowledge or files",
+                                target="knowledge",
+                                key=key,
+                            )
+                        )
+                else:
+                    setup_actions.append(
+                        _builder_action(
+                            "provide_input",
+                            f"Provide {key.replace('_', ' ')}",
+                            target="builder",
+                            key=key,
+                            detail=str(requirement.get("purpose") or "").strip() or None,
+                        )
+                    )
+            elif status == "connection_required":
+                if kind == "channel" and key in missing_channels:
+                    continue
+                connection_status = str(
+                    requirement.get("self_service_connection_status") or ""
+                )
+                if connection_status == "xvond_adapter_required":
+                    waiting_reasons.append(
+                        f"{key.replace('_', ' ').title()} needs an Xvond connection adapter."
+                    )
+                elif kind != "channel":
+                    waiting_reasons.append(
+                        f"{key.replace('_', ' ').title()} connection is not customer-connectable yet."
+                    )
+            elif status == "xvond_managed":
+                execution_status = str(requirement.get("execution_status") or "")
+                schedule_status = str(requirement.get("schedule_status") or "")
+                if execution_status not in {"", "ready"} or schedule_status not in {
+                    "",
+                    "ready",
+                    "not_required",
+                }:
+                    waiting_reasons.append(
+                        f"Xvond execution setup is still required for {key.replace('_', ' ')}."
+                    )
+
+        if state.get("provider_ready") is False:
+            waiting_reasons.append(
+                "Xvond must configure a real production AI provider/model route."
+            )
+
+        # De-duplicate while preserving the compiler/runtime order.
+        deduped_actions: list[dict] = []
+        seen_actions: set[tuple[str, str | None]] = set()
+        for action in setup_actions:
+            identity = (str(action.get("type")), action.get("key"))
+            if identity in seen_actions:
+                continue
+            seen_actions.add(identity)
+            deduped_actions.append(action)
+        setup_actions = deduped_actions
+        waiting_reasons = list(dict.fromkeys(waiting_reasons))
+
+        if setup_actions:
+            add_stage(
+                "setup",
+                "Setup",
+                "action_required",
+                "Finish only the customer inputs and connections this employee actually needs.",
+                setup_actions,
+            )
+        elif waiting_reasons:
+            add_stage(
+                "setup",
+                "Setup",
+                "waiting",
+                " ".join(waiting_reasons),
+            )
+        else:
+            add_stage(
+                "setup",
+                "Setup",
+                "complete",
+                "All required customer inputs, connections and Xvond runtime setup are ready.",
+            )
+    else:
+        add_stage(
+            "setup",
+            "Setup",
+            "blocked",
+            "Build the employee first so Xvond can determine the exact setup it needs.",
+        )
+
+    if agent.enabled:
+        add_stage(
+            "launch",
+            "Launch",
+            "complete",
+            "This AI employee is live.",
+        )
+    elif state.get("ready"):
+        add_stage(
+            "launch",
+            "Launch",
+            "action_required",
+            "All launch requirements are ready.",
+            [_builder_action("launch_employee", "Launch employee", target="builder")],
+        )
+    else:
+        add_stage(
+            "launch",
+            "Launch",
+            "blocked",
+            "Launch unlocks automatically when the required earlier steps are ready.",
+        )
+
+    next_actions: list[dict] = []
+    for stage in stages:
+        if stage["status"] == "action_required":
+            next_actions = list(stage["actions"])
+            break
+        if stage["status"] in {"waiting", "blocked"}:
+            break
+
+    complete_count = sum(1 for stage in stages if stage["status"] == "complete")
+    return {
+        "stages": stages,
+        "next_actions": next_actions,
+        "complete_count": complete_count,
+        "total_count": len(stages),
+        "live": bool(agent.enabled),
+    }
+
+
 @router.get("/current")
 def current_employee(current_user: User = Depends(require_customer_manager)):
     db = SessionLocal()
