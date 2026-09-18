@@ -147,9 +147,24 @@ class ServicePaymentEvent(Base):
             "provider",
             "created_at",
         ),
+        Index(
+            "ix_service_payment_events_company_type",
+            "company_id",
+            "event_type",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int | None] = mapped_column(
+        ForeignKey("companies.id"),
+        nullable=True,
+        index=True,
+    )
+    service_checkout_id: Mapped[int | None] = mapped_column(
+        ForeignKey("service_checkouts.id"),
+        nullable=True,
+        index=True,
+    )
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     provider_event_id: Mapped[str] = mapped_column(String(160), nullable=False)
     event_type: Mapped[str] = mapped_column(String(120), nullable=False)
