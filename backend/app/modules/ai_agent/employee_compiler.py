@@ -22,6 +22,7 @@ GENERIC_PRIMITIVES = {
     "scheduler",
     "storage",
     "content_generation",
+    "media_generation",
     "messaging",
     "human_approval",
 }
