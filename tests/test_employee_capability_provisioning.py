@@ -1526,6 +1526,6 @@ def test_live_rollback_stages_previous_version_without_touching_live_runtime(dat
         assert pending["source_version_id"] == "previous-v1"
         assert pending["base_compiled_at"] == "current-build"
         assert pending["status"] == "built"
-        assert pending["last_tested_compiled_at"] if "last_tested_compiled_at" in pending else True
+        assert "last_tested_compiled_at" not in pending
 
     assert calls == []
