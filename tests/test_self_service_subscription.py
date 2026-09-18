@@ -148,6 +148,32 @@ def test_pending_payment_is_exposed_in_customer_plan_status(subscription_databas
     assert result["subscription"]["plan"]["id"] == 2
 
 
+def test_repeated_paid_plan_request_is_idempotent(subscription_database):
+    factory = subscription_database
+
+    first = api.request_self_service_ai_agent_subscription(
+        api.SelfServiceSubscriptionRequest(plan_id=2),
+        OWNER,
+    )
+    second = api.request_self_service_ai_agent_subscription(
+        api.SelfServiceSubscriptionRequest(plan_id=2),
+        OWNER,
+    )
+
+    assert first["status"] == "pending_payment"
+    assert second["status"] == "pending_payment"
+    assert second["subscription"]["id"] == first["subscription"]["id"]
+
+    with factory() as db:
+        assert db.query(ServiceSubscription).filter_by(
+            company_id=1,
+            service_code="ai_agents",
+        ).count() == 1
+        assert db.query(AuditLog).filter_by(
+            action="service_subscription.customer_requested",
+        ).count() == 1
+
+
 def test_active_subscription_cannot_be_silently_replaced(subscription_database):
     api.request_self_service_ai_agent_subscription(
         api.SelfServiceSubscriptionRequest(plan_id=1),
