@@ -55,6 +55,7 @@ def test_release_stops_workers_before_app_and_recreates_same_image_afterwards():
     recreate_workers = SOURCE.index("--force-recreate whatsapp-worker automation-scheduler")
     worker_ready = SOURCE.index("wait_healthy xvond-whatsapp-worker")
     scheduler_ready = SOURCE.index("wait_healthy xvond-automation-scheduler")
+    scheduler_heartbeat = SOURCE.index("wait_scheduler_heartbeat")
     scheduler_image = SOURCE.index("scheduler_image=")
     image_check = SOURCE.index(
         'if [ -z "$app_image" ] || [ "$app_image" != "$worker_image" ] || [ "$app_image" != "$scheduler_image" ]'
@@ -65,6 +66,7 @@ def test_release_stops_workers_before_app_and_recreates_same_image_afterwards():
         < recreate_workers
         < worker_ready
         < scheduler_ready
+        < scheduler_heartbeat
         < scheduler_image
         < image_check
     )
@@ -146,3 +148,12 @@ def test_release_has_mandatory_health_and_optional_customer_acceptance():
 def test_release_reports_scheduler_image_for_operator_verification():
     assert "Automation scheduler image:" in SOURCE
     assert "xvond-automation-scheduler" in SOURCE
+
+
+def test_release_requires_scheduler_heartbeat_before_completion():
+    assert "Automation scheduler did not publish a healthy heartbeat" in SOURCE
+    assert "automation_scheduler_health.status()" in SOURCE
+    scheduler_service = COMPOSE.split("  automation-scheduler:", 1)[1].split("\n  postgres:", 1)[0]
+    assert "REDIS_URL: redis://redis:6379/0" in scheduler_service
+    assert "redis:" in scheduler_service
+    assert "condition: service_healthy" in scheduler_service
