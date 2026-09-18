@@ -59,6 +59,7 @@ from backend.app.modules.channels.delivery import reconcile_managed_channel_requ
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord, CompanyAIProfile
 from backend.app.modules.tools.models import AgentToolAssignment
+from backend.app.modules.integrations.models import CompanyIntegration
 
 router = APIRouter(
     prefix="/customer/employee-builder",
@@ -89,6 +90,13 @@ class EmployeeBuilderRefineRequest(BaseModel):
 
 class EmployeeBuilderRollbackRequest(BaseModel):
     version_id: str = Field(min_length=1, max_length=80)
+
+
+class EmployeeBuilderIntegrationBindRequest(BaseModel):
+    integration_id: int
+    execute_endpoint: str | None = Field(default=None, max_length=500)
+    availability_endpoint: str | None = Field(default=None, max_length=500)
+    cancel_endpoint: str | None = Field(default=None, max_length=500)
 
 
 class EmployeeBuilderSetupAnswerRequest(BaseModel):
@@ -1534,6 +1542,171 @@ def rollback_self_service_employee(
             "version_id": data.version_id,
             "compiled": isinstance(builder.get("compiled_spec"), dict),
             "current_build_tested": False,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _relative_endpoint(value: str | None, *, required: bool = False) -> str | None:
+    endpoint = str(value or "").strip()
+    if not endpoint:
+        if required:
+            raise HTTPException(400, "Required integration endpoint is missing")
+        return None
+    if endpoint.startswith("//") or endpoint.lower().startswith(("http://", "https://")):
+        raise HTTPException(400, "Integration operation endpoints must be relative paths")
+    return "/" + endpoint.lstrip("/")
+
+
+@router.post("/{agent_id}/connections/{requirement_key}")
+def bind_self_service_integration(
+    agent_id: int,
+    requirement_key: str,
+    data: EmployeeBuilderIntegrationBindRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Bind one customer-owned connected system to one compiled requirement."""
+
+    key = normalize_requirement_key(requirement_key)
+    if not key:
+        raise HTTPException(400, "Connection requirement key is invalid")
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Connected-system binding is available only for Self-Service employees")
+
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == agent_id,
+            AIAgent.company_id == company.id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+        if agent.enabled:
+            raise HTTPException(409, "Deactivate this employee before changing connected systems")
+
+        integration = db.query(CompanyIntegration).filter(
+            CompanyIntegration.id == data.integration_id,
+            CompanyIntegration.company_id == company.id,
+            CompanyIntegration.enabled.is_(True),
+        ).first()
+        if integration is None:
+            raise HTTPException(404, "Connected system not found or disabled")
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        compiled_spec = builder.get("compiled_spec")
+        if not isinstance(compiled_spec, dict):
+            raise HTTPException(409, "Build the employee before connecting a system")
+
+        requirements = [
+            dict(item) if isinstance(item, dict) else item
+            for item in (compiled_spec.get("requirements") or [])
+        ]
+        requirement = next(
+            (
+                item for item in requirements
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HTTPException(404, "Connection requirement not found in the current Job Brief")
+        if str(requirement.get("status") or "").strip().lower() != "connection_required":
+            raise HTTPException(409, "This requirement does not need an external connection")
+        if str(requirement.get("kind") or "").strip().lower() == "channel":
+            raise HTTPException(409, "Communication channels use their dedicated connection flow")
+
+        execute_required = integration.integration_type in {
+            "custom_api", "pos", "crm", "erp"
+        }
+        execute_endpoint = _relative_endpoint(
+            data.execute_endpoint,
+            required=execute_required,
+        )
+        availability_endpoint = _relative_endpoint(data.availability_endpoint)
+        cancel_endpoint = _relative_endpoint(data.cancel_endpoint)
+
+        if key == "booking" and integration.integration_type != "webhook":
+            if not availability_endpoint:
+                raise HTTPException(
+                    400,
+                    "Booking systems need an availability endpoint so the employee can check real slots",
+                )
+            if not execute_endpoint:
+                raise HTTPException(
+                    400,
+                    "Booking systems need a booking/create endpoint",
+                )
+
+        operations = {}
+        if execute_endpoint:
+            operations["execute"] = {"method": "POST", "endpoint": execute_endpoint}
+        if availability_endpoint:
+            operations["availability"] = {
+                "method": "POST",
+                "endpoint": availability_endpoint,
+            }
+        if cancel_endpoint:
+            operations["cancel"] = {"method": "POST", "endpoint": cancel_endpoint}
+
+        requirement["integration_id"] = integration.id
+        requirement["integration_type"] = integration.integration_type
+        requirement["integration_operations"] = operations
+        requirement["fulfillment_mode"] = "external_connection"
+        requirement["requires_connection"] = True
+        requirement["status"] = "xvond_build"
+        requirement["delivery_mode"] = "compose"
+
+        compiled_value = dict(compiled_spec)
+        compiled_value["requirements"] = requirements
+        compiled_value, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=agent.id,
+            spec=compiled_value,
+        )
+        builder["compiled_spec"] = compiled_value
+        builder["delivery"] = delivery
+        builder["missing_information"] = list(compiled_value.get("setup_required") or [])
+        # Connection changes alter executable behavior and therefore invalidate
+        # preview evidence for the previous build.
+        builder.pop("last_tested_at", None)
+        builder.pop("last_tested_compiled_at", None)
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        agent.system_prompt = build_compiled_employee_system_prompt(
+            owner_name=company.name,
+            spec=compiled_value,
+        )
+
+        db.commit()
+        return {
+            "status": "connected",
+            "agent_id": agent.id,
+            "requirement_key": key,
+            "integration": {
+                "id": integration.id,
+                "name": integration.name,
+                "type": integration.integration_type,
+            },
+            "compiled_spec": self_service_spec_view(compiled_value),
+            "readiness": self_service_readiness(
+                db,
+                company=company,
+                agent=agent,
+                config=config,
+            ),
         }
     except HTTPException:
         db.rollback()
