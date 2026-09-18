@@ -360,18 +360,37 @@ Repository CI cannot truthfully prove:
 
 No live provider, Meta, Workflow Engine, customer-integration or payment secret belongs in Git.
 
+## Managed channel delivery durability
+
+Xvond-managed communication channels now use a provider-neutral durable delivery state machine before any customer-facing side effect. AI and human replies are persisted as delivery records before network dispatch, use stable idempotency identities, and perform the external `channel.send` call without blind transport retries.
+
+Delivery states distinguish:
+
+- `pending` — persisted but not dispatched yet
+- `sending` — the side effect has started
+- `accepted` — the provider confirmed success and returned a provider message identity
+- `unknown` — Xvond cannot prove whether the provider accepted the send; automatic resend is forbidden
+- `failed` — a confirmed non-success; only explicitly retryable failures may be retried
+
+A successful workflow result without a provider message identity is not treated as accepted. Unknown outcomes require admin reconciliation. Admin may mark an unknown delivery as confirmed sent using a provider message ID, or as confirmed not sent; only the latter becomes safely retryable.
+
+The production acceptance gate counts unresolved managed-channel deliveries as incidents, and the Workflow Engine is required whenever an enabled employee depends on managed communication channels, not only when Business Actions are enabled.
+
+The channel inbound workflow remains backward-compatible for one release during the durable-delivery cutover because production deployment syncs the workflow before replacing Core. Old Core follows the legacy provider-send path; new Core returns durable delivery evidence and the workflow immediately stops before any second provider send. Do not remove that compatibility branch until a durable-delivery release has been promoted and verified in production.
+
 ## Current release status at this checkpoint
 
 Repository state through the Self-Service channel-contract work is **code validated**, but this checkpoint does **not** claim that the reviewed release has been deployed to the production server.
 
 Highest-priority remaining external/product work:
 
-1. Merge the validated global paid-checkout release and configure/approve the production Merchant-of-Record account, recurring prices and signed webhook destination.
-2. Add/configure provider-specific workflow bindings for the managed communication channels actually being launched first; run real provider round-trips before marking each connector service-ready.
-3. Deploy the reviewed `main` release to the server using the canonical Nginx + deploy flow.
-4. Run production end-to-end acceptance for Self-Service signup -> Job Brief -> dynamic missing information -> plan/checkout -> build -> required channel setup -> launch -> customer conversation/action -> handoff -> resume.
-5. Run managed-customer acceptance for the same employee runtime through Xvond Admin, proving the Managed and Self-Service provisioning models converge on one runtime without sharing lifecycle UX.
-6. Only after those acceptance gates pass, expose the launch publicly as a globally available Xvond AI Employee product.
+1. Merge the durable managed-channel delivery/reconciliation release after full CI validation.
+2. Configure/approve the production Merchant-of-Record account, recurring prices and signed webhook destination; run sandbox and then real-money payment acceptance.
+3. Add the first real provider-specific managed-channel binding (Telegram), prove inbound -> employee -> durable outbound -> provider message id -> handoff -> resume, then repeat for Instagram/Messenger and the next launch channels.
+4. Deploy the reviewed `main` release to the server using the canonical Nginx + deploy flow.
+5. Run production end-to-end acceptance for Self-Service signup -> Job Brief -> dynamic missing information -> plan/checkout -> build -> required channel setup -> launch -> customer conversation/action -> handoff -> resume.
+6. Run managed-customer acceptance for the same employee runtime through Xvond Admin, proving the Managed and Self-Service provisioning models converge on one runtime without sharing lifecycle UX.
+7. Only after those acceptance gates pass, expose the launch publicly as a globally available Xvond AI Employee product.
 
 ## Branch model
 
