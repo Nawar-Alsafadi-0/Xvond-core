@@ -33,6 +33,21 @@ wait_healthy() {
     return 1
 }
 
+wait_scheduler_heartbeat() {
+    attempts="${1:-30}"
+    count=0
+    while [ "$count" -lt "$attempts" ]; do
+        if compose exec -T automation-scheduler python -c "from backend.app.modules.automation.scheduler_health import automation_scheduler_health; status=automation_scheduler_health.status(); raise SystemExit(0 if status.get('configured') and status.get('active') else 1)" >/dev/null 2>&1; then
+            return 0
+        fi
+        count=$((count + 1))
+        sleep 1
+    done
+    echo "Automation scheduler did not publish a healthy heartbeat" >&2
+    docker logs --tail 100 xvond-automation-scheduler >&2 || true
+    return 1
+}
+
 probe_workflow_contract() {
     docker exec xvond-workflow-engine node -e '
 const url = "http://127.0.0.1:5678/webhook/xvond-actions";
@@ -213,6 +228,7 @@ fi
 compose up -d --no-deps --force-recreate whatsapp-worker automation-scheduler
 wait_healthy xvond-whatsapp-worker
 wait_healthy xvond-automation-scheduler
+wait_scheduler_heartbeat
 
 app_image="$(docker inspect --format '{{.Image}}' xvond-core)"
 worker_image="$(docker inspect --format '{{.Image}}' xvond-whatsapp-worker)"
