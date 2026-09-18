@@ -161,6 +161,10 @@ window.openCustomerMetaWhatsAppConnect = async function (agentId) {
             alert("ربط واتساب غير متاح حاليًا. تواصل مع Xvond لإكمال إعداد الخدمة.");
             return;
         }
+        if (config.can_edit === false) {
+            alert("أوقف الموظف أولًا قبل تغيير اتصال واتساب.");
+            return;
+        }
 
         xvondCustomerMetaSignupState = {agentId: Number(agentId)};
         xvondCustomerMetaSignupMessage = null;
@@ -253,8 +257,9 @@ async function xvondDecorateCustomerAgentsWithWhatsApp() {
                 <p style="margin:0 0 6px"><strong>${status.title}</strong></p>
                 <p class="muted" style="margin:0 0 8px">${status.detail}</p>
                 ${xvondCustomerWhatsAppBlockers(config)}
-                <button type="button" style="margin-top:10px" onclick="openCustomerMetaWhatsAppConnect(${Number(agent.id)})" ${config.ready ? "" : "disabled"}>${status.label}</button>
+                <button type="button" style="margin-top:10px" onclick="openCustomerMetaWhatsAppConnect(${Number(agent.id)})" ${(config.ready && config.can_edit !== false) ? "" : "disabled"}>${status.label}</button>
                 ${config.ready ? "" : `<p class="muted" style="margin:8px 0 0">ربط واتساب يحتاج تفعيلًا من فريق Xvond.</p>`}
+                ${config.can_edit === false ? `<p class="muted" style="margin:8px 0 0">أوقف الموظف أولًا قبل تغيير الرقم أو إعادة ربط واتساب.</p>` : ""}
             `;
         } catch (error) {
             box.innerHTML = `<p class="muted" style="margin:0">تعذر فحص اتصال واتساب. تواصل مع Xvond إذا استمرت المشكلة.</p>`;
