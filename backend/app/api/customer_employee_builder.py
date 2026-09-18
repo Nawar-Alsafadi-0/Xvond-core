@@ -212,6 +212,16 @@ def _store_provisioned_spec(
     settings: dict, builder: dict, spec: dict,
 ) -> dict:
     compiled_spec, delivery = provision_compiled_capabilities(db, agent_id=agent.id, spec=spec)
+    setup_answers = builder.get("setup_answers") or {}
+    if isinstance(setup_answers, dict):
+        clean_answers = {
+            str(key).strip().lower(): str(value).strip()
+            for key, value in setup_answers.items()
+            if str(key or "").strip() and str(value or "").strip()
+        }
+        if clean_answers:
+            compiled_spec = dict(compiled_spec)
+            compiled_spec["customer_inputs"] = clean_answers
     builder["compiled_spec"] = compiled_spec
     builder["delivery"] = delivery
     builder["missing_information"] = list(compiled_spec.get("setup_required") or [])
