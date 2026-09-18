@@ -13,6 +13,7 @@ from backend.app.modules.ai_agent.models import AIConversation, AIMessage
 from backend.app.modules.audit.service import audit_service
 from backend.app.modules.channels.catalog import (
     CHANNEL_RUNTIME_LIVE,
+    N8N_CHANNEL_ADAPTER,
     canonical_channel_type,
     get_channel_capability,
 )
@@ -23,7 +24,6 @@ from backend.app.modules.tools.business_models import HumanHandoff
 router = APIRouter(prefix="/internal/channels", tags=["Xvond Internal Channels"])
 
 ACTIVE_HANDOFF_STATUSES = {"pending", "in_progress"}
-N8N_CHANNEL_ADAPTER = "n8n_channel_gateway"
 
 
 class InternalChannelMessage(BaseModel):
@@ -179,6 +179,7 @@ def receive_channel_message(
             .filter(AIMessage.source_key == source_key)
             .first()
         )
+        conversation = None
         if existing_message is not None:
             if str(existing_message.content or "").strip() != payload.message:
                 raise HTTPException(
@@ -186,34 +187,42 @@ def receive_channel_message(
                     "External message identity is already bound to different content",
                 )
             existing_reply = _existing_reply(db, existing_message)
-            return _channel_response(
-                channel=channel,
-                conversation_id=existing_message.conversation_id,
-                external_contact_id=payload.external_contact_id,
-                external_message_id=payload.external_message_id,
-                reply=existing_reply.content if existing_reply is not None else None,
-                mode=(
-                    "ai"
-                    if existing_reply is not None
-                    else "human"
-                    if _active_handoff(
-                        db,
-                        company_id=payload.company_id,
-                        conversation_id=existing_message.conversation_id,
-                    )
-                    is not None
-                    else "retry"
-                ),
-                duplicate=True,
-            )
+            if existing_reply is not None:
+                return _channel_response(
+                    channel=channel,
+                    conversation_id=existing_message.conversation_id,
+                    external_contact_id=payload.external_contact_id,
+                    external_message_id=payload.external_message_id,
+                    reply=existing_reply.content,
+                    mode="ai",
+                    duplicate=True,
+                )
+            conversation = db.get(AIConversation, existing_message.conversation_id)
+            if conversation is None:
+                raise HTTPException(409, "External message conversation is unavailable")
+            if _active_handoff(
+                db,
+                company_id=payload.company_id,
+                conversation_id=conversation.id,
+            ) is not None:
+                return _channel_response(
+                    channel=channel,
+                    conversation_id=conversation.id,
+                    external_contact_id=payload.external_contact_id,
+                    external_message_id=payload.external_message_id,
+                    reply=None,
+                    mode="human",
+                    duplicate=True,
+                )
 
-        conversation = _existing_conversation(
-            db,
-            company_id=payload.company_id,
-            agent_id=payload.agent_id,
-            channel_id=channel.id,
-            external_contact_id=payload.external_contact_id,
-        )
+        if conversation is None:
+            conversation = _existing_conversation(
+                db,
+                company_id=payload.company_id,
+                agent_id=payload.agent_id,
+                channel_id=channel.id,
+                external_contact_id=payload.external_contact_id,
+            )
         if conversation is not None and _active_handoff(
             db,
             company_id=payload.company_id,
