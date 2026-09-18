@@ -150,6 +150,20 @@ _SENSITIVE_RUNTIME_INPUT_KEYS = {
     "credentials",
 }
 
+def is_sensitive_requirement_key(value: Any) -> bool:
+    """Return True when generic setup data must use a protected connection path."""
+
+    key = normalize_requirement_key(value)
+    if not key:
+        return False
+    if key in _SENSITIVE_RUNTIME_INPUT_KEYS:
+        return True
+    tokens = set(key.split("_"))
+    if tokens.intersection({"password", "secret", "token", "credential", "credentials"}):
+        return True
+    return key.endswith("_api_key") or key.endswith("_access_key")
+
+
 COMPILER_SYSTEM_PROMPT = """You are Xvond's AI Employee Compiler.
 Your only task is to convert a customer's open-ended job brief into a structured employee specification and delivery plan.
 
