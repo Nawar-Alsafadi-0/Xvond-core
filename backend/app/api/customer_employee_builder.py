@@ -27,6 +27,7 @@ from backend.app.modules.ai_agent.employee_compiler import (
     COMPILER_SYSTEM_PROMPT,
     build_compiled_employee_system_prompt,
     build_compiler_user_message,
+    is_sensitive_requirement_key,
     parse_compiler_response,
 )
 from backend.app.modules.ai_agent.employee_capability_builder import provision_compiled_capabilities
@@ -581,6 +582,10 @@ def _self_service_builder_journey(
                                 key=key,
                             )
                         )
+                elif is_sensitive_requirement_key(key):
+                    waiting_reasons.append(
+                        f"{key.replace('_', ' ').title()} must use a protected connection or credential setup path."
+                    )
                 else:
                     setup_actions.append(
                         _builder_action(
@@ -1055,6 +1060,11 @@ def save_self_service_setup_answer(
         raise HTTPException(
             409,
             "Knowledge and files must be added through the employee Knowledge workspace",
+        )
+    if is_sensitive_requirement_key(key):
+        raise HTTPException(
+            409,
+            "Sensitive credentials must use a protected Xvond connection path",
         )
 
     db = SessionLocal()
