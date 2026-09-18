@@ -140,3 +140,65 @@ def test_builder_journey_unlocks_launch_only_from_runtime_readiness():
     )
     assert stage(live, "launch")["status"] == "complete"
     assert live["live"] is True
+
+
+def test_builder_journey_exposes_declared_setup_fields_and_never_plain_credentials():
+    fields_spec = {
+        "requirements": [
+            {
+                "key": "workspace_context",
+                "kind": "custom",
+                "status": "customer_input_required",
+                "purpose": "Know the target workspace",
+                "customer_inputs": ["workspace_id", "timezone"],
+            }
+        ],
+        "delivery": {"provisioning_version": 1},
+    }
+    journey = _self_service_builder_journey(
+        agent=SimpleNamespace(enabled=False),
+        has_entitlement=True,
+        compiled_spec=fields_spec,
+        state={
+            "subscription": {"active": True, "status": "active"},
+            "missing_channels": [],
+            "resolved_requirements": [],
+            "provider_ready": True,
+            "ready": False,
+        },
+    )
+    action = stage(journey, "setup")["actions"][0]
+    assert action["type"] == "provide_input"
+    assert action["fields"] == [
+        {"key": "workspace_id", "label": "workspace_id"},
+        {"key": "timezone", "label": "timezone"},
+    ]
+
+    sensitive_spec = {
+        "requirements": [
+            {
+                "key": "crm_access_token",
+                "kind": "custom",
+                "status": "customer_input_required",
+                "purpose": "Connect CRM",
+                "customer_inputs": ["access_token"],
+            }
+        ],
+        "delivery": {"provisioning_version": 1},
+    }
+    journey = _self_service_builder_journey(
+        agent=SimpleNamespace(enabled=False),
+        has_entitlement=True,
+        compiled_spec=sensitive_spec,
+        state={
+            "subscription": {"active": True, "status": "active"},
+            "missing_channels": [],
+            "resolved_requirements": [],
+            "provider_ready": True,
+            "ready": False,
+        },
+    )
+    setup = stage(journey, "setup")
+    assert setup["status"] == "waiting"
+    assert setup["actions"] == []
+    assert "protected connection" in setup["detail"]
