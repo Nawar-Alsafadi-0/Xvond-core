@@ -227,11 +227,23 @@ def _store_provisioned_spec(
     compiled_spec, delivery = provision_compiled_capabilities(db, agent_id=agent.id, spec=spec)
     setup_answers = builder.get("setup_answers") or {}
     if isinstance(setup_answers, dict):
-        clean_answers = {
-            str(key).strip().lower(): str(value).strip()
-            for key, value in setup_answers.items()
-            if str(key or "").strip() and str(value or "").strip()
-        }
+        clean_answers: dict[str, str | dict] = {}
+        for raw_key, raw_value in setup_answers.items():
+            key = str(raw_key or "").strip().lower()
+            if not key:
+                continue
+            if isinstance(raw_value, dict):
+                fields = {
+                    str(field_key or "").strip().lower(): str(field_value or "").strip()
+                    for field_key, field_value in raw_value.items()
+                    if str(field_key or "").strip() and str(field_value or "").strip()
+                }
+                if fields:
+                    clean_answers[key] = fields
+            else:
+                value = str(raw_value or "").strip()
+                if value:
+                    clean_answers[key] = value
         if clean_answers:
             compiled_spec = dict(compiled_spec)
             compiled_spec["customer_inputs"] = clean_answers
