@@ -69,7 +69,10 @@ Body:
 }
 ```
 
-The provider workflow must deduplicate mutating delivery by `idempotency_key` and return:
+The provider workflow receives `action` in the body. It must support both:
+
+- `channel.check` — verify that the provider adapter/account is actually usable and return `{"success":true,"connected":true}`. Xvond Admin uses this live probe before marking a route provisioned.
+- `channel.send` — deduplicate mutating delivery by `idempotency_key` and return:
 
 ```json
 {
