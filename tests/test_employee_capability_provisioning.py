@@ -750,6 +750,126 @@ def test_self_service_manual_graph_is_provisioned_for_dashboard_worker(database)
         assert workflow.steps[0]["graph"]["nodes"][0]["type"] == "ai"
 
 
+def test_self_service_direct_approval_graph_is_provisioned(database):
+    factory, _ = database
+    brief = "When I run this employee, prepare the report and ask me before sending it."
+    payload = {
+        "role": "Approval worker",
+        "scope": "business",
+        "requirements": [
+            {
+                "key": KEY,
+                "kind": "custom",
+                "purpose": "Send the report",
+                "primitives": ["workflow_engine"],
+                "execution_plan": [
+                    {
+                        "id": "notify",
+                        "op": "notify",
+                        "title": "Report",
+                        "message": "Report ready.",
+                    }
+                ],
+            }
+        ],
+        "permissions": [{"action": "Send the report", "mode": "ask_before"}],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "send",
+                    "type": "action",
+                    "depends_on": [],
+                    "params": {
+                        "action_type": KEY,
+                        "arguments": {"report": "ready"},
+                    },
+                }
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "ready"
+    assert trigger["trigger_type"] == "manual"
+    assert trigger["workflow_id"]
+
+
+def test_self_service_nested_approval_graph_is_blocked(database):
+    factory, _ = database
+    brief = "For every lead, ask me before sending the message."
+    payload = {
+        "role": "Approval worker",
+        "scope": "business",
+        "requirements": [
+            {
+                "key": KEY,
+                "kind": "custom",
+                "purpose": "Send lead message",
+                "primitives": ["workflow_engine"],
+                "execution_plan": [
+                    {
+                        "id": "notify",
+                        "op": "notify",
+                        "title": "Lead",
+                        "message": "Lead message ready.",
+                    }
+                ],
+            }
+        ],
+        "permissions": [{"action": "Send lead message", "mode": "ask_before"}],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "each",
+                    "type": "foreach",
+                    "depends_on": [],
+                    "params": {
+                        "items": "$input.leads",
+                        "graph": {
+                            "version": 1,
+                            "nodes": [
+                                {
+                                    "id": "send",
+                                    "type": "action",
+                                    "depends_on": [],
+                                    "params": {
+                                        "action_type": KEY,
+                                        "arguments": {"lead": "$item"},
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                }
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "nested_approval_not_ready"
+    assert trigger["workflow_id"] is None
+
+
 def test_self_service_webhook_graph_is_provisioned_when_actions_are_ready(database):
     factory, _ = database
     brief = "When my external system sends an event, notify me automatically."
