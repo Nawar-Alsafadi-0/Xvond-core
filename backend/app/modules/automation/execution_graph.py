@@ -16,6 +16,7 @@ ALLOWED_GRAPH_NODE_TYPES = {
     "select",
     "filter",
     "aggregate",
+    "web_fetch",
 }
 
 
