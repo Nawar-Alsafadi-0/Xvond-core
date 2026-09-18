@@ -68,7 +68,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.XVOND_CHANNEL_INBOUND_URL }}",
+        "url": "={{ $env.XVOND_INTERNAL_CHANNEL_URL }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
