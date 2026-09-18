@@ -5,6 +5,7 @@ INTEGRATION_CATALOG = {
         "execution_adapter": "email_smtp",
         "requirement_keys": ["email_send"],
         "generic_requirements": False,
+        "exclusive_requirements": True,
         "operation_endpoints": False,
         "description": "Send email securely through the customer's SMTP provider",
         "config_fields": [
@@ -47,6 +48,7 @@ INTEGRATION_CATALOG = {
         "execution_adapter": "email_imap",
         "requirement_keys": ["email_read"],
         "generic_requirements": False,
+        "exclusive_requirements": True,
         "operation_endpoints": False,
         "description": "Read email securely from the customer's inbox without marking messages as read",
         "config_fields": [
@@ -90,6 +92,7 @@ INTEGRATION_CATALOG = {
         "execution_adapter": "instagram_publish",
         "requirement_keys": ["instagram_publish"],
         "generic_requirements": False,
+        "exclusive_requirements": True,
         "operation_endpoints": False,
         "description": "Publish media and captions to an Instagram professional account",
         "config_fields": [
@@ -195,8 +198,22 @@ INTEGRATION_CATALOG = {
         ],
     },
 
+    "google_calendar": {
+        "name": "Google Calendar",
+        "description": "Book and manage appointments in Google Calendar through OAuth",
+        "execution_adapter": "google_calendar",
+        "requirement_keys": ["booking", "calendar"],
+        "generic_requirements": False,
+        "exclusive_requirements": False,
+        "operation_endpoints": False,
+        "connection_mode": "oauth",
+        "oauth_provider": "google",
+        "config_fields": [],
+    },
+
     "calendar": {
         "name": "Calendar",
+        "hidden": True,
         "description": "External booking/calendar system",
         "config_fields": [
             {
@@ -290,6 +307,7 @@ def list_integration_definitions():
         }
         for key, value
         in INTEGRATION_CATALOG.items()
+        if value.get("hidden") is not True
     ]
 
 
@@ -313,14 +331,20 @@ def compatible_integration_types(requirement_key: str) -> set[str]:
         }
         and str(definition.get("execution_adapter") or "").strip()
     }
-    if packaged:
+    exclusive = {
+        integration_type
+        for integration_type in packaged
+        if INTEGRATION_CATALOG[integration_type].get("exclusive_requirements") is True
+    }
+    if exclusive:
         return packaged
-    return {
+    generic = {
         integration_type
         for integration_type, definition in INTEGRATION_CATALOG.items()
         if definition.get("generic_requirements") is True
         and str(definition.get("execution_adapter") or "").strip()
     }
+    return packaged | generic
 
 
 def integration_requires_operation_endpoints(integration_type: str) -> bool:
