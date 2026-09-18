@@ -303,26 +303,130 @@ function renderServicePage(serviceCode, pageId) {
     target.innerHTML = serviceDetailMarkup(serviceByCode(serviceCode));
 }
 
-function renderIntegrations() {
-    const target = document.getElementById("customer-integrations-content");
+async function renderIntegrations() {
+    const target = document.getElementById("customer-integrations-content")
+        || document.querySelector("#page-integrations .dynamic-page-content");
     if (!target) return;
-    const service = serviceByCode("integrations");
-    const integrations = portalOverview?.integrations || [];
-    target.innerHTML = `
-        ${serviceDetailMarkup(service)}
-        <div class="panel" style="margin-top:20px">
-            <h2>Connected Systems</h2>
-            ${integrations.length ? integrations.map(item => `
-                <div class="agent">
-                    <div class="service-card-head">
-                        <div><strong>${safe(item.name)}</strong><p>${safe(item.type)}</p></div>
-                        <span class="pill">${item.enabled ? "Active" : "Inactive"}</span>
+    target.innerHTML = '<div class="panel"><p class="muted">Loading connected systems…</p></div>';
+
+    try {
+        const [catalogResult, listResult] = await Promise.all([
+            api("/manage/integrations/catalog"),
+            api("/manage/integrations"),
+        ]);
+        const definitions = catalogResult.integrations || [];
+        const integrations = listResult.integrations || [];
+        const definitionOptions = definitions.map(item =>
+            `<option value="${safe(item.type)}">${safe(item.name || item.type)}</option>`
+        ).join("");
+
+        target.innerHTML = `
+            <div class="panel" style="margin-bottom:20px">
+                <div class="service-card-head">
+                    <div>
+                        <h2>Connected Systems</h2>
+                        <p class="muted">Connect an existing CRM, POS, booking API, ERP, webhook or custom API. Secrets are stored encrypted and are never shown again.</p>
                     </div>
                 </div>
-            `).join("") : '<p class="muted">No external systems connected yet.</p>'}
-        </div>
-    `;
+                <div class="service-grid" style="margin-top:14px">
+                    <label>Type
+                        <select id="customer-integration-type">${definitionOptions}</select>
+                    </label>
+                    <label>Name
+                        <input id="customer-integration-name" maxlength="200" placeholder="My booking system">
+                    </label>
+                </div>
+                <div id="customer-integration-fields" class="service-grid" style="margin-top:14px"></div>
+                <div class="chat-input" style="margin-top:14px">
+                    <button type="button" id="customer-integration-create">Add connected system</button>
+                </div>
+                <div id="customer-integration-error" class="error"></div>
+            </div>
+            <div class="panel">
+                <h2>Your connections</h2>
+                ${integrations.length ? integrations.map(item => `
+                    <div class="agent">
+                        <div class="service-card-head">
+                            <div>
+                                <strong>${safe(item.name)}</strong>
+                                <p>${safe(item.integration_type)} · ${item.configured ? "Configured" : "Setup incomplete"}</p>
+                            </div>
+                            <span class="pill">${item.enabled ? "Active" : "Inactive"}</span>
+                        </div>
+                        ${(item.configured_secret_fields || []).length
+                            ? `<p class="muted">Protected credentials configured: ${safe((item.configured_secret_fields || []).join(", "))}</p>`
+                            : ""}
+                        <button type="button" onclick="deleteCustomerIntegration(${Number(item.id)})">Remove</button>
+                    </div>
+                `).join("") : '<p class="muted">No connected systems yet.</p>'}
+            </div>
+        `;
+
+        const type = document.getElementById("customer-integration-type");
+        const renderFields = () => {
+            const definition = definitions.find(item => item.type === type?.value) || definitions[0];
+            const host = document.getElementById("customer-integration-fields");
+            if (!host) return;
+            host.innerHTML = (definition?.config_fields || []).map(field => `
+                <label>
+                    ${safe(field.label || field.name)}
+                    <input
+                        data-integration-config="${safe(field.name)}"
+                        type="${field.secret ? "password" : "text"}"
+                        autocomplete="off"
+                        ${field.required ? "required" : ""}
+                        placeholder="${field.secret ? "Stored encrypted" : safe(field.label || field.name)}"
+                    >
+                </label>
+            `).join("");
+        };
+        type?.addEventListener("change", renderFields);
+        renderFields();
+
+        document.getElementById("customer-integration-create")?.addEventListener("click", async event => {
+            const button = event.currentTarget;
+            const error = document.getElementById("customer-integration-error");
+            if (error) error.textContent = "";
+            const integrationType = String(type?.value || "").trim();
+            const name = String(document.getElementById("customer-integration-name")?.value || "").trim();
+            const config = {};
+            document.querySelectorAll("#customer-integration-fields [data-integration-config]").forEach(input => {
+                const value = String(input.value || "").trim();
+                if (value) config[input.dataset.integrationConfig] = value;
+            });
+            if (!integrationType || !name) {
+                if (error) error.textContent = "Choose a type and name.";
+                return;
+            }
+            button.disabled = true;
+            try {
+                await api("/manage/integrations", {
+                    method: "POST",
+                    body: JSON.stringify({integration_type: integrationType, name, config}),
+                });
+                await renderIntegrations();
+            } catch (err) {
+                if (error) error.textContent = err?.message || "Could not add connected system.";
+            } finally {
+                if (document.body.contains(button)) button.disabled = false;
+            }
+        });
+    } catch (error) {
+        target.innerHTML = `<div class="panel"><p>${safe(error.message)}</p></div>`;
+    }
 }
+
+async function deleteCustomerIntegration(integrationId) {
+    if (!confirm("Remove this connected system?")) return;
+    try {
+        await api(`/manage/integrations/${Number(integrationId)}`, {method: "DELETE"});
+        await renderIntegrations();
+    } catch (error) {
+        alert(error.message);
+    }
+}
+
+window.deleteCustomerIntegration = deleteCustomerIntegration;
 
 function renderPaymentMethod() {
     const billing = portalOverview?.billing || {};
@@ -517,7 +621,7 @@ async function openPage(name, button) {
             label: item.label || "Operations",
         });
     }
-    if (loader === "integrations") renderIntegrations();
+    if (loader === "integrations") await renderIntegrations();
     if (loader === "billing") renderBilling();
     if (loader === "service") renderServicePage(item.service_code, item.id);
 }
