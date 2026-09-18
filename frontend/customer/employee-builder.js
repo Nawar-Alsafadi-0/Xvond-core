@@ -399,6 +399,9 @@
             const suggested = String(item.suggested_mode || mode);
             const source = String(item.source || "");
             const executable = Boolean(action && actionPlan[action]);
+            const canManagePermission = ["owner", "admin"].includes(
+                String(currentUser?.role || "")
+            );
             const encodedAction = encodeURIComponent(action);
             const suggestionText = suggested !== mode
                 ? `Xvond suggested ${suggested.replaceAll("_", " ")}; owner approval has not granted it.`
@@ -410,7 +413,7 @@
                         ${badge(mode.replaceAll("_", " "), mode === "automatic" ? "ready" : (mode === "never" ? "neutral" : "setup"))}
                     </div>
                     <div class="muted">${escapeHtml(suggestionText)}</div>
-                    ${executable ? `
+                    ${executable && canManagePermission ? `
                         <div class="employee-builder-actions">
                             <select data-owner-permission="${encodedAction}" data-owner-permission-current="${escapeHtml(mode)}">
                                 <option value="ask_before" ${mode === "ask_before" ? "selected" : ""}>Ask before</option>
@@ -419,7 +422,7 @@
                             </select>
                         </div>
                         <div class="error" data-owner-permission-error="${encodedAction}"></div>
-                    ` : ""}
+                    ` : (executable ? '<div class="muted">A company Owner or Admin must change execution permissions.</div>' : "")}
                 </div>
             `;
         }).join("") || '<span class="muted">No additional permission rules.</span>';
