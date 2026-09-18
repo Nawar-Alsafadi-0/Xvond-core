@@ -164,8 +164,6 @@ def _provision_self_service_schedule(
         return "managed_delivery", None
     if "scheduler" not in (requirement.get("primitives") or []):
         return "not_required", None
-    if _permission_mode({"permissions": requirement.get("_permissions") or []}, requirement) != "automatic":
-        return "approval_required", None
     if action.get("confirmation_required", True):
         return "approval_required", None
     raw_schedule = requirement.get("schedule")
@@ -197,6 +195,8 @@ def _provision_self_service_schedule(
         agent_id=agent_id,
         requirement_key=key,
     )
+    if workflow is not None and not workflow.enabled:
+        return "disabled", workflow.id
     if workflow is None:
         workflow = AutomationWorkflow(
             company_id=company.id,
@@ -266,8 +266,6 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
     automation_plan = {}
     changed = False
     company, company_timezone = _company_context(db, agent_id)
-    permissions = list(prepared.get("permissions") or [])
-
     for item in requirements:
         if not isinstance(item, dict):
             continue
@@ -308,7 +306,6 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             execution_status = "adapter_required"
         else:
             execution_status = "runtime_validation_required"
-        item["_permissions"] = permissions
         schedule_status = "not_required"
         schedule_workflow_id = None
         if (
@@ -326,8 +323,6 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             )
             if schedule_status not in {"ready", "not_required", "managed_delivery"}:
                 execution_status = "setup_required"
-        item.pop("_permissions", None)
-
         item["status"] = MANAGED_STATUS
         item["provisioned"] = True
         item["delivery_mode"] = "compose"
