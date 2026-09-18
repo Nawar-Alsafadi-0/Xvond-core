@@ -297,7 +297,10 @@ if [ -n "$MARKET_ACCEPTANCE_MODE" ]; then
         exit 1
     fi
 
-    set -- python scripts/market_launch_gate.py         --company-id "$ACCEPTANCE_COMPANY_ID"         --agent-id "$ACCEPTANCE_AGENT_ID"         --launch-mode "$MARKET_ACCEPTANCE_MODE"
+    set -- python -m scripts.market_launch_gate \
+        --company-id "$ACCEPTANCE_COMPANY_ID" \
+        --agent-id "$ACCEPTANCE_AGENT_ID" \
+        --launch-mode "$MARKET_ACCEPTANCE_MODE"
 
     old_ifs="$IFS"
     IFS=','
