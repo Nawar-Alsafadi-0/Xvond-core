@@ -79,25 +79,21 @@ async function loadDashboard(){
     ]);
     const workerState=!worker.configured?"Not configured":worker.worker_active?"Online":"Offline";
     const lifecycle=data.lifecycle_counts||{};
+    const sourceCounts=data.source_counts||{};
     const cards=[
-      ["Companies",adminNumber(data.companies)],
-      ["Onboarding",adminNumber(lifecycle.onboarding)],
-      ["Testing",adminNumber(lifecycle.testing)],
-      ["Live",adminNumber(lifecycle.live)],
-      ["Paused",adminNumber(lifecycle.paused)],
-      ["Suspended",adminNumber(lifecycle.suspended)],
+      ["Managed Delivery",adminNumber(sourceCounts.managed)],
+      ["Self-Service",adminNumber(sourceCounts.self_service)],
+      ["Live Companies",adminNumber(lifecycle.live)],
       ["Runtime Active",adminNumber(data.active_companies)],
       ["Active Employees",`${adminNumber(data.active_agents)} / ${adminNumber(data.agents)}`],
       ["Active Channels",adminNumber(data.active_channels)],
       ["Active Services",adminNumber(data.active_subscriptions)],
-      ["WhatsApp Worker",workerState],
-      ["WhatsApp Queue",`${adminNumber(worker.queued)} queued · ${adminNumber(worker.retrying)} retrying`],
-      ["WhatsApp Dead Jobs",adminNumber(worker.dead)],
       ["AI Requests · 24h",adminNumber(data.ai_requests_24h)],
       ["AI Failures · 24h",adminNumber(data.failed_ai_requests_24h)],
       ["External Ops Pending",adminNumber(data.unresolved_external_operations)],
-      ["Provider Cost · 30d",adminMoney(data.provider_cost_30d)],
-      ["Total Tokens",adminNumber(data.total_tokens)]
+      ["WhatsApp Worker",workerState],
+      ["WhatsApp Queue",`${adminNumber(worker.queued)} queued · ${adminNumber(worker.retrying)} retrying`],
+      ["Provider Cost · 30d",adminMoney(data.provider_cost_30d)]
     ];
     document.getElementById("dashboard-cards").innerHTML=cards.map(([label,value])=>`<div class="card"><div class="card-label">${escapeAdmin(label)}</div><div class="card-value">${escapeAdmin(value)}</div></div>`).join("");
     renderAdminAttention(data);
