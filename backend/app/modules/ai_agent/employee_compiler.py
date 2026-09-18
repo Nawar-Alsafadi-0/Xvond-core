@@ -81,9 +81,9 @@ REQUIREMENT_CATALOG: dict[str, dict[str, Any]] = {
     },
     "web_research": {
         "kind": "tool",
-        "status": "xvond_build",
-        "delivery_mode": "compose",
-        "primitives": ["browser_web", "workflow_engine"],
+        "status": "available",
+        "delivery_mode": "native",
+        "primitives": ["browser_web"],
     },
     "email_read": {
         "kind": "integration",
