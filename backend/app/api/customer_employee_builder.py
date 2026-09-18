@@ -2075,10 +2075,12 @@ def bind_self_service_integration(
             "webhook",
             "instagram_publish",
             "email_smtp",
+            "email_imap",
         }
         required_connector_types = {
             "instagram_publish": {"instagram_publish"},
             "email_send": {"email_smtp"},
+            "email_read": {"email_imap"},
         }
         allowed_for_requirement = required_connector_types.get(key)
         if allowed_for_requirement and integration.integration_type not in allowed_for_requirement:
