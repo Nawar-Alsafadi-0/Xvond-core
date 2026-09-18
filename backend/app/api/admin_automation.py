@@ -18,6 +18,7 @@ ALLOWED_TRIGGERS = {"manual", "webhook", "schedule", "event"}
 IMPLEMENTED_TRIGGERS = {"manual", "schedule"}
 ALLOWED_STEP_TYPES = {"ai", "tool", "condition", "webhook", "transform", "scheduled_action"}
 TERMINAL_SIDE_EFFECT_TYPES = {"tool", "webhook", "scheduled_action"}
+SCHEDULE_SAFE_STEP_TYPES = {"transform", "condition", "scheduled_action"}
 SENSITIVE_WORKFLOW_KEYS = {
     "authorization",
     "password",
@@ -112,6 +113,14 @@ def validate_workflow(
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported step type at {index}",
+            )
+        if trigger == "schedule" and step_type not in SCHEDULE_SAFE_STEP_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Scheduled step '{step_type}' is not production-safe yet. "
+                    "Use the idempotent scheduled_action execution path."
+                ),
             )
         if step_type in TERMINAL_SIDE_EFFECT_TYPES and index != len(steps) - 1:
             raise HTTPException(
