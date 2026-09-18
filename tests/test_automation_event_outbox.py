@@ -5,10 +5,13 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.database.base import Base
 from backend.app.models.company import Company
+from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.automation import event_dispatch as event_dispatch_module
 from backend.app.modules.automation import event_outbox as event_outbox_module
 from backend.app.modules.automation.event_outbox import enqueue_automation_event
 from backend.app.modules.automation.models import AutomationEventOutbox
+from backend.app.modules.tools.action_request import action_request_tool
+from backend.app.modules.tools.business_models import ActionRequest
 
 
 def _factory(engine):
@@ -146,5 +149,68 @@ def test_failed_outbox_dispatch_remains_retryable(monkeypatch):
         assert row.status == "pending"
         assert row.last_error == "temporary event transport failure"
         assert row.available_at > datetime.now(UTC).replace(tzinfo=None)
+
+    engine.dispose()
+
+
+
+def test_native_internal_action_enqueues_event_in_same_database_transaction():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Action Event Company", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Operations worker",
+                system_prompt="Handle requests.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        request = ActionRequest(
+            company_id=1,
+            agent_id=1,
+            conversation_id=None,
+            action_type="lead_management",
+            details={"customer_name": "Nawar", "interest": "Demo"},
+            summary="New lead",
+            status="new",
+        )
+        db.add(request)
+        db.flush()
+
+        result = action_request_tool._execute_request(
+            request=request,
+            action={
+                "enabled": True,
+                "confirmation_required": False,
+                "destination": {
+                    "type": "xvond_internal",
+                    "adapter": "business_record",
+                },
+                "availability": {"mode": "none"},
+            },
+            arguments={},
+            context={
+                "db": db,
+                "company_id": 1,
+                "agent_id": 1,
+                "conversation_id": None,
+            },
+        )
+
+        assert result.success is True
+        event = db.query(AutomationEventOutbox).one()
+        assert event.event_name == "lead_management.created"
+        assert event.event_id == f"action-request:{request.id}:new"
+        assert event.source_type == "action_request"
+        assert event.source_id == str(request.id)
+        assert event.payload["request_id"] == request.id
+        assert event.status == "pending"
 
     engine.dispose()
