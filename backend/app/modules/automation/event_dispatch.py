@@ -4,8 +4,23 @@ from backend.app.core.database.connection import SessionLocal
 from backend.app.core.execution_claims import execution_claims
 from backend.app.models.company import Company
 from backend.app.modules.ai_agent.models import AIAgent
-from backend.app.modules.automation.models import AutomationWorkflow
+from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.automation.runtime import automation_runtime
+
+
+def _recorded_event_run(db, *, workflow_id: int, event_id: str) -> AutomationRun | None:
+    rows = (
+        db.query(AutomationRun)
+        .filter(AutomationRun.workflow_id == int(workflow_id))
+        .order_by(AutomationRun.id.desc())
+        .limit(200)
+        .all()
+    )
+    for row in rows:
+        payload = row.input_data if isinstance(row.input_data, dict) else {}
+        if str(payload.get("_xvond_event_id") or "") == str(event_id):
+            return row
+    return None
 
 
 def dispatch_automation_event(
@@ -57,6 +72,22 @@ def dispatch_automation_event(
                 if employee is None or not employee.enabled:
                     continue
 
+            recorded = _recorded_event_run(
+                db,
+                workflow_id=workflow.id,
+                event_id=clean_event_id,
+            )
+            if recorded is not None:
+                runs.append(
+                    {
+                        "workflow_id": workflow.id,
+                        "run_id": recorded.id,
+                        "status": "already_recorded",
+                        "run_status": recorded.status,
+                    }
+                )
+                continue
+
             claim_key = f"automation_event:{workflow.id}:{clean_event_id}"
             if not execution_claims.claim(claim_key, ttl_seconds=86400):
                 runs.append(
@@ -83,10 +114,20 @@ def dispatch_automation_event(
                     input_data=input_data,
                 )
             except Exception:
+                recorded = _recorded_event_run(
+                    db,
+                    workflow_id=workflow.id,
+                    event_id=clean_event_id,
+                )
+                if recorded is None:
+                    execution_claims.release(claim_key)
+                    raise
                 runs.append(
                     {
                         "workflow_id": workflow.id,
+                        "run_id": recorded.id,
                         "status": "failed",
+                        "run_status": recorded.status,
                     }
                 )
                 continue
