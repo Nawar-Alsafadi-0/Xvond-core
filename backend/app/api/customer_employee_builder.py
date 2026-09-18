@@ -2857,6 +2857,88 @@ def test_draft_employee(
         db.close()
 
 
+@router.post("/{agent_id}/build-pending-revision")
+def build_pending_live_revision(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Build a staged live revision without changing the live employee runtime."""
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Live revisions are available only for Self-Service employees")
+        if not _has_ai_agents_entitlement(db, company.id):
+            raise HTTPException(
+                403,
+                detail={
+                    "message": "Subscribe to build this staged revision",
+                    "subscription_required": True,
+                },
+            )
+        limits_service.check_token_limit(db, company.id)
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == int(agent_id),
+            AIAgent.company_id == company.id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        if not agent.enabled:
+            raise HTTPException(409, "This employee is not live")
+
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = builder.get("pending_revision")
+        if not isinstance(pending, dict):
+            raise HTTPException(404, "No staged revision is available")
+        job_brief = str(pending.get("source_description") or "").strip()
+        if not job_brief:
+            raise HTTPException(409, "Pending revision Job Brief is missing")
+
+        previous_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending.get("compiled_spec"), dict)
+            else (
+                builder.get("compiled_spec")
+                if isinstance(builder.get("compiled_spec"), dict)
+                else None
+            )
+        )
+        staged = _compile_staged_employee_spec(
+            db,
+            company_id=company.id,
+            agent=agent,
+            job_brief=job_brief,
+            requested_channels=list(pending.get("requested_channels") or []),
+            previous_spec=previous_spec,
+        )
+        pending.update(staged)
+        pending["status"] = "built"
+        pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        pending.pop("last_tested_at", None)
+        pending.pop("last_tested_compiled_at", None)
+        builder["pending_revision"] = pending
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.commit()
+        return {
+            "status": "pending_revision_built",
+            "agent_id": agent.id,
+            "compiled_at": pending.get("compiled_at"),
+            "live_employee_unchanged": True,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @router.post("/{agent_id}/discard-pending-revision")
 def discard_pending_live_revision(
     agent_id: int,
