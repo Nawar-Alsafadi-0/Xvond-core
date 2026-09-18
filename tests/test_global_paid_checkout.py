@@ -304,12 +304,33 @@ def test_public_billing_config_exposes_only_browser_safe_values(monkeypatch):
     assert result == {
         "enabled": True,
         "provider": "paddle",
+        "checkout_mode": "xvond_overlay",
         "environment": "sandbox",
         "client_token": "test_client_token",
         "success_url": "https://xvond.example/customer-ui#employee-builder",
     }
     assert "secret-api-key" not in str(result)
     assert "secret-webhook" not in str(result)
+
+
+def test_public_billing_config_reports_tap_redirect_mode_without_secrets(monkeypatch):
+    from backend.app.api import public_billing
+
+    monkeypatch.setattr(public_billing.settings, "BILLING_PROVIDER", "tap")
+    monkeypatch.setattr(public_billing.settings, "TAP_SECRET_KEY", "sk_test_hidden")
+    monkeypatch.setattr(public_billing.settings, "TAP_MERCHANT_ID", "merchant_test")
+    monkeypatch.setattr(public_billing.settings, "PUBLIC_BASE_URL", "https://xvond.example")
+
+    result = public_billing.public_billing_config()
+
+    assert result == {
+        "enabled": True,
+        "provider": "tap",
+        "checkout_mode": "provider_redirect",
+        "success_url": "https://xvond.example/customer-ui#employee-builder",
+    }
+    assert "sk_test_hidden" not in str(result)
+    assert "merchant_test" not in str(result)
 
 
 def test_xvond_checkout_page_uses_paddle_js_without_client_side_entitlement_logic():
