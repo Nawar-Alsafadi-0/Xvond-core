@@ -270,6 +270,17 @@
                 <div id="subscription-plans" class="employee-builder-section hidden"></div>
                 <div id="subscription-error" class="error"></div>
                 <div id="prepare-employee-error" class="error"></div>
+                <div id="employee-builder-runs-panel" class="employee-builder-section">
+                    <div class="employee-builder-current-head">
+                        <div>
+                            <h3>Execution history</h3>
+                            <p class="muted">Inspect recent automatic runs, outputs and the exact failing node when something goes wrong.</p>
+                        </div>
+                        <button type="button" id="employee-builder-runs-refresh">Refresh</button>
+                    </div>
+                    <div id="employee-builder-runs-list"><p class="muted">Load recent runs to inspect execution.</p></div>
+                    <div id="employee-builder-runs-error" class="error"></div>
+                </div>
                 <div id="employee-builder-webhook-panel" class="employee-builder-section hidden">
                     <h3>Webhook trigger</h3>
                     <p class="muted">Send JSON to this URL and include both headers below. Reuse a stable Idempotency-Key for retries of the same external event.</p>
@@ -605,6 +616,42 @@
                 }
             });
         });
+
+        async function loadExecutionHistory() {
+            const list = document.getElementById("employee-builder-runs-list");
+            const error = document.getElementById("employee-builder-runs-error");
+            if (!list) return;
+            if (error) error.textContent = "";
+            list.innerHTML = '<p class="muted">Loading execution history...</p>';
+            try {
+                const result = await api(`/customer/employee-builder/${Number(employee.agent_id)}/automation-runs`);
+                const runs = Array.isArray(result.runs) ? result.runs : [];
+                if (!runs.length) {
+                    list.innerHTML = '<p class="muted">No automatic runs yet.</p>';
+                    return;
+                }
+                list.innerHTML = runs.map(run => {
+                    const output = run.output_data ? JSON.stringify(run.output_data, null, 2) : "";
+                    return `
+                        <div class="note">
+                            <div class="employee-builder-current-head">
+                                <strong>${escapeHtml(run.workflow_name || `Run #${run.id}`)}</strong>
+                                ${badge(String(run.status || "unknown"), run.status === "success" ? "ready" : (run.status === "failed" ? "setup" : "neutral"))}
+                            </div>
+                            <div class="muted">Run #${Number(run.id)} · ${escapeHtml(String(run.created_at || ""))}</div>
+                            ${run.error_message ? `<div class="error">${escapeHtml(run.error_message)}</div>` : ""}
+                            ${output ? `<pre class="employee-builder-run-output">${escapeHtml(output.slice(0, 6000))}</pre>` : ""}
+                        </div>
+                    `;
+                }).join("");
+            } catch (err) {
+                list.innerHTML = "";
+                if (error) error.textContent = err?.message || "Could not load execution history.";
+            }
+        }
+
+        document.getElementById("employee-builder-runs-refresh")?.addEventListener("click", loadExecutionHistory);
+        loadExecutionHistory();
 
         async function loadBuilderConnections() {
             const selects = Array.from(document.querySelectorAll("[data-integration-select]"));
