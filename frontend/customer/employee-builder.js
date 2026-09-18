@@ -568,7 +568,7 @@
                                 </div>
                                 <div id="employee-refine-error" class="error"></div>
                             </div>
-                            ${!employee.enabled && (employee.versions || []).length ? `
+                            ${(employee.versions || []).length ? `
                                 <details class="employee-builder-section">
                                     <summary><strong>Version history</strong> · ${Number((employee.versions || []).length)} saved</summary>
                                     <div style="margin-top:12px">
@@ -579,7 +579,7 @@
                                                         <strong>${escapeHtml(version.reason || "Previous build")}</strong>
                                                         <div class="muted">${escapeHtml(version.created_at || "")}</div>
                                                     </div>
-                                                    <button type="button" data-rollback-version="${escapeHtml(version.id || "")}">Restore</button>
+                                                    <button type="button" data-rollback-version="${escapeHtml(version.id || "")}">${employee.enabled ? "Stage restore" : "Restore"}</button>
                                                 </div>
                                                 <p class="muted">${escapeHtml(String(version.job_brief || "").slice(0, 240))}</p>
                                             </div>
@@ -1122,7 +1122,7 @@
         document.querySelectorAll("[data-rollback-version]").forEach(button => {
             button.addEventListener("click", async () => {
                 const versionId = String(button.dataset.rollbackVersion || "");
-                if (!versionId || !confirm("Restore this employee version? The current draft will be saved in history first.")) return;
+                const message = employee.enabled ? "Stage this previous version as a pending revision? The live employee will keep running." : "Restore this employee version? The current draft will be saved in history first.";\n                if (!versionId || !confirm(message)) return;
                 button.disabled = true;
                 try {
                     await api(`/customer/employee-builder/${employee.agent_id}/rollback`, {
