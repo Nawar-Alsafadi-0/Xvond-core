@@ -77,6 +77,37 @@ def self_service_channel_slots(builder: dict | None) -> list[str]:
     return slots
 
 
+def assert_self_service_channel_selected(
+    db,
+    *,
+    company: Company,
+    agent: AIAgent,
+    channel_type: str,
+) -> None:
+    """Fail closed when customer setup targets a channel outside the current job."""
+
+    if not is_self_service_company(company):
+        return
+
+    config = (
+        db.query(AgentConfig)
+        .filter(AgentConfig.agent_id == agent.id)
+        .first()
+    )
+    builder = (
+        dict(config.settings or {}).get("employee_builder")
+        if config is not None
+        else None
+    )
+    selected = self_service_channel_slots(builder)
+    key = str(channel_type or "").strip().lower()
+    if key not in selected:
+        raise HTTPException(
+            409,
+            f"{key or 'channel'} is not selected by this employee's current Job Brief",
+        )
+
+
 def _requirement_channel_keys(spec: dict) -> list[str]:
     result: list[str] = []
     for item in spec.get("requirements") or []:
