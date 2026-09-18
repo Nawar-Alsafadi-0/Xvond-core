@@ -29,11 +29,15 @@ from backend.app.modules.channels.whatsapp_models import WhatsAppOutboundDeliver
 from backend.app.modules.channels.whatsapp_queue import whatsapp_job_queue
 from backend.app.modules.solutions.catalog import SERVICE_CATALOG
 from backend.app.modules.tools.business_models import ActionRequest
+from backend.app.modules.tools.external_reconciliation import (
+    RECONCILIATION_OUTCOMES,
+    UNRESOLVED_EXTERNAL_STATUSES,
+    reconcile_external_action_request,
+)
 
 router = APIRouter(prefix="/admin/operations", tags=["Xvond Admin - Operations"])
-UNRESOLVED_EXTERNAL = {"executing", "external_failed", "cancelling"}
+UNRESOLVED_EXTERNAL = UNRESOLVED_EXTERNAL_STATUSES
 UNRESOLVED_DELIVERY = {"failed", "unknown"}
-RECONCILIATION_OUTCOMES = {"executed", "not_executed", "cancelled"}
 
 
 class ReconcileExternalOperation(BaseModel):
@@ -647,57 +651,42 @@ def reconcile_external_operation(
     data: ReconcileExternalOperation,
     current_admin: User = Depends(require_xvond_admin),
 ):
-    outcome = data.outcome.strip().lower()
+    outcome = str(data.outcome or "").strip().lower()
     if outcome not in RECONCILIATION_OUTCOMES:
         raise HTTPException(400, "Invalid reconciliation outcome")
+
     db = SessionLocal()
     try:
-        item = db.query(ActionRequest).filter(ActionRequest.id == request_id).first()
+        item = (
+            db.query(ActionRequest)
+            .filter(ActionRequest.id == int(request_id))
+            .with_for_update()
+            .first()
+        )
         if item is None:
             raise HTTPException(404, "Operation not found")
-        if item.status not in UNRESOLVED_EXTERNAL:
-            raise HTTPException(409, "Operation does not need external reconciliation")
 
-        details = dict(item.details or {})
-        previous = details.get("_xvond_execution")
-        previous = dict(previous) if isinstance(previous, dict) else {}
-        now = _utcnow_naive().isoformat()
-        reconciliation = {
-            "outcome": outcome,
-            "note": (data.note or "").strip()[:1000] or None,
-            "reconciled_at": now,
-            "previous_state": previous,
-        }
-        details["_xvond_reconciliation"] = reconciliation
-
-        if outcome == "executed":
-            details["_xvond_execution"] = {
-                **previous,
-                "state": "confirmed",
-                "operation": "execute",
-                "updated_at": now,
-                "reconciled": True,
-            }
-            item.status = "confirmed"
-        elif outcome == "cancelled":
-            details["_xvond_execution"] = {
-                **previous,
-                "state": "confirmed",
-                "operation": "cancel",
-                "updated_at": now,
-                "reconciled": True,
-            }
-            item.status = "cancelled"
-        else:
-            details["_xvond_execution"] = {
-                **previous,
-                "state": "reconciled_not_executed",
-                "updated_at": now,
-                "reconciled": True,
-            }
-            item.status = "new"
-
-        item.details = details
+        previous_status = item.status
+        reconcile_external_action_request(
+            item,
+            outcome=outcome,
+            note=data.note,
+        )
+        audit_service.log(
+            db=db,
+            action="admin.external_operation_reconciled",
+            resource_type="action_request",
+            resource_id=item.id,
+            user_id=current_admin.id,
+            company_id=item.company_id,
+            details={
+                "agent_id": item.agent_id,
+                "action_type": item.action_type,
+                "previous_status": previous_status,
+                "outcome": outcome,
+                "status": item.status,
+            },
+        )
         db.commit()
         db.refresh(item)
         return _operation_metadata(item)
