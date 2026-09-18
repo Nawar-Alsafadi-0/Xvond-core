@@ -28,6 +28,7 @@ from backend.app.core.config_secrets import (
 )
 from backend.app.core.database.connection import SessionLocal
 from backend.app.models.user import User
+from backend.app.models.company import Company
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.integrations.catalog import (
     get_integration_definition,
@@ -75,6 +76,19 @@ def _company_id(user: User) -> int:
     if user.company_id is None:
         raise HTTPException(403, "Customer company required")
     return user.company_id
+
+
+def _self_service_company(db, user: User) -> Company:
+    company_id = _company_id(user)
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if company is None:
+        raise HTTPException(404, "Company not found")
+    if str(company.onboarding_source or "").strip().lower() != "self_service":
+        raise HTTPException(
+            409,
+            "Connected systems for Xvond Managed customers are configured by Xvond",
+        )
+    return company
 
 
 @router.get("/business-information")
@@ -244,7 +258,8 @@ def customer_integration_create(
 ):
     db = SessionLocal()
     try:
-        company_id = _company_id(current_user)
+        company = _self_service_company(db, current_user)
+        company_id = company.id
         integration_type = str(payload.integration_type or "").strip().lower()
         if get_integration_definition(integration_type) is None:
             raise HTTPException(400, "Unsupported integration type")
@@ -271,16 +286,12 @@ def customer_integration_create(
             service_limits.check_current(
                 db,
                 company_id,
-                "integrations",
+                "ai_agents",
                 "integrations",
                 current,
             )
-        except HTTPException as exc:
-            # Self-Service AI Employee plans can legitimately own connections
-            # without a separate Integrations subscription. Only propagate
-            # non-entitlement operational errors.
-            if exc.status_code != 403:
-                raise
+        except HTTPException:
+            raise
 
         item = CompanyIntegration(
             company_id=company_id,
@@ -308,7 +319,7 @@ def customer_integration_update(
 ):
     db = SessionLocal()
     try:
-        company_id = _company_id(current_user)
+        company_id = _self_service_company(db, current_user).id
         item = (
             db.query(CompanyIntegration)
             .filter(
@@ -357,7 +368,7 @@ def customer_integration_delete(
 ):
     db = SessionLocal()
     try:
-        company_id = _company_id(current_user)
+        company_id = _self_service_company(db, current_user).id
         item = (
             db.query(CompanyIntegration)
             .filter(
