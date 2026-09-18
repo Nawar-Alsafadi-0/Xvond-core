@@ -108,6 +108,9 @@ class EmployeeBuilderSetupAnswerRequest(BaseModel):
     value: str | None = Field(default=None, max_length=8000)
     values: dict[str, str] = Field(default_factory=dict)
 
+class EmployeeBuilderGraphRunRequest(BaseModel):
+    input_data: dict = Field(default_factory=dict)
+
 
 DEFAULT_CUSTOMER_CONTROLS = {
     "can_enable_disable": True,
@@ -2569,6 +2572,78 @@ def customer_employee_automation_runs(
                 }
                 for run in runs
             ],
+        }
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/run-graph")
+def customer_employee_run_graph(
+    agent_id: int,
+    data: EmployeeBuilderGraphRunRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        company = _company_or_404(db, company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Manual graph execution is available for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+
+        workflow = None
+        for row in (
+            db.query(AutomationWorkflow)
+            .filter(
+                AutomationWorkflow.company_id == company_id,
+                AutomationWorkflow.trigger_type == "manual",
+                AutomationWorkflow.enabled.is_(True),
+            )
+            .order_by(AutomationWorkflow.id.asc())
+            .all()
+        ):
+            config = row.trigger_config if isinstance(row.trigger_config, dict) else {}
+            if (
+                config.get("_xvond_source") == "self_service_employee"
+                and int(config.get("_xvond_agent_id") or 0) == int(agent_id)
+                and config.get("_xvond_graph_trigger") is True
+            ):
+                workflow = row
+                break
+
+        if workflow is None:
+            raise HTTPException(409, "This employee does not have a ready manual execution graph")
+
+        try:
+            run = automation_runtime.execute(
+                db=db,
+                company_id=company_id,
+                workflow=workflow,
+                input_data=dict(data.input_data or {}),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        return {
+            "id": run.id,
+            "workflow_id": run.workflow_id,
+            "status": run.status,
+            "output_data": run.output_data,
+            "error_message": run.error_message,
+            "created_at": run.created_at,
+            "finished_at": run.finished_at,
         }
     finally:
         db.close()
