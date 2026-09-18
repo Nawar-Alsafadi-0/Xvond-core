@@ -31,6 +31,42 @@ def _utcnow_naive() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+MAX_AI_STEP_MESSAGE_CHARS = 12000
+
+
+def _render_step_context(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    import json
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("AI/media step context must be JSON serializable") from exc
+
+
+def _compose_step_message(*, prompt: str, context=None) -> str:
+    clean_prompt = str(prompt or "").strip()
+    if not clean_prompt:
+        raise ValueError("AI/media step requires prompt")
+    if len(clean_prompt) > MAX_AI_STEP_MESSAGE_CHARS:
+        raise ValueError("AI/media step prompt is too long")
+    context_text = _render_step_context(context)
+    if not context_text:
+        return clean_prompt
+
+    separator = "\n\nCONTEXT:\n"
+    remaining = MAX_AI_STEP_MESSAGE_CHARS - len(clean_prompt) - len(separator)
+    if remaining <= 0:
+        return clean_prompt
+    if len(context_text) > remaining:
+        marker = "\n...[context truncated by Xvond]"
+        keep = max(0, remaining - len(marker))
+        context_text = context_text[:keep] + marker
+    return clean_prompt + separator + context_text
+
+
 def _billing_contract(workflow: AutomationWorkflow) -> tuple[str, str]:
     source = str((workflow.trigger_config or {}).get("_xvond_source") or "").strip()
     if source == "self_service_employee":
@@ -432,11 +468,13 @@ class AutomationRuntime:
                         "type": "ai",
                         "agent_id": params.get("agent_id") or graph_agent_id,
                         "prompt": params.get("prompt") or node.get("label"),
+                        "context": params.get("context"),
                     }
                 elif node_type == "media":
                     nested_step = {
                         "type": "media_generation",
                         "prompt": params.get("prompt") or node.get("label"),
+                        "context": params.get("context"),
                         "model": params.get("model"),
                         "size": params.get("size") or "1024x1024",
                     }
@@ -819,16 +857,17 @@ class AutomationRuntime:
 
         if step_type == "ai":
             agent_id = step.get("agent_id")
-            prompt = str(step.get("prompt") or step.get("label") or "").strip()
             if not agent_id:
                 raise ValueError("AI step requires agent_id")
-            if not prompt:
-                raise ValueError("AI step requires prompt")
+            message = _compose_step_message(
+                prompt=str(step.get("prompt") or step.get("label") or ""),
+                context=step.get("context"),
+            )
             response = agent_runtime.chat(
                 db=db,
                 company_id=company_id,
                 agent_id=int(agent_id),
-                message=prompt,
+                message=message,
                 commit=False,
                 allow_tools=False,
             )
@@ -838,12 +877,13 @@ class AutomationRuntime:
             }
 
         if step_type == "media_generation":
-            instruction = str(step.get("prompt") or step.get("label") or "").strip()
-            generated_content = str(state.get("ai_response") or "").strip()
-            prompt_parts = [item for item in (instruction, generated_content) if item]
-            prompt = "\n\nGenerated content/context:\n".join(prompt_parts)
-            if not prompt:
-                raise ValueError("Media generation requires a prompt or prior AI output")
+            explicit_context = step.get("context")
+            if explicit_context is None:
+                explicit_context = state.get("ai_response")
+            prompt = _compose_step_message(
+                prompt=str(step.get("prompt") or step.get("label") or ""),
+                context=explicit_context,
+            )
             asset = generate_image_asset(
                 prompt=prompt,
                 model=str(step.get("model") or "").strip() or None,
