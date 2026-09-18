@@ -16,9 +16,9 @@ router = APIRouter(prefix="/admin/automation", tags=["Xvond Admin - Automation"]
 
 ALLOWED_TRIGGERS = {"manual", "webhook", "schedule", "event"}
 IMPLEMENTED_TRIGGERS = {"manual", "schedule"}
-ALLOWED_STEP_TYPES = {"ai", "tool", "condition", "webhook", "transform", "scheduled_action"}
+ALLOWED_STEP_TYPES = {"ai", "tool", "condition", "webhook", "transform", "scheduled_action", "media_generation", "graph"}
 TERMINAL_SIDE_EFFECT_TYPES = {"tool", "webhook", "scheduled_action"}
-SCHEDULE_SAFE_STEP_TYPES = {"transform", "condition", "scheduled_action"}
+SCHEDULE_SAFE_STEP_TYPES = {"transform", "condition", "scheduled_action", "graph"}
 SENSITIVE_WORKFLOW_KEYS = {
     "authorization",
     "password",
