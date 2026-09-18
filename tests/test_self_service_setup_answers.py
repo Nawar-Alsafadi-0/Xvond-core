@@ -82,6 +82,9 @@ def setup_answer_database(monkeypatch):
                         "delivery_mode": "self_service",
                         "requested_channels": [],
                         "setup_answers": {},
+                        "compiled_at": "2026-09-18T12:00:00Z",
+                        "last_tested_at": "2026-09-18T12:05:00Z",
+                        "last_tested_compiled_at": "2026-09-18T12:00:00Z",
                         "compiled_spec": {
                             "role": "Account assistant",
                             "scope": "personal",
@@ -130,6 +133,8 @@ def test_setup_answer_resolves_requirement_and_reaches_runtime_prompt(setup_answ
             builder["compiled_spec"]["customer_inputs"]["account_context"]
             == "Primary workspace is ACME-42"
         )
+        assert "last_tested_at" not in builder
+        assert "last_tested_compiled_at" not in builder
         agent = db.get(AIAgent, 1)
         assert "OWNER-PROVIDED SETUP DATA" in agent.system_prompt
         assert "Primary workspace is ACME-42" in agent.system_prompt

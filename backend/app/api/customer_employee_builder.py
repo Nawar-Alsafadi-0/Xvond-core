@@ -1960,6 +1960,10 @@ def save_self_service_setup_answer(
         builder["compiled_spec"] = compiled_value
         builder["delivery"] = delivery
         builder["missing_information"] = list(compiled_value.get("setup_required") or [])
+        # Setup data changes the employee's executable behavior. A preview from
+        # before this change cannot authorize launch of the updated build.
+        builder.pop("last_tested_at", None)
+        builder.pop("last_tested_compiled_at", None)
         settings_value["employee_builder"] = builder
         config.settings = settings_value
 
