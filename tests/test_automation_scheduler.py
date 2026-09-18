@@ -25,6 +25,7 @@ from backend.app.modules.automation.webhook_auth import (
 )
 from backend.app.modules.automation import event_dispatch as event_dispatch_module
 from backend.app.modules.tools.models import AgentToolAssignment
+from backend.app.modules.tools.business_models import ActionRequest
 
 
 def test_interval_schedule_uses_latest_slot_without_catchup_storm():
@@ -1131,5 +1132,294 @@ def test_agent_state_rejects_large_values():
             assert "64 KB" in str(exc)
         else:
             raise AssertionError("oversized state value must be rejected")
+
+    engine.dispose()
+
+
+
+def test_graph_approval_resumes_same_run_without_replaying_prior_nodes(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    calls = {"fetch": 0, "action": 0}
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_request(**kwargs):
+        calls["fetch"] += 1
+        return {
+            "status_code": 200,
+            "response": '{"value": 42}',
+            "truncated": False,
+        }
+
+    def fake_capability(*args, **kwargs):
+        calls["action"] += 1
+        return {"ok": True, "details": kwargs.get("details") or {}}
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "execute_generic_capability",
+        fake_capability,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(
+            Company(
+                id=1,
+                name="Approval Company",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Approval worker",
+                system_prompt="Ask before consequential actions.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "send_report": {
+                            "enabled": True,
+                            "confirmation_required": True,
+                            "label": "Send report",
+                            "description": "Send the generated report",
+                            "destination": {
+                                "type": "xvond_internal",
+                                "adapter": "generic_capability",
+                                "execution_plan": [
+                                    {
+                                        "id": "notify",
+                                        "op": "notify",
+                                        "title": "Report",
+                                        "message": "Report sent.",
+                                    }
+                                ],
+                            },
+                            "availability": {"mode": "none"},
+                        }
+                    }
+                },
+            )
+        )
+        db.flush()
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Approval graph",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+            },
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "fetch",
+                                "type": "http_get_json",
+                                "depends_on": [],
+                                "params": {
+                                    "url": "https://example.com/data",
+                                },
+                            },
+                            {
+                                "id": "send",
+                                "type": "action",
+                                "depends_on": ["fetch"],
+                                "params": {
+                                    "action_type": "send_report",
+                                    "arguments": {
+                                        "payload": "$nodes.fetch.result",
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        waiting = runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={},
+        )
+
+        assert waiting.status == "waiting_approval"
+        assert calls["fetch"] == 1
+        assert calls["action"] == 0
+        request = db.query(ActionRequest).one()
+        assert request.status == "awaiting_confirmation"
+        assert waiting.output_data["approval"]["node_id"] == "send"
+        assert waiting.output_data["approval"]["request_id"] == request.id
+
+        request.status = "approved"
+        db.commit()
+
+        resumed = runtime.resume_approval(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=waiting,
+            request=request,
+        )
+
+        assert resumed.id == waiting.id
+        assert resumed.status == "success"
+        assert calls["fetch"] == 1
+        assert calls["action"] == 1
+        assert (
+            resumed.output_data["steps"][-1]["result"]["graph_outputs"]["send"]
+            ["scheduled_action_result"]["ok"]
+            is True
+        )
+
+    engine.dispose()
+
+
+def test_graph_nested_approval_is_blocked_before_execution(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Nested Approval", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Nested worker",
+                system_prompt="State",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "send_one": {
+                            "enabled": True,
+                            "confirmation_required": True,
+                            "destination": {
+                                "type": "xvond_internal",
+                                "adapter": "generic_capability",
+                                "execution_plan": [
+                                    {
+                                        "id": "notify",
+                                        "op": "notify",
+                                        "title": "Sent",
+                                        "message": "Sent.",
+                                    }
+                                ],
+                            },
+                            "availability": {"mode": "none"},
+                        }
+                    }
+                },
+            )
+        )
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        try:
+            runtime.execute_step(
+                db=db,
+                company_id=1,
+                step={
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "each",
+                                "type": "foreach",
+                                "depends_on": [],
+                                "params": {
+                                    "items": [{"id": 1}],
+                                    "graph": {
+                                        "version": 1,
+                                        "nodes": [
+                                            {
+                                                "id": "send",
+                                                "type": "action",
+                                                "depends_on": [],
+                                                "params": {
+                                                    "action_type": "send_one",
+                                                    "arguments": {
+                                                        "id": "$item.id"
+                                                    },
+                                                },
+                                            }
+                                        ],
+                                    },
+                                },
+                            }
+                        ],
+                    },
+                },
+                state={"_xvond_execution_key": "nested-approval-test"},
+                run_id=1,
+                step_index=0,
+            )
+        except ValueError as exc:
+            assert "inside foreach" in str(exc)
+        else:
+            raise AssertionError("nested approval must fail closed")
 
     engine.dispose()
