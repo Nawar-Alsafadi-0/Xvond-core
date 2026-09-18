@@ -24,7 +24,10 @@ from backend.app.core.dependencies import require_customer_manager
 from backend.app.models.company import Company
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.models import AIAgent
-from backend.app.modules.ai_agent.self_service_policy import is_self_service_company
+from backend.app.modules.ai_agent.self_service_policy import (
+    assert_self_service_channel_selected,
+    is_self_service_company,
+)
 from backend.app.modules.audit.service import audit_service
 from backend.app.modules.channels.catalog import validate_channel_config
 from backend.app.modules.channels.models import AgentChannel
@@ -66,6 +69,16 @@ def _customer_agent(db, current_user: User, agent_id: int) -> AIAgent:
     return agent
 
 
+def _assert_whatsapp_selected_for_self_service(db, agent: AIAgent) -> None:
+    company = db.query(Company).filter(Company.id == agent.company_id).first()
+    assert_self_service_channel_selected(
+        db,
+        company=company,
+        agent=agent,
+        channel_type="whatsapp",
+    )
+
+
 def _self_service_whatsapp_can_edit(db, agent: AIAgent) -> bool:
     company = db.query(Company).filter(Company.id == agent.company_id).first()
     return not (is_self_service_company(company) and agent.enabled)
@@ -94,6 +107,7 @@ def embedded_signup_config(
     db = SessionLocal()
     try:
         agent = _customer_agent(db, current_user, agent_id)
+        _assert_whatsapp_selected_for_self_service(db, agent)
         meta = _meta_settings()
         missing = _missing_meta_settings(meta)
         ready = not missing
@@ -189,6 +203,7 @@ def complete_embedded_signup(
     db = SessionLocal()
     try:
         agent = _customer_agent(db, current_user, data.agent_id)
+        _assert_whatsapp_selected_for_self_service(db, agent)
         _require_self_service_whatsapp_editable(db, agent)
         agent_id = agent.id
         company_id = agent.company_id
@@ -223,6 +238,7 @@ def complete_embedded_signup(
         # Re-check ownership in case the account changed while Meta signup was open.
         agent = _customer_agent(db, current_user, agent_id)
         db.refresh(agent, with_for_update=True)
+        _assert_whatsapp_selected_for_self_service(db, agent)
         _require_self_service_whatsapp_editable(db, agent)
         if agent.company_id != company_id:
             raise HTTPException(

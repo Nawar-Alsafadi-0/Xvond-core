@@ -9,6 +9,7 @@ from backend.app.main import app  # noqa: F401 - register model metadata
 from backend.app.api import customer_meta_whatsapp as api
 from backend.app.core.database.base import Base
 from backend.app.models.company import Company
+from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.channels.models import AgentChannel
 
@@ -61,6 +62,23 @@ def whatsapp_database(monkeypatch):
                 enabled=True,
             ),
         ])
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={
+                    "employee_builder": {
+                        "onboarding_source": "self_service",
+                        "delivery_mode": "self_service",
+                        "requested_channels": ["whatsapp"],
+                        "compiled_spec": None,
+                    }
+                },
+                capabilities={},
+                customer_controls={},
+            )
+        )
         db.commit()
 
     yield factory
