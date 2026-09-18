@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from backend.app.main import app
 from backend.app.api import billing_webhooks
@@ -61,7 +62,11 @@ class FakeGateway:
 
 @pytest.fixture
 def payment_database(monkeypatch):
-    engine = create_engine("sqlite://")
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(engine)
     factory = lambda: Session(engine, autoflush=False)
     monkeypatch.setattr(subscription_api, "SessionLocal", factory)
