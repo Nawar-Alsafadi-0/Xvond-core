@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from backend.app.core.config_secrets import reveal_config
 from backend.app.models.company import Company
+from backend.app.models.company_module import CompanyModule
 from backend.app.models.company_profile import CompanyProfile
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.automation.models import AutomationWorkflow
@@ -210,6 +211,38 @@ def _scheduled_runtime_fields(requirement: dict) -> list[str]:
         if key and key not in result:
             result.append(key)
     return result
+
+
+BUSINESS_MODULE_KEYS = {
+    "booking",
+    "orders",
+    "lead_management",
+    "quotation",
+    "customer_support",
+}
+
+
+def _enable_company_module(db, company_id: int, module_name: str) -> None:
+    if module_name not in BUSINESS_MODULE_KEYS:
+        return
+    row = (
+        db.query(CompanyModule)
+        .filter(
+            CompanyModule.company_id == company_id,
+            CompanyModule.module_name == module_name,
+        )
+        .first()
+    )
+    if row is None:
+        db.add(
+            CompanyModule(
+                company_id=company_id,
+                module_name=module_name,
+                enabled=True,
+            )
+        )
+    else:
+        row.enabled = True
 
 
 def _company_context(db, agent_id: int) -> tuple[Company | None, str | None]:
@@ -442,6 +475,10 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                 "workflow_id": schedule_workflow_id,
                 "status": schedule_status,
             }
+        if company is not None:
+            module_name = str(action.get("module") or "").strip()
+            _enable_company_module(db, company.id, module_name)
+
         action_plan[key] = {
             "tool_name": "action_request",
             "action_type": key,
