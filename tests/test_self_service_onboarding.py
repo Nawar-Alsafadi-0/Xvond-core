@@ -128,7 +128,10 @@ def test_self_service_builder_is_a_first_class_portal_route():
 
     assert '"id": "employee-builder"' in portal
     assert '"loader": "employee-builder"' in portal
-    assert "has_self_service_employee" in portal
+    assert "is_self_service_workspace = company.onboarding_source == \"self_service\"" in portal
+    assert "if is_self_service_workspace:" in portal
     assert 'requestedPage' in app
     assert 'selfServiceDraft' in app
+    draft_block = app.split("const selfServiceDraft =", 1)[1].split(");", 1)[0]
+    assert "summary?.agents" not in draft_block
     assert '"employee-builder"' in app
