@@ -16,6 +16,7 @@ services:
       BACKUP_STALE_AFTER_SECONDS: ${BACKUP_STALE_AFTER_SECONDS:-129600}
     volumes:
       - xvond_backup_status:/backup-status:ro
+      - xvond_media:/var/lib/xvond/media
     ports:
       - "127.0.0.1:${APP_PORT:-8000}:8000"
     depends_on:
@@ -257,6 +258,7 @@ services:
 
 volumes:
   xvond_postgres_data:
+  xvond_media:
   xvond_redis_data:
   xvond_backups:
   xvond_backup_status:
