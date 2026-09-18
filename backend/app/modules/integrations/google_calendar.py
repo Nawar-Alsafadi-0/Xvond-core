@@ -220,20 +220,26 @@ def _local_interval(config: dict, details: dict) -> tuple[datetime, datetime]:
 
     zone = _timezone(config)
     naive = datetime.combine(day, clock)
-    start = naive.replace(tzinfo=zone, fold=0)
-    alternate = naive.replace(tzinfo=zone, fold=1)
+    first = naive.replace(tzinfo=zone, fold=0)
+    second = naive.replace(tzinfo=zone, fold=1)
 
     # Reject local times that are ambiguous or do not exist during DST changes
     # rather than silently booking a different instant than the customer chose.
-    if start.utcoffset() != alternate.utcoffset():
-        raise CalendarConnectorError(
-            "Booking time is ambiguous because of a daylight-saving transition"
-        )
-    roundtrip = start.astimezone(UTC).astimezone(zone).replace(tzinfo=None)
-    if roundtrip != naive:
+    first_valid = (
+        first.astimezone(UTC).astimezone(zone).replace(tzinfo=None) == naive
+    )
+    second_valid = (
+        second.astimezone(UTC).astimezone(zone).replace(tzinfo=None) == naive
+    )
+    if not first_valid and not second_valid:
         raise CalendarConnectorError(
             "Booking time does not exist because of a daylight-saving transition"
         )
+    if first_valid and second_valid and first.utcoffset() != second.utcoffset():
+        raise CalendarConnectorError(
+            "Booking time is ambiguous because of a daylight-saving transition"
+        )
+    start = first if first_valid else second
 
     end = start + timedelta(minutes=_slot_minutes(config))
     return start, end
