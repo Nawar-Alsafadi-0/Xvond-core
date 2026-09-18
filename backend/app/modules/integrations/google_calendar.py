@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 import hashlib
 import json
 from urllib.parse import quote
@@ -219,7 +219,22 @@ def _local_interval(config: dict, details: dict) -> tuple[datetime, datetime]:
         raise CalendarConnectorError("Booking time must use HH:MM") from exc
 
     zone = _timezone(config)
-    start = datetime.combine(day, clock, tzinfo=zone)
+    naive = datetime.combine(day, clock)
+    start = naive.replace(tzinfo=zone, fold=0)
+    alternate = naive.replace(tzinfo=zone, fold=1)
+
+    # Reject local times that are ambiguous or do not exist during DST changes
+    # rather than silently booking a different instant than the customer chose.
+    if start.utcoffset() != alternate.utcoffset():
+        raise CalendarConnectorError(
+            "Booking time is ambiguous because of a daylight-saving transition"
+        )
+    roundtrip = start.astimezone(UTC).astimezone(zone).replace(tzinfo=None)
+    if roundtrip != naive:
+        raise CalendarConnectorError(
+            "Booking time does not exist because of a daylight-saving transition"
+        )
+
     end = start + timedelta(minutes=_slot_minutes(config))
     return start, end
 
@@ -360,6 +375,17 @@ def _event_lookup(config: dict, event_id: str) -> dict | None:
     return _parse_google_response(result, context="Google Calendar event lookup")
 
 
+def _calendar_lock_scope(config: dict) -> str:
+    identity = (
+        str(config.get("client_id") or "").strip()
+        or _access_token(config)
+        or str(config.get("refresh_token") or "").strip()
+        or "unconfigured"
+    )
+    source = f"{_provider(config)}:{_calendar_id(config)}:{identity}"
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()[:24]
+
+
 def google_calendar_create(
     config: dict,
     payload: dict,
@@ -374,9 +400,7 @@ def google_calendar_create(
     if not isinstance(details, dict):
         details = {}
     start, end = _local_interval(config, details)
-    calendar_scope = hashlib.sha256(
-        _calendar_id(config).encode("utf-8")
-    ).hexdigest()[:16]
+    calendar_scope = _calendar_lock_scope(config)
     slot_claim = (
         f"google_calendar_slot:{calendar_scope}:"
         f"{start.isoformat()}:{end.isoformat()}"
