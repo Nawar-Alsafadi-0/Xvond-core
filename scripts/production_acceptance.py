@@ -19,6 +19,7 @@ from backend.app.core.error_safety import safe_error_label
 from backend.app.core.n8n_gateway import n8n_gateway
 from backend.app.core.readiness import company_readiness
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
+from backend.app.modules.automation.scheduler_health import automation_scheduler_health
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.channels.whatsapp_models import WhatsAppOutboundDelivery
 from backend.app.modules.channels.whatsapp_queue import whatsapp_job_queue
@@ -185,6 +186,23 @@ def check_release(
             "dead": int(queue_stats.get("dead", 0) or 0),
             **({"error": queue_stats["error"]} if queue_stats.get("error") else {}),
         }
+
+        try:
+            scheduler_status = automation_scheduler_health.status()
+            checks["automation_scheduler"] = {
+                "ok": bool(
+                    scheduler_status.get("configured")
+                    and scheduler_status.get("active")
+                ),
+                **scheduler_status,
+            }
+        except Exception as exc:
+            checks["automation_scheduler"] = {
+                "ok": False,
+                "configured": bool(automation_scheduler_health.configured),
+                "active": False,
+                "error": safe_error_label(exc),
+            }
 
         checks["backups"] = _backup_checks()
 
