@@ -209,12 +209,11 @@
           "conditions": [
             {
               "id": "provider-delivery-confirmed",
-              "leftValue": "={{ $json.success }}",
-              "rightValue": true,
+              "leftValue": "={{ String($json.success) }}",
+              "rightValue": "true",
               "operator": {
-                "type": "boolean",
-                "operation": "true",
-                "singleValue": true
+                "type": "string",
+                "operation": "equals"
               }
             }
           ],
