@@ -213,6 +213,7 @@
             "setup_website",
             "setup_whatsapp",
             "setup_webhook",
+            "set_permission",
             "test_employee",
             "launch_employee",
         ]).has(type);
@@ -222,6 +223,7 @@
                 type="button"
                 class="employee-builder-journey-action"
                 data-builder-action="${escapeHtml(type)}"
+                data-builder-key="${escapeHtml(encodeURIComponent(String(action?.key || "")))}"
             >${escapeHtml(action?.label || "Continue")}</button>
         `;
     }
@@ -588,7 +590,7 @@
             }
         }
 
-        async function runJourneyAction(actionType) {
+        async function runJourneyAction(actionType, actionKey = "") {
             if (actionType === "choose_plan") {
                 await loadSubscriptionPlans();
                 document.getElementById("subscription-plans")?.scrollIntoView({behavior: "smooth", block: "center"});
@@ -607,6 +609,15 @@
             }
             if (actionType === "launch_employee") {
                 await launchEmployee(employee.agent_id);
+                return;
+            }
+            if (actionType === "set_permission") {
+                const encodedKey = encodeURIComponent(String(actionKey || ""));
+                const select = document.querySelector(
+                    `[data-owner-permission="${encodedKey}"]`
+                );
+                select?.scrollIntoView({behavior: "smooth", block: "center"});
+                select?.focus();
                 return;
             }
             if (actionType === "manage_knowledge") {
@@ -668,7 +679,10 @@
                 if (button.disabled) return;
                 button.disabled = true;
                 try {
-                    await runJourneyAction(String(button.dataset.builderAction || ""));
+                    await runJourneyAction(
+                        String(button.dataset.builderAction || ""),
+                        decodeURIComponent(String(button.dataset.builderKey || ""))
+                    );
                 } finally {
                     if (document.body.contains(button)) button.disabled = false;
                 }
