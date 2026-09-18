@@ -575,7 +575,7 @@
             if (!selects.length) return;
             try {
                 const result = await api("/manage/integrations");
-                const integrations = (result.integrations || []).filter(item => item.enabled && item.configured);
+                const integrations = (result.integrations || []).filter(item => item.enabled && item.configured && item.validated);
                 const options = '<option value="">Choose a connected system</option>' + integrations.map(item =>
                     `<option value="${Number(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(item.integration_type)}</option>`
                 ).join("");
