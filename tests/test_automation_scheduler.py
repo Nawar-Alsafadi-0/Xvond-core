@@ -16,6 +16,8 @@ from backend.app.modules.automation.schedule import (
     schedule_slot_key,
 )
 from backend.app.modules.automation import scheduler
+from backend.app.modules.automation import runtime as automation_runtime_module
+from backend.app.modules.tools.models import AgentToolAssignment
 
 
 def test_interval_schedule_uses_latest_slot_without_catchup_storm():
@@ -207,3 +209,116 @@ def test_schedule_validation_allows_only_idempotent_execution_path():
         )
     assert exc.value.status_code == 400
     assert "not production-safe yet" in str(exc.value.detail)
+
+
+
+def test_scheduled_connected_action_uses_stable_execution_key_and_ai_output(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    with Session(engine, autoflush=False) as db:
+        db.add(
+            Company(
+                id=1,
+                name="Self Service",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Content employee",
+                system_prompt="Create social content.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "instagram_publish": {
+                            "enabled": True,
+                            "confirmation_required": False,
+                            "description": "Publish generated Instagram content",
+                            "module": "tools",
+                            "destination": {
+                                "type": "integration",
+                                "integration_id": 44,
+                                "operations": {
+                                    "execute": {"method": "POST", "endpoint": "/publish"}
+                                },
+                            },
+                            "availability": {"mode": "none"},
+                        }
+                    }
+                },
+            )
+        )
+        db.commit()
+
+        captured = {}
+
+        def fake_integration_call(
+            db_arg,
+            context,
+            action_type,
+            action,
+            payload,
+            operation,
+            *,
+            idempotency_key=None,
+        ):
+            captured.update(
+                {
+                    "context": context,
+                    "action_type": action_type,
+                    "payload": payload,
+                    "operation": operation,
+                    "idempotency_key": idempotency_key,
+                }
+            )
+            return SimpleNamespace(success=True, data={"published": True}, error=None)
+
+        monkeypatch.setattr(
+            automation_runtime_module,
+            "_integration_call",
+            fake_integration_call,
+        )
+
+        result = automation_runtime_module.automation_runtime.execute_step(
+            db,
+            1,
+            {
+                "type": "scheduled_action",
+                "agent_id": 1,
+                "action_type": "instagram_publish",
+            },
+            {
+                "_xvond_execution_key": "automation:1:9:2026-09-19T08:00:00Z",
+                "ai_response": "Final generated post",
+                "conversation_id": 123,
+                "campaign": "launch",
+            },
+            run_id=9,
+            step_index=1,
+        )
+
+    assert captured["action_type"] == "instagram_publish"
+    assert captured["operation"] == "execute"
+    assert captured["idempotency_key"] == (
+        "automation:1:9:2026-09-19T08:00:00Z:1"
+    )
+    assert captured["payload"]["details"]["ai_response"] == "Final generated post"
+    assert captured["payload"]["details"]["campaign"] == "launch"
+    assert "conversation_id" not in captured["payload"]["details"]
+    assert result["scheduled_action_result"]["runtime"] == "connected_integration"
+    engine.dispose()
