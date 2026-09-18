@@ -1722,6 +1722,15 @@ def bind_self_service_integration(
             raise HTTPException(409, "Communication channels use their dedicated connection flow")
 
         executable_types = {"custom_api", "pos", "crm", "erp", "webhook", "instagram_publish"}
+        required_connector_types = {
+            "instagram_publish": {"instagram_publish"},
+        }
+        allowed_for_requirement = required_connector_types.get(key)
+        if allowed_for_requirement and integration.integration_type not in allowed_for_requirement:
+            raise HTTPException(
+                409,
+                f"{key.replace('_', ' ').title()} requires its packaged Xvond connector.",
+            )
         if integration.integration_type not in executable_types:
             raise HTTPException(
                 409,
