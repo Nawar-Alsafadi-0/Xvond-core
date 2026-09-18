@@ -137,6 +137,27 @@ function ensurePortalPage(item) {
     container.appendChild(section);
 }
 
+async function openInitialPortalPage() {
+    const requestedPage = decodeURIComponent(
+        String(window.location.hash || "").replace(/^#/, "")
+    ).trim();
+    const validRequestedPage = portalNavigation.some(item => item.id === requestedPage)
+        ? requestedPage
+        : null;
+    const selfServiceDraft = (
+        portalOverview?.company?.onboarding_source === "self_service"
+        && Number(portalOverview?.summary?.active_agents || 0) === 0
+        && portalNavigation.some(item => item.id === "employee-builder")
+    );
+    const initialPage = validRequestedPage || (selfServiceDraft ? "employee-builder" : null);
+    if (!initialPage) return;
+
+    const initialButton = [...document.querySelectorAll("#portal-nav .nav-item")]
+        .find(item => item.dataset.page === initialPage);
+    await openPage(initialPage, initialButton || null);
+}
+
+
 function renderPortalNavigation() {
     const nav = document.getElementById("portal-nav");
     if (!nav) return;
@@ -369,24 +390,7 @@ async function startPortal() {
         renderPortalNavigation();
         renderAccountInfo();
         renderDashboard();
-
-        const requestedPage = decodeURIComponent(
-            String(window.location.hash || "").replace(/^#/, "")
-        ).trim();
-        const validRequestedPage = portalNavigation.some(item => item.id === requestedPage)
-            ? requestedPage
-            : null;
-        const selfServiceDraft = (
-            portalOverview?.company?.onboarding_source === "self_service"
-            && Number(portalOverview?.summary?.active_agents || 0) === 0
-            && portalNavigation.some(item => item.id === "employee-builder")
-        );
-        const initialPage = validRequestedPage || (selfServiceDraft ? "employee-builder" : null);
-        if (initialPage) {
-            const initialButton = [...document.querySelectorAll("#portal-nav .nav-item")]
-                .find(item => item.dataset.page === initialPage);
-            await openPage(initialPage, initialButton || null);
-        }
+        await openInitialPortalPage();
     } catch (err) {
         clearSession();
         const error = document.getElementById("login-error");
