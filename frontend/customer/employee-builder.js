@@ -912,9 +912,19 @@
                         && item.requirement_keys.includes(requirementKey)
                         && item.execution_adapter
                     );
+                    const generic = integrations.filter(item =>
+                        item.generic_requirements === true && item.execution_adapter
+                    );
+                    const allowGenericAlternatives = packaged.some(item =>
+                        item.allow_generic_alternatives === true
+                    );
                     const compatible = packaged.length
-                        ? packaged
-                        : integrations.filter(item => item.generic_requirements === true && item.execution_adapter);
+                        ? (
+                            allowGenericAlternatives
+                                ? [...packaged, ...generic.filter(item => !packaged.some(packagedItem => packagedItem.id === item.id))]
+                                : packaged
+                        )
+                        : generic;
                     const options = '<option value="">Choose a connected system</option>' + compatible.map(item =>
                         `<option value="${Number(item.id)}" data-integration-type="${escapeHtml(item.integration_type)}" data-operation-endpoints="${item.operation_endpoints === true ? "true" : "false"}">${escapeHtml(item.name)} · ${escapeHtml(item.integration_type)}</option>`
                     ).join("");
