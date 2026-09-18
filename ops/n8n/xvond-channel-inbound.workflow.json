@@ -97,7 +97,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const result = $input.first().json;\nif (!result || result.success !== true) {\n  return [{json:{success:false,_dispatch:'no_reply',error:'Xvond channel execution failed',data:result || null}}];\n}\nconst reply = String(result.reply || '').trim();\nif (!reply || result.mode !== 'ai') {\n  return [{json:{...result,_dispatch:'no_reply'}}];\n}\nlet registry = {};\ntry { registry = JSON.parse($env.XVOND_CHANNEL_ROUTES_JSON || '{}'); }\ncatch (_e) { return [{json:{success:false,_dispatch:'no_reply',error:'Channel route registry is invalid',data:{channel_id:result.channel_id}}}]; }\nconst routeKey = `${result.company_id}:${result.connection_key}`;\nconst target = registry[routeKey];\nif (!target || target.type !== 'webhook' || typeof target.url !== 'string' || !target.url.startsWith('https://')) {\n  return [{json:{success:false,_dispatch:'no_reply',error:'Managed channel route is not configured',data:{channel_id:result.channel_id,route_key:routeKey}}}];\n}\nreturn [{json:{\n  ...result,\n  _dispatch:'provider_reply',\n  route_key:routeKey,\n  provider_url:target.url,\n  provider_secret:target.secret || '',\n  request_id:`channel-reply:${result.channel_id}:${result.external_message_id}`,\n  outbound:{\n    channel_id:result.channel_id,\n    channel_type:result.channel_type,\n    external_contact_id:result.external_contact_id,\n    message:reply,\n    idempotency_key:`channel-reply:${result.channel_id}:${result.external_message_id}`\n  }\n}}];"
+        "jsCode": "const result = $input.first().json;\nif (!result || result.success !== true) {\n  return [{json:{success:false,_dispatch:'no_reply',error:'Xvond channel execution failed',data:result || null}}];\n}\nconst reply = String(result.reply || '').trim();\nif (!reply || result.mode !== 'ai') {\n  return [{json:{...result,_dispatch:'no_reply'}}];\n}\nlet registry = {};\ntry { registry = JSON.parse($env.XVOND_CHANNEL_ROUTES_JSON || '{}'); }\ncatch (_e) { return [{json:{success:false,_dispatch:'no_reply',error:'Channel route registry is invalid',data:{channel_id:result.channel_id}}}]; }\nconst routeKey = `${result.company_id}:${result.connection_key}`;\nconst target = registry[routeKey];\nif (!target || target.type !== 'webhook' || typeof target.url !== 'string' || !target.url.startsWith('https://')) {\n  return [{json:{success:false,_dispatch:'no_reply',error:'Managed channel route is not configured',data:{channel_id:result.channel_id,route_key:routeKey}}}];\n}\nreturn [{json:{\n  ...result,\n  _dispatch:'provider_reply',\n  route_key:routeKey,\n  request_id:`channel-reply:${result.channel_id}:${result.external_message_id}`,\n  outbound:{\n    channel_id:result.channel_id,\n    channel_type:result.channel_type,\n    external_contact_id:result.external_contact_id,\n    message:reply,\n    idempotency_key:`channel-reply:${result.channel_id}:${result.external_message_id}`\n  }\n}}];"
       },
       "id": "prepare-channel-reply",
       "name": "Prepare Channel Reply",
@@ -144,7 +144,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $json.provider_url }}",
+        "url": "={{ JSON.parse($env.XVOND_CHANNEL_ROUTES_JSON || '{}')[$json.route_key].url }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -154,7 +154,7 @@
             },
             {
               "name": "X-Xvond-Channel-Secret",
-              "value": "={{ $json.provider_secret }}"
+              "value": "={{ JSON.parse($env.XVOND_CHANNEL_ROUTES_JSON || '{}')[$json.route_key].secret || '' }}"
             },
             {
               "name": "X-Xvond-Request-ID",
