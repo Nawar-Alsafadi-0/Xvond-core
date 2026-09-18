@@ -270,7 +270,9 @@ def test_completed_payment_webhook_activates_once(payment_database, monkeypatch)
         assert str(subscription.current_period_end) == "2026-10-18 12:00:00"
         assert checkout.status == "completed"
         assert checkout.provider_subscription_id == "sub_test_123"
-        assert db.query(ServicePaymentEvent).count() == 1
+        event = db.query(ServicePaymentEvent).one()
+        assert event.company_id == 1
+        assert event.service_checkout_id == checkout.id
         entitlement, plan = service_limits.entitlement(db, 1, "ai_agents")
         assert entitlement.id == subscription_id
         assert plan.id == 2
