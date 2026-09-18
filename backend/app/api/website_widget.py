@@ -18,7 +18,10 @@ from backend.app.core.dependencies import require_customer_manager, require_xvon
 from backend.app.models.company import Company
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.models import AIAgent
-from backend.app.modules.ai_agent.self_service_policy import is_self_service_company
+from backend.app.modules.ai_agent.self_service_policy import (
+    assert_self_service_channel_selected,
+    is_self_service_company,
+)
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.channels.catalog import validate_channel_config
@@ -256,6 +259,12 @@ def _customer_self_service_agent(
     company = db.query(Company).filter(Company.id == current_user.company_id).first()
     if not is_self_service_company(company):
         raise HTTPException(409, "Website Self-Service setup is only available to Self-Service workspaces")
+    assert_self_service_channel_selected(
+        db,
+        company=company,
+        agent=agent,
+        channel_type="website",
+    )
     return company, agent
 
 
