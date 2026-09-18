@@ -370,15 +370,20 @@ def test_compiler_smart_intake_keeps_known_facts_and_asks_only_for_missing_requi
         "working_hours",
         "booking_capacity",
     ]
-    context = next(x for x in spec["requirements"] if x["key"] == "employee_context")
-    assert context["status"] == "customer_input_required"
-    assert context["customer_inputs"] == ["working_hours", "booking_capacity"]
-    assert context["customer_input_labels"] == {
-        "working_hours": "أوقات الدوام",
-        "booking_capacity": "سعة الحجز",
+    booking = next(x for x in spec["requirements"] if x["key"] == "booking")
+    assert booking["fulfillment_mode"] == "xvond_internal"
+    assert booking["status"] == "customer_input_required"
+    assert set(booking["customer_inputs"]) == {
+        "working_days",
+        "opening_time",
+        "closing_time",
+        "slot_minutes",
+        "capacity",
     }
-    assert "business_name" not in context["customer_inputs"]
-    assert "employee_context" in spec["setup_required"]
+    assert "employee_context" not in {
+        item["key"] for item in spec["requirements"]
+    }
+    assert spec["setup_required"] == ["booking", "whatsapp"]
 
 
 def test_compiled_runtime_prompt_includes_grounded_job_brief_context():
