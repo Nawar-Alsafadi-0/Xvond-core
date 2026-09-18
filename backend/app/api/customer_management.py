@@ -40,6 +40,14 @@ from backend.app.modules.integrations.catalog import (
     validate_integration_config,
 )
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.integrations.email_smtp import (
+    EmailConnectorError,
+    validate_smtp_connection,
+)
+from backend.app.modules.integrations.email_imap import (
+    EmailReadConnectorError,
+    validate_imap_connection,
+)
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.audit.service import audit_service
@@ -71,6 +79,18 @@ def _validate_live_connection(item: CompanyIntegration) -> dict:
             "mode": "safe_url_validation",
             "url": url,
         }
+
+    if integration_type == "email_imap":
+        try:
+            return validate_imap_connection(config, timeout=10.0)
+        except EmailReadConnectorError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    if integration_type == "email_smtp":
+        try:
+            return validate_smtp_connection(config, timeout=10.0)
+        except EmailConnectorError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     if integration_type == "instagram_publish":
         instagram_user_id = str(config.get("instagram_user_id") or "").strip()
@@ -165,7 +185,22 @@ def _store_validation_evidence(item: CompanyIntegration, evidence: dict) -> None
     item.config = plain
 
 
-def _integration_bound_agent_ids(
+def _spec_uses_integration(spec: dict | None, integration_id: int) -> bool:
+    if not isinstance(spec, dict):
+        return False
+    for requirement in spec.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        try:
+            bound_id = int(requirement.get("integration_id") or 0)
+        except (TypeError, ValueError):
+            bound_id = 0
+        if bound_id == int(integration_id):
+            return True
+    return False
+
+
+def _runtime_assignment_agent_ids(
     db,
     *,
     company_id: int,
@@ -195,9 +230,23 @@ def _integration_bound_agent_ids(
                 bound_id = 0
             if bound_id == int(integration_id) and row.agent_id not in agent_ids:
                 agent_ids.append(row.agent_id)
+    return agent_ids
 
-    # The compiled employee contract remains authoritative even if an action
-    # assignment is temporarily missing or awaiting repair.
+
+def _integration_binding_agent_ids(
+    db,
+    *,
+    company_id: int,
+    integration_id: int,
+) -> tuple[list[int], list[int]]:
+    """Return (live/current binding ids, pending-revision binding ids)."""
+    live_ids = _runtime_assignment_agent_ids(
+        db,
+        company_id=company_id,
+        integration_id=integration_id,
+    )
+    pending_ids: list[int] = []
+
     configs = (
         db.query(AgentConfig)
         .join(AIAgent, AIAgent.id == AgentConfig.agent_id)
@@ -207,18 +256,41 @@ def _integration_bound_agent_ids(
     for config in configs:
         settings_value = config.settings if isinstance(config.settings, dict) else {}
         builder = settings_value.get("employee_builder")
-        spec = builder.get("compiled_spec") if isinstance(builder, dict) else None
-        requirements = spec.get("requirements") if isinstance(spec, dict) else []
-        for requirement in requirements or []:
-            if not isinstance(requirement, dict):
-                continue
-            try:
-                bound_id = int(requirement.get("integration_id") or 0)
-            except (TypeError, ValueError):
-                bound_id = 0
-            if bound_id == int(integration_id) and config.agent_id not in agent_ids:
-                agent_ids.append(config.agent_id)
-    return agent_ids
+        if not isinstance(builder, dict):
+            continue
+        if (
+            _spec_uses_integration(builder.get("compiled_spec"), integration_id)
+            and config.agent_id not in live_ids
+        ):
+            live_ids.append(config.agent_id)
+
+        pending = builder.get("pending_revision")
+        pending_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else None
+        )
+        if (
+            _spec_uses_integration(pending_spec, integration_id)
+            and config.agent_id not in pending_ids
+        ):
+            pending_ids.append(config.agent_id)
+
+    return live_ids, pending_ids
+
+
+def _integration_bound_agent_ids(
+    db,
+    *,
+    company_id: int,
+    integration_id: int,
+) -> list[int]:
+    live_ids, pending_ids = _integration_binding_agent_ids(
+        db,
+        company_id=company_id,
+        integration_id=integration_id,
+    )
+    return list(dict.fromkeys([*live_ids, *pending_ids]))
 
 
 def _integration_bound(db, *, company_id: int, integration_id: int) -> bool:
@@ -237,52 +309,76 @@ def _invalidate_bound_integration_previews(
     company_id: int,
     integration_id: int,
 ) -> int:
-    """Invalidate draft evidence before a bound connection is changed."""
+    """Invalidate only the build evidence that depends on a changed connection."""
 
-    agent_ids = _integration_bound_agent_ids(
+    live_ids, pending_ids = _integration_binding_agent_ids(
         db,
         company_id=company_id,
         integration_id=integration_id,
     )
-    if not agent_ids:
+    all_ids = list(dict.fromkeys([*live_ids, *pending_ids]))
+    if not all_ids:
         return 0
 
-    agents = (
-        db.query(AIAgent)
-        .filter(
-            AIAgent.company_id == company_id,
-            AIAgent.id.in_(agent_ids),
+    if live_ids:
+        live_agents = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.company_id == company_id,
+                AIAgent.id.in_(live_ids),
+            )
+            .all()
         )
-        .all()
-    )
-    if any(agent.enabled for agent in agents):
-        raise HTTPException(
-            409,
-            "Deactivate every AI employee using this connected system before changing its configuration.",
-        )
+        if any(agent.enabled for agent in live_agents):
+            raise HTTPException(
+                409,
+                "This connected system is used by the live employee. Stage a revision that removes or replaces the connection before changing it.",
+            )
 
     changed = 0
-    configs = db.query(AgentConfig).filter(AgentConfig.agent_id.in_(agent_ids)).all()
+    configs = db.query(AgentConfig).filter(AgentConfig.agent_id.in_(all_ids)).all()
     for config in configs:
         settings_value = dict(config.settings or {})
         stored_builder = settings_value.get("employee_builder")
         if not isinstance(stored_builder, dict):
             continue
         builder = dict(stored_builder)
-        had_evidence = bool(
-            builder.get("last_tested_at")
-            or builder.get("last_tested_compiled_at")
-        )
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+
+        if config.agent_id in live_ids:
+            had_live_evidence = bool(
+                builder.get("last_tested_at")
+                or builder.get("last_tested_compiled_at")
+            )
+            builder.pop("last_tested_at", None)
+            builder.pop("last_tested_compiled_at", None)
+            if had_live_evidence:
+                changed += 1
+
+        if config.agent_id in pending_ids:
+            pending = builder.get("pending_revision")
+            if isinstance(pending, dict):
+                pending = dict(pending)
+                had_pending_evidence = bool(
+                    pending.get("last_tested_at")
+                    or pending.get("last_tested_compiled_at")
+                )
+                pending.pop("last_tested_at", None)
+                pending.pop("last_tested_compiled_at", None)
+                if isinstance(pending.get("compiled_spec"), dict):
+                    pending["status"] = "built"
+                builder["pending_revision"] = pending
+                if had_pending_evidence:
+                    changed += 1
+
         settings_value["employee_builder"] = builder
         config.settings = settings_value
-        if had_evidence:
-            changed += 1
+
     return changed
 
 
+
 def _serialize_integration(item: CompanyIntegration) -> dict:
+    definition = get_integration_definition(item.integration_type) or {}
     try:
         configured = validate_integration_config(
             item.integration_type,
@@ -295,6 +391,10 @@ def _serialize_integration(item: CompanyIntegration) -> dict:
         "id": item.id,
         "integration_type": item.integration_type,
         "name": item.name,
+        "execution_adapter": definition.get("execution_adapter"),
+        "requirement_keys": list(definition.get("requirement_keys") or []),
+        "generic_requirements": bool(definition.get("generic_requirements") is True),
+        "operation_endpoints": bool(definition.get("operation_endpoints") is True),
         "config": public_config(item.config),
         "configured_secret_fields": configured_secret_fields(item.config),
         "configured": configured,

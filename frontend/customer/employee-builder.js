@@ -907,21 +907,25 @@
                 const integrations = (result.integrations || []).filter(item => item.enabled && item.configured && item.validated);
                 for (const select of selects) {
                     const requirementKey = decodeURIComponent(String(select.dataset.integrationSelect || ""));
-                    const allowedTypes = requirementKey === "instagram_publish"
-                        ? new Set(["instagram_publish"])
-                        : null;
-                    const compatible = allowedTypes
-                        ? integrations.filter(item => allowedTypes.has(String(item.integration_type || "")))
-                        : integrations;
+                    const packaged = integrations.filter(item =>
+                        Array.isArray(item.requirement_keys)
+                        && item.requirement_keys.includes(requirementKey)
+                        && item.execution_adapter
+                    );
+                    const compatible = packaged.length
+                        ? packaged
+                        : integrations.filter(item => item.generic_requirements === true && item.execution_adapter);
                     const options = '<option value="">Choose a connected system</option>' + compatible.map(item =>
-                        `<option value="${Number(item.id)}" data-integration-type="${escapeHtml(item.integration_type)}">${escapeHtml(item.name)} · ${escapeHtml(item.integration_type)}</option>`
+                        `<option value="${Number(item.id)}" data-integration-type="${escapeHtml(item.integration_type)}" data-operation-endpoints="${item.operation_endpoints === true ? "true" : "false"}">${escapeHtml(item.name)} · ${escapeHtml(item.integration_type)}</option>`
                     ).join("");
                     select.innerHTML = options;
                     const syncEndpointFields = () => {
                         const encodedKey = String(select.dataset.integrationSelect || "");
                         const wrapper = document.querySelector(`[data-integration-endpoint-fields="${encodedKey}"]`);
-                        const selectedType = String(select.selectedOptions?.[0]?.dataset?.integrationType || "");
-                        if (wrapper) wrapper.classList.toggle("hidden", selectedType === "instagram_publish");
+                        const needsEndpoints = String(
+                            select.selectedOptions?.[0]?.dataset?.operationEndpoints || "false"
+                        ) === "true";
+                        if (wrapper) wrapper.classList.toggle("hidden", !needsEndpoints);
                     };
                     select.addEventListener("change", syncEndpointFields);
                     syncEndpointFields();

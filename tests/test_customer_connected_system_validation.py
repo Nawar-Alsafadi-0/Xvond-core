@@ -341,4 +341,6 @@ def test_config_change_invalidates_preview_and_is_blocked_while_live(
         )
 
     assert exc.value.status_code == 409
-    assert "Deactivate every AI employee" in str(exc.value.detail)
+    detail = str(exc.value.detail).lower()
+    assert "live employee" in detail
+    assert "stage a revision" in detail
