@@ -73,7 +73,10 @@ def test_public_channel_catalog_exposes_delivery_truth_without_configs_or_secret
 
     assert items["website"]["availability"] == "self_service_live"
     assert items["voice"]["availability"] == "xvond_managed_live"
-    assert items["instagram"]["availability"] == "xvond_managed_live"
+    assert items["telegram"]["availability"] == "xvond_managed_live"
+    assert items["telegram"]["packaged_provider"] is True
+    assert items["instagram"]["availability"] == "xvond_managed_custom"
+    assert items["instagram"]["packaged_provider"] is False
     assert items["xvond"]["availability"] == "built_in"
 
     for item in payload["channels"]:
@@ -117,6 +120,7 @@ def test_compiler_cached_channel_view_uses_registry_delivery_truth():
     assert rows["telegram"]["self_service_connection_status"] == "xvond_managed_available"
     assert rows["telegram"]["channel_delivery"]["runtime_adapter"] == "xvond_managed"
     assert "n8n" not in str(rendered).lower()
+    assert rows["instagram_dm"]["self_service_connection_status"] == "xvond_custom_provider_setup"
     assert rows["instagram_dm"]["channel_delivery"]["type"] == "instagram"
     assert rows["email_send"]["self_service_connection_status"] == "xvond_adapter_required"
 
@@ -198,12 +202,16 @@ def test_only_real_managed_runtime_can_be_prepared_before_launch(monkeypatch):
         assert "telegram" in prepared
     engine.dispose()
 
-def test_managed_channels_share_one_xvond_runtime_adapter():
+def test_managed_channels_share_one_xvond_runtime_adapter_but_provider_packaging_is_truthful():
     for key in ("telegram", "instagram", "messenger", "email", "sms", "slack", "teams", "custom"):
         capability = get_channel_capability(key)
         assert capability["runtime_adapter"] == N8N_CHANNEL_ADAPTER
         assert capability["runtime_state"] == CHANNEL_RUNTIME_LIVE
         assert capability["setup_mode"] == CHANNEL_SETUP_MANAGED
+
+    assert get_channel_capability("telegram")["packaged_provider"] is True
+    for key in ("instagram", "messenger", "email", "sms", "slack", "teams", "custom"):
+        assert get_channel_capability(key)["packaged_provider"] is False
 
 
 def test_managed_gateway_channel_requires_connected_provisioning():
