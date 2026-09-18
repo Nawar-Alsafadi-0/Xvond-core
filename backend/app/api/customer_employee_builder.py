@@ -1261,7 +1261,36 @@ def save_self_service_setup_answer(
         customer_inputs = dict(compiled_value.get("customer_inputs") or {})
         customer_inputs[key] = answer_value
         compiled_value["customer_inputs"] = customer_inputs
+
+        # Customer input is a build dependency, not a dead-end form. Once all
+        # declared fields are supplied, advance the requirement back into its
+        # declared build stage and re-provision the runtime capability.
+        requirements = [
+            dict(item) if isinstance(item, dict) else item
+            for item in (compiled_value.get("requirements") or [])
+        ]
+        for item in requirements:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("key") or "").strip().lower() != key:
+                continue
+            next_status = str(item.get("after_input_status") or "").strip().lower()
+            if next_status:
+                item["status"] = next_status
+                item["delivery_mode"] = (
+                    "compose" if next_status == "xvond_build" else item.get("delivery_mode")
+                )
+            break
+        compiled_value["requirements"] = requirements
+
+        compiled_value, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=agent.id,
+            spec=compiled_value,
+        )
         builder["compiled_spec"] = compiled_value
+        builder["delivery"] = delivery
+        builder["missing_information"] = list(compiled_value.get("setup_required") or [])
         settings_value["employee_builder"] = builder
         config.settings = settings_value
 
@@ -1275,6 +1304,7 @@ def save_self_service_setup_answer(
             "status": "saved",
             "agent_id": agent.id,
             "requirement_key": key,
+            "compiled_spec": self_service_spec_view(compiled_value),
             "readiness": self_service_readiness(
                 db,
                 company=company,
