@@ -687,6 +687,6 @@ def test_web_research_is_native_browser_ability_without_fake_action_setup():
     assert requirement["status"] == "available"
     assert requirement["delivery_mode"] == "native"
     assert requirement["primitives"] == ["browser_web"]
-    assert requirement.get("execution_plan") is None
+    assert requirement.get("execution_plan") == []
     assert "web_research" in spec["ready_requirements"]
     assert "web_research" not in spec["build_required"]
