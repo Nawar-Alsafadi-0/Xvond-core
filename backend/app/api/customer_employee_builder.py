@@ -393,10 +393,7 @@ def _clear_generated_self_service_build(db, *, company_id: int, agent_id: int) -
 
     workflows = (
         db.query(AutomationWorkflow)
-        .filter(
-            AutomationWorkflow.company_id == company_id,
-            AutomationWorkflow.trigger_type == "schedule",
-        )
+        .filter(AutomationWorkflow.company_id == company_id)
         .all()
     )
     for workflow in workflows:
