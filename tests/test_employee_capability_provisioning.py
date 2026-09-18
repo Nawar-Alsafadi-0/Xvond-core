@@ -99,11 +99,17 @@ def _assignment(db):
     return db.query(AgentToolAssignment).filter_by(agent_id=1, tool_name="action_request").one()
 
 
-def _cache(factory, spec):
+def _cache(factory, spec, owner_permissions=None):
     with factory() as db:
         config = db.query(AgentConfig).filter_by(agent_id=1).one()
         settings = deepcopy(config.settings)
-        settings["employee_builder"].update({"compiled_spec": spec, "compiled_at": "original-time"})
+        settings["employee_builder"].update(
+            {
+                "compiled_spec": spec,
+                "compiled_at": "original-time",
+                "owner_permissions": dict(owner_permissions or {}),
+            }
+        )
         config.settings = settings
         db.commit()
 
@@ -373,7 +379,11 @@ def test_stored_contract_reaches_generic_runtime_and_fails_closed_without_plan(d
     factory, _ = database
     payload = deepcopy(PAYLOAD)
     payload["permissions"] = [{"action": KEY, "mode": "automatic"}]
-    _cache(factory, normalize_compiled_spec(payload, job_brief=BRIEF))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=BRIEF),
+        owner_permissions={KEY: "automatic"},
+    )
     api.compile_employee(1, USER)
     captured = []
 
@@ -474,7 +484,7 @@ def test_self_service_recurring_capability_provisions_one_real_schedule_workflow
         db.commit()
 
     spec = normalize_compiled_spec(payload, job_brief=brief)
-    _cache(factory, spec)
+    _cache(factory, spec, owner_permissions={KEY: "automatic"})
     result = api.compile_employee(1, USER)
 
     requirement = result["spec"]["requirements"][0]
@@ -541,7 +551,11 @@ def test_self_service_content_generation_schedule_builds_ai_then_action(database
         company.onboarding_source = "self_service"
         db.commit()
 
-    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={KEY: "automatic"},
+    )
     result = api.compile_employee(1, USER)
     requirement = result["spec"]["requirements"][0]
 
@@ -686,7 +700,11 @@ def test_self_service_media_generation_schedule_builds_ai_media_then_action(data
         company.onboarding_source = "self_service"
         db.commit()
 
-    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={KEY: "automatic"},
+    )
     result = api.compile_employee(1, USER)
     requirement = result["spec"]["requirements"][0]
 
@@ -959,7 +977,11 @@ def test_self_service_daily_schedule_inherits_workspace_timezone(database):
         db.add(CompanyProfile(company_id=1, timezone="Asia/Muscat"))
         db.commit()
 
-    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={KEY: "automatic"},
+    )
     result = api.compile_employee(1, USER)
     requirement = result["spec"]["requirements"][0]
 
@@ -1366,8 +1388,9 @@ def test_live_employee_cannot_escalate_owner_permission_to_automatic(database):
         assert action["confirmation_required"] is True
 
 
-def test_paused_employee_owner_grant_becomes_authoritative_runtime_policy(database):
+def test_paused_employee_owner_grant_becomes_authoritative_runtime_policy(database, monkeypatch):
     factory, _ = database
+    monkeypatch.setattr(api, "self_service_readiness", lambda *args, **kwargs: {})
     _seed_owner_permission_contract(factory, live=False)
 
     result = api.set_self_service_permission(
