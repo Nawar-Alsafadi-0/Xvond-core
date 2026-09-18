@@ -18,6 +18,7 @@ from backend.app.modules.billing.service_models import ServicePlan, ServiceSubsc
 from backend.app.modules.channels.catalog import validate_channel_config
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
+from backend.app.modules.knowledge.models import AgentKnowledge, KnowledgeDocument
 
 
 SELF_SERVICE_SOURCE = "self_service"
@@ -292,9 +293,53 @@ def self_service_channel_activation_blockers(
     return blockers
 
 
-def _execution_blockers(spec: dict, *, resolved_channels: list[str]) -> list[str]:
+def _resolved_customer_requirement_keys(
+    db,
+    *,
+    company_id: int,
+    agent_id: int,
+) -> set[str]:
+    resolved: set[str] = set()
+    knowledge_count = (
+        db.query(AgentKnowledge)
+        .join(KnowledgeDocument, KnowledgeDocument.id == AgentKnowledge.document_id)
+        .filter(
+            AgentKnowledge.agent_id == agent_id,
+            AgentKnowledge.enabled.is_(True),
+            KnowledgeDocument.company_id == company_id,
+            KnowledgeDocument.enabled.is_(True),
+        )
+        .count()
+    )
+    if knowledge_count > 0:
+        resolved.add("knowledge")
+    return resolved
+
+
+def _self_service_provider_ready(db, *, company_id: int, agent: AIAgent) -> bool:
+    if not settings.is_production:
+        return True
+    try:
+        selections = runtime_selections(
+            db,
+            company_id,
+            agent.provider,
+            agent.model,
+        )
+    except Exception:
+        return False
+    return any(item.provider != "mock" for item in selections)
+
+
+def _execution_blockers(
+    spec: dict,
+    *,
+    resolved_channels: list[str],
+    resolved_requirements: set[str] | None = None,
+) -> list[str]:
     blockers: list[str] = []
     resolved = set(communication_channels(resolved_channels))
+    resolved_customer_requirements = set(resolved_requirements or set())
     for item in spec.get("requirements") or []:
         if not isinstance(item, dict):
             continue
@@ -312,7 +357,12 @@ def _execution_blockers(spec: dict, *, resolved_channels: list[str]) -> list[str
             else:
                 blockers.append(f"{key}: setup required")
             continue
-        if status in {"customer_input_required", "setup_required"}:
+        if status == "customer_input_required":
+            if key.lower() in resolved_customer_requirements:
+                continue
+            blockers.append(f"{key}: setup required")
+            continue
+        if status == "setup_required":
             blockers.append(f"{key}: setup required")
             continue
         if status == "xvond_managed" and execution_status in {
@@ -348,6 +398,7 @@ def evaluate_readiness(
     enabled_channels: list[str],
     compiled_spec: dict | None,
     provisioned: bool,
+    resolved_requirements: set[str] | None = None,
 ) -> dict:
     spec = compiled_spec or {}
     requested = communication_channels(requested_channels)
@@ -385,7 +436,13 @@ def evaluate_readiness(
     for item in missing_channels:
         blockers.append(f"Connect and activate {item} before launch")
 
-    blockers.extend(_execution_blockers(spec, resolved_channels=active))
+    blockers.extend(
+        _execution_blockers(
+            spec,
+            resolved_channels=active,
+            resolved_requirements=resolved_requirements,
+        )
+    )
 
     mode = interaction_mode(spec, slot_channels)
     channels_required = bool(slot_channels)
@@ -455,6 +512,11 @@ def self_service_readiness(
         ]
         resolved_channels = prepared_channels
 
+    resolved_requirements = _resolved_customer_requirement_keys(
+        db,
+        company_id=company.id,
+        agent_id=agent.id,
+    )
     state = evaluate_readiness(
         subscribed=bool(billing["active"]),
         channel_limit=billing["channel_limit"],
@@ -462,7 +524,18 @@ def self_service_readiness(
         enabled_channels=resolved_channels,
         compiled_spec=spec,
         provisioned=provisioned,
+        resolved_requirements=resolved_requirements,
     )
+    provider_ready = _self_service_provider_ready(
+        db,
+        company_id=company.id,
+        agent=agent,
+    )
+    state["provider_ready"] = provider_ready
+    if not provider_ready:
+        state["ready"] = False
+        state["blockers"].append("At least one real AI provider/model must be available")
+    state["resolved_requirements"] = sorted(resolved_requirements)
     state["active_channels"] = active_channels
     state["prepared_channels"] = prepared_channels
     state["subscription"] = {
