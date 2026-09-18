@@ -372,6 +372,26 @@ def test_calendar_lock_scope_separates_different_connections():
     )
     assert first != second
 
+    refresh_a = calendar._calendar_lock_scope(
+        {
+            "provider": "google",
+            "calendar_id": "primary",
+            "timezone": "Asia/Muscat",
+            "client_id": "shared-client",
+            "refresh_token": "refresh-a",
+        }
+    )
+    refresh_b = calendar._calendar_lock_scope(
+        {
+            "provider": "google",
+            "calendar_id": "primary",
+            "timezone": "Asia/Muscat",
+            "client_id": "shared-client",
+            "refresh_token": "refresh-b",
+        }
+    )
+    assert refresh_a != refresh_b
+
 
 def test_calendar_rejects_nonexistent_dst_time():
     config = {
