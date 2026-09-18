@@ -114,12 +114,31 @@ def _create_online_checkout(
         customer_email=customer_email,
         customer_name=customer_name,
     )
+
+    transaction_id = str(result["transaction_id"] or "").strip()
+    provider = str(result["provider"] or "").strip()
+    checkout = (
+        db.query(ServiceCheckout)
+        .filter(
+            ServiceCheckout.provider == provider,
+            ServiceCheckout.provider_transaction_id == transaction_id,
+        )
+        .with_for_update()
+        .first()
+    )
+    if checkout is not None:
+        if checkout.company_id != company.id or checkout.service_subscription_id != subscription.id:
+            raise PaymentGatewayError("Provider transaction is already linked to another Xvond checkout")
+        if result.get("checkout_url") and not checkout.checkout_url:
+            checkout.checkout_url = result["checkout_url"]
+        return checkout
+
     checkout = ServiceCheckout(
         company_id=company.id,
         service_subscription_id=subscription.id,
         plan_id=plan.id,
-        provider=result["provider"],
-        provider_transaction_id=result["transaction_id"],
+        provider=provider,
+        provider_transaction_id=transaction_id,
         provider_subscription_id=result.get("subscription_id"),
         status=result.get("status") or "pending",
         checkout_url=result["checkout_url"],
