@@ -31,6 +31,9 @@ class Settings:
     DATABASE_URL = os.getenv("DATABASE_URL", "")
     REDIS_URL = os.getenv("REDIS_URL", "")
     PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    MEDIA_STORAGE_DIR = os.getenv("MEDIA_STORAGE_DIR", "/tmp/xvond-media").strip() or "/tmp/xvond-media"
+    MEDIA_PUBLIC_TTL_SECONDS = max(300, min(86400, int(os.getenv("MEDIA_PUBLIC_TTL_SECONDS", "7200"))))
+    IMAGE_GENERATION_MODEL = os.getenv("IMAGE_GENERATION_MODEL", "gpt-image-2.5-flare").strip() or "gpt-image-2.5-flare"
     WHATSAPP_HUMAN_HANDOFF_MINUTES = max(5, int(os.getenv("WHATSAPP_HUMAN_HANDOFF_MINUTES", "60")))
     WEBSITE_VISITOR_TOKEN_TTL_SECONDS = max(300, int(os.getenv("WEBSITE_VISITOR_TOKEN_TTL_SECONDS", "2592000")))
     TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").strip().lower() in {"1", "true", "yes", "on"}
