@@ -22,6 +22,7 @@ from backend.app.modules.automation.webhook_auth import (
     automation_webhook_key,
     verify_automation_webhook_key,
 )
+from backend.app.modules.automation import event_dispatch as event_dispatch_module
 from backend.app.modules.tools.models import AgentToolAssignment
 
 
@@ -694,3 +695,89 @@ def test_automation_webhook_key_is_stable_and_scoped(monkeypatch):
         workflow_id=10,
         company_id=20,
     ) is False
+
+
+
+def test_internal_event_dispatch_runs_matching_graph_once(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = lambda: Session(engine, autoflush=False)
+    monkeypatch.setattr(event_dispatch_module, "SessionLocal", factory)
+
+    with factory() as db:
+        db.add(
+            Company(
+                id=1,
+                name="Self Service",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AutomationWorkflow(
+                id=1,
+                company_id=1,
+                name="Booking follow-up",
+                trigger_type="event",
+                trigger_config={"event_name": "booking.created"},
+                steps=[
+                    {
+                        "type": "graph",
+                        "agent_id": 1,
+                        "graph": {
+                            "version": 1,
+                            "nodes": [
+                                {
+                                    "id": "notify",
+                                    "type": "notify",
+                                    "depends_on": [],
+                                    "params": {
+                                        "message": "$input.customer_name",
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                enabled=True,
+            )
+        )
+        db.commit()
+
+    captured = []
+
+    def fake_execute(*, db, company_id, workflow, input_data):
+        captured.append(dict(input_data))
+        run = AutomationRun(
+            company_id=company_id,
+            workflow_id=workflow.id,
+            status="success",
+            input_data=dict(input_data),
+            output_data={},
+            finished_at=datetime(2026, 9, 18, 12, 0),
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        return run
+
+    monkeypatch.setattr(
+        event_dispatch_module.automation_runtime,
+        "execute",
+        fake_execute,
+    )
+
+    result = event_dispatch_module.dispatch_automation_event(
+        company_id=1,
+        event_name="booking.created",
+        event_id="evt-123",
+        payload={"customer_name": "Nawar"},
+    )
+
+    assert result["matched"] == 1
+    assert result["runs"][0]["status"] == "success"
+    assert captured[0]["customer_name"] == "Nawar"
+    assert captured[0]["_xvond_event_name"] == "booking.created"
+    assert captured[0]["_xvond_execution_key"].endswith(":evt-123")
+    engine.dispose()
