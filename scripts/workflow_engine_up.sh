@@ -26,4 +26,4 @@ docker compose -f "$COMPOSE_FILE" --profile workflow up -d workflow-postgres wor
 
 docker compose -f "$COMPOSE_FILE" --profile workflow ps workflow-postgres workflow-engine
 
-echo "Workflow engine containers started. Import ops/n8n/xvond-actions.workflow.json and activate it after HTTPS/reverse-proxy setup is verified."
+echo "Workflow engine containers started. Run scripts/sync_workflow_engine.sh to publish the Xvond Actions and Managed Channels gateways."
