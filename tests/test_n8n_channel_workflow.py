@@ -27,6 +27,7 @@ def test_managed_channel_workflow_uses_xvond_contract_and_hidden_registry():
     assert "idempotency_key" in code
     assert "provider_not_configured" in code
     assert "startsWith('https://')" in code
+    assert "_dispatch: 'send'" in code
 
 
 def test_managed_channel_provider_dispatch_keeps_credentials_in_workflow_plane():
@@ -41,6 +42,7 @@ def test_managed_channel_provider_dispatch_keeps_credentials_in_workflow_plane()
     assert "Idempotency-Key" in names
     assert "X-Xvond-Request-ID" in names
     assert "route_secret" in str(headers)
+    assert "$json.action" in sender["body"]
     assert "access_token" not in json.dumps(payload).lower()
     assert "bot_token" not in json.dumps(payload).lower()
 
@@ -51,5 +53,7 @@ def test_managed_channel_result_is_normalized_before_returning_to_core():
     code = nodes["Normalize Channel Result"]["parameters"]["jsCode"]
 
     assert "provider_message_id" in code
+    assert "provider_check_failed" in code
+    assert "Managed channel provider check failed" in code
     assert "Managed channel provider delivery failed" in code
     assert "provider.stack" not in code
