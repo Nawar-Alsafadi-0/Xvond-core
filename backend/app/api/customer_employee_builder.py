@@ -3,7 +3,6 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.app.api.admin_channels import _activation_blockers
 from backend.app.core.ai.engine import ProviderExecutionError, ai_engine
 from backend.app.core.ai.provider_policy import runtime_selections
 from backend.app.core.company_lifecycle import portal_access_allowed
@@ -38,6 +37,7 @@ from backend.app.modules.ai_agent.profile_models import AIAgentProfile
 from backend.app.modules.ai_agent.self_service_policy import (
     communication_channels,
     is_self_service_company,
+    self_service_channel_activation_blockers,
     self_service_readiness,
 )
 from backend.app.modules.automation.models import AutomationWorkflow
@@ -880,7 +880,12 @@ def launch_self_service_employee(
 
         for channel_type in target_channel_types:
             channel = channels_by_type[channel_type]
-            channel_blockers = _activation_blockers(db, channel)
+            channel_blockers = self_service_channel_activation_blockers(
+                db,
+                company=company,
+                agent=agent,
+                channel=channel,
+            )
             if channel_blockers:
                 raise HTTPException(
                     409,
