@@ -2172,6 +2172,170 @@ def save_self_service_setup_answer(
         db.close()
 
 
+@router.put("/{agent_id}/permissions/{requirement_key}")
+def set_self_service_permission(
+    agent_id: int,
+    requirement_key: str,
+    data: EmployeeBuilderPermissionRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Set an explicit owner grant for one executable employee capability."""
+
+    key = normalize_requirement_key(requirement_key)
+    mode = str(data.mode or "").strip().lower()
+    if not key or len(key) > 120:
+        raise HTTPException(400, "Permission requirement key is invalid")
+    if mode not in OWNER_PERMISSION_MODES:
+        raise HTTPException(
+            400,
+            "Permission mode must be automatic, ask_before, or never",
+        )
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Owner permissions are available only for Self-Service employees",
+            )
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        # Keep the same lock order as compilation/revision.
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        compiled_spec = builder.get("compiled_spec")
+        if not isinstance(compiled_spec, dict):
+            raise HTTPException(409, "Build the employee before changing permissions")
+
+        requirement = next(
+            (
+                item
+                for item in (compiled_spec.get("requirements") or [])
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HTTPException(404, "Permission requirement not found in the current Job Brief")
+
+        action_plan = (
+            (compiled_spec.get("delivery") or {}).get("action_plan")
+            if isinstance(compiled_spec.get("delivery"), dict)
+            else {}
+        )
+        if not isinstance(action_plan, dict) or key not in action_plan:
+            raise HTTPException(
+                409,
+                "This requirement does not expose an executable action permission",
+            )
+
+        current_mode = "ask_before"
+        for permission in compiled_spec.get("permissions") or []:
+            if not isinstance(permission, dict):
+                continue
+            if normalize_requirement_key(permission.get("action")) == key:
+                candidate = str(permission.get("mode") or "ask_before").strip().lower()
+                if candidate in OWNER_PERMISSION_MODES:
+                    current_mode = candidate
+                break
+
+        if agent.enabled and mode == "automatic" and current_mode != "automatic":
+            raise HTTPException(
+                409,
+                detail={
+                    "message": (
+                        "Pause this employee before granting automatic execution. "
+                        "After the permission change, preview-test the updated build "
+                        "before launching it again."
+                    ),
+                    "requires_deactivation": True,
+                },
+            )
+
+        if current_mode == mode and (
+            str((builder.get("owner_permissions") or {}).get(key) or "").strip().lower()
+            == mode
+        ):
+            return {
+                "status": "unchanged",
+                "agent_id": agent.id,
+                "requirement_key": key,
+                "mode": mode,
+                "compiled_spec": self_service_spec_view(compiled_spec),
+                "readiness": self_service_readiness(
+                    db,
+                    company=company,
+                    agent=agent,
+                    config=config,
+                ),
+            }
+
+        builder = _snapshot_builder_version(
+            builder,
+            reason=f"permission:{key}:{mode}",
+            capabilities=dict(config.capabilities or {}),
+        )
+        owner_permissions = dict(builder.get("owner_permissions") or {})
+        owner_permissions[key] = mode
+        builder["owner_permissions"] = owner_permissions
+
+        # Permission changes alter executable behavior and therefore define a
+        # new build identity. Restrictive changes may be applied while live;
+        # automatic escalation was blocked above and must be preview-tested.
+        builder["compiled_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        builder.pop("last_tested_at", None)
+        builder.pop("last_tested_compiled_at", None)
+
+        compiled_value = _store_provisioned_spec(
+            db,
+            company_id=company.id,
+            agent=agent,
+            config=config,
+            settings=settings_value,
+            builder=builder,
+            spec=compiled_spec,
+        )
+
+        db.commit()
+        return {
+            "status": "saved",
+            "agent_id": agent.id,
+            "requirement_key": key,
+            "mode": mode,
+            "compiled_spec": self_service_spec_view(compiled_value),
+            "readiness": self_service_readiness(
+                db,
+                company=company,
+                agent=agent,
+                config=config,
+            ),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @router.post("/{agent_id}/compile")
 def compile_employee(
     agent_id: int,
