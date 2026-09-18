@@ -55,6 +55,8 @@ def normalize_execution_graph(value: Any) -> dict:
             "depends_on": deps,
             "params": deepcopy(params),
         }
+        if "when" in raw:
+            node["when"] = deepcopy(raw.get("when"))
         if raw.get("label"):
             node["label"] = _bounded(raw.get("label"), 200)
         seen.add(node_id)
