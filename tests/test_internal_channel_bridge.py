@@ -8,8 +8,10 @@ from sqlalchemy.orm import Session
 from backend.app.main import app  # noqa: F401 - register all model metadata
 from backend.app.api import internal_channel_bridge as bridge
 from backend.app.core.database.base import Base
+from backend.app.core.config_secrets import reveal_config
 from backend.app.models.company import Company
 from backend.app.modules.ai_agent.models import AIAgent, AIConversation, AIMessage
+from backend.app.modules.channels.acceptance import customer_roundtrip_verified
 from backend.app.modules.channels.models import AgentChannel
 
 
@@ -161,6 +163,8 @@ def test_delivery_confirmation_records_real_roundtrip_evidence(channel_bridge_da
         channel = db.get(AgentChannel, 7)
         assert channel.customer_roundtrip_verified_at is not None
         assert channel.customer_roundtrip_source == "n8n:instagram"
+        assert customer_roundtrip_verified(channel) is True
+        assert customer_roundtrip_verified(reveal_config(channel.config)) is True
 
 
 def test_channel_bridge_rejects_invalid_shared_secret(channel_bridge_database):
