@@ -124,7 +124,7 @@ def test_compiler_cached_channel_view_uses_registry_delivery_truth():
     assert "n8n" not in str(rendered).lower()
     assert rows["instagram_dm"]["self_service_connection_status"] == "xvond_managed_available"
     assert rows["instagram_dm"]["channel_delivery"]["type"] == "instagram"
-    assert rows["email_send"]["self_service_connection_status"] == "xvond_adapter_required"
+    assert rows["email_send"]["self_service_connection_status"] == "self_service_integration_available"
 
 
 def test_managed_channel_requests_are_durable_and_cancel_with_job_contract():
