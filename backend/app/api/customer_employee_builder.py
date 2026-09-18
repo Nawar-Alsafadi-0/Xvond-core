@@ -1899,8 +1899,6 @@ def bind_self_service_integration(
         config = _employee_config_or_404(db, agent)
         db.refresh(config, with_for_update=True)
         db.refresh(agent, with_for_update=True)
-        if agent.enabled:
-            raise HTTPException(409, "Deactivate this employee before changing connected systems")
 
         integration = db.query(CompanyIntegration).filter(
             CompanyIntegration.id == data.integration_id,
@@ -1918,9 +1916,23 @@ def bind_self_service_integration(
 
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
-        compiled_spec = builder.get("compiled_spec")
+        pending = (
+            builder.get("pending_revision")
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        if agent.enabled and pending is None:
+            raise HTTPException(
+                409,
+                "Stage a live revision before changing connected systems",
+            )
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
         if not isinstance(compiled_spec, dict):
-            raise HTTPException(409, "Build the employee before connecting a system")
+            raise HTTPException(409, "Build the employee revision before connecting a system")
 
         requirements = [
             dict(item) if isinstance(item, dict) else item
@@ -2006,6 +2018,34 @@ def bind_self_service_integration(
 
         compiled_value = dict(compiled_spec)
         compiled_value["requirements"] = requirements
+
+        if isinstance(pending, dict):
+            compiled_value["setup_required"] = [
+                item
+                for item in (compiled_value.get("setup_required") or [])
+                if normalize_requirement_key(item) != key
+            ]
+            pending["compiled_spec"] = compiled_value
+            pending.pop("last_tested_at", None)
+            pending.pop("last_tested_compiled_at", None)
+            pending["status"] = "built"
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": "connected_to_pending_revision",
+                "agent_id": agent.id,
+                "requirement_key": key,
+                "integration": {
+                    "id": integration.id,
+                    "name": integration.name,
+                    "type": integration.integration_type,
+                },
+                "compiled_spec": self_service_spec_view(compiled_value),
+                "live_employee_unchanged": True,
+            }
+
         compiled_value, delivery = provision_compiled_capabilities(
             db,
             agent_id=agent.id,
@@ -2096,14 +2136,26 @@ def save_self_service_setup_answer(
         config = _employee_config_or_404(db, agent)
         db.refresh(config, with_for_update=True)
         db.refresh(agent, with_for_update=True)
-        if agent.enabled:
-            raise HTTPException(409, "Deactivate this employee before changing setup data")
 
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
-        compiled_spec = builder.get("compiled_spec")
+        pending = (
+            builder.get("pending_revision")
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        if agent.enabled and pending is None:
+            raise HTTPException(
+                409,
+                "Stage a live revision before changing setup data",
+            )
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
         if not isinstance(compiled_spec, dict):
-            raise HTTPException(409, "Build the employee before providing setup data")
+            raise HTTPException(409, "Build the employee revision before providing setup data")
 
         requirement = next(
             (
@@ -2162,9 +2214,16 @@ def save_self_service_setup_answer(
                 raise HTTPException(400, "Setup value is required")
             answer_value = value
 
-        answers = dict(builder.get("setup_answers") or {})
+        answers = dict(
+            (pending.get("setup_answers") or {})
+            if isinstance(pending, dict)
+            else (builder.get("setup_answers") or {})
+        )
         answers[key] = answer_value
-        builder["setup_answers"] = answers
+        if isinstance(pending, dict):
+            pending["setup_answers"] = answers
+        else:
+            builder["setup_answers"] = answers
 
         compiled_value = dict(compiled_spec)
         customer_inputs = dict(compiled_value.get("customer_inputs") or {})
@@ -2191,6 +2250,28 @@ def save_self_service_setup_answer(
                 )
             break
         compiled_value["requirements"] = requirements
+
+        if isinstance(pending, dict):
+            compiled_value["setup_required"] = [
+                item
+                for item in (compiled_value.get("setup_required") or [])
+                if normalize_requirement_key(item) != key
+            ]
+            pending["compiled_spec"] = compiled_value
+            pending.pop("last_tested_at", None)
+            pending.pop("last_tested_compiled_at", None)
+            pending["status"] = "built"
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": "saved_to_pending_revision",
+                "agent_id": agent.id,
+                "requirement_key": key,
+                "compiled_spec": self_service_spec_view(compiled_value),
+                "live_employee_unchanged": True,
+            }
 
         compiled_value, delivery = provision_compiled_capabilities(
             db,
