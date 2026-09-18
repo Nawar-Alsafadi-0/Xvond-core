@@ -1,7 +1,46 @@
+CHANNEL_RUNTIME_LIVE = "live"
+CHANNEL_RUNTIME_ADAPTER_REQUIRED = "adapter_required"
+
+CHANNEL_SETUP_SELF_SERVICE = "self_service"
+CHANNEL_SETUP_MANAGED = "managed"
+CHANNEL_SETUP_INTERNAL = "internal"
+
+
+CHANNEL_ALIASES = {
+    "instagram_dm": "instagram",
+    "instagram_dms": "instagram",
+    "facebook_messenger": "messenger",
+    "fb_messenger": "messenger",
+    "microsoft_teams": "teams",
+    "ms_teams": "teams",
+    "phone": "voice",
+    "web_chat": "website",
+    "site_chat": "website",
+}
+
+
+INTERNAL_CHANNEL_CATALOG = {
+    "xvond": {
+        "name": "Xvond Workspace",
+        "description": "Built-in Xvond employee workspace",
+        "setup_mode": CHANNEL_SETUP_INTERNAL,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": "xvond_workspace",
+        "customer_selectable": True,
+        "channel_slot": False,
+    },
+}
+
+
 CHANNEL_CATALOG = {
     "whatsapp": {
         "name": "WhatsApp",
         "description": "WhatsApp Business Cloud API",
+        "setup_mode": CHANNEL_SETUP_SELF_SERVICE,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": "meta_whatsapp_cloud",
+        "customer_selectable": True,
+        "channel_slot": True,
         "config_fields": [
             {"name": "phone_number_id", "label": "Phone Number ID", "required": True, "secret": False},
             {"name": "access_token", "label": "Access Token", "required": True, "secret": True},
@@ -18,6 +57,11 @@ CHANNEL_CATALOG = {
     "website": {
         "name": "Website Chat",
         "description": "AI chat widget for customer websites",
+        "setup_mode": CHANNEL_SETUP_SELF_SERVICE,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": "xvond_website_widget",
+        "customer_selectable": True,
+        "channel_slot": True,
         "config_fields": [
             {"name": "allowed_domain", "label": "Allowed Domain", "required": True, "secret": False},
             {"name": "widget_name", "label": "Widget Name", "required": False, "secret": False},
@@ -29,8 +73,13 @@ CHANNEL_CATALOG = {
         ],
     },
     "voice": {
-        "name": "Voice",
-        "description": "AI voice channel",
+        "name": "Voice / Phone",
+        "description": "AI voice calls managed through Xvond",
+        "setup_mode": CHANNEL_SETUP_MANAGED,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": "vapi",
+        "customer_selectable": True,
+        "channel_slot": True,
         "config_fields": [
             {"name": "provider", "label": "Voice Provider", "required": True, "secret": False},
             {"name": "phone_number", "label": "Phone Number", "required": True, "secret": False},
@@ -40,14 +89,84 @@ CHANNEL_CATALOG = {
     },
     "telegram": {
         "name": "Telegram",
-        "description": "Telegram Bot channel",
+        "description": "Telegram bot messaging",
+        "setup_mode": CHANNEL_SETUP_MANAGED,
+        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
+        "runtime_adapter": None,
+        "customer_selectable": True,
+        "channel_slot": True,
         "config_fields": [
             {"name": "bot_token", "label": "Bot Token", "required": True, "secret": True},
         ],
     },
+    "instagram": {
+        "name": "Instagram DM",
+        "description": "Instagram direct-message channel",
+        "setup_mode": CHANNEL_SETUP_MANAGED,
+        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
+        "runtime_adapter": None,
+        "customer_selectable": True,
+        "channel_slot": True,
+        "config_fields": [],
+    },
+    "messenger": {
+        "name": "Facebook Messenger",
+        "description": "Facebook Page Messenger channel",
+        "setup_mode": CHANNEL_SETUP_MANAGED,
+        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
+        "runtime_adapter": None,
+        "customer_selectable": True,
+        "channel_slot": True,
+        "config_fields": [],
+    },
+    "email": {
+        "name": "Email",
+        "description": "Inbound and outbound employee email channel",
+        "setup_mode": CHANNEL_SETUP_MANAGED,
+        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
+        "runtime_adapter": None,
+        "customer_selectable": True,
+        "channel_slot": True,
+        "config_fields": [],
+    },
+    "sms": {
+        "name": "SMS",
+        "description": "SMS messaging channel",
+        "setup_mode": CHANNEL_SETUP_MANAGED,
+        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
+        "runtime_adapter": None,
+        "customer_selectable": True,
+        "channel_slot": True,
+        "config_fields": [],
+    },
+    "slack": {
+        "name": "Slack",
+        "description": "Slack workspace messaging channel",
+        "setup_mode": CHANNEL_SETUP_MANAGED,
+        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
+        "runtime_adapter": None,
+        "customer_selectable": True,
+        "channel_slot": True,
+        "config_fields": [],
+    },
+    "teams": {
+        "name": "Microsoft Teams",
+        "description": "Microsoft Teams messaging channel",
+        "setup_mode": CHANNEL_SETUP_MANAGED,
+        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
+        "runtime_adapter": None,
+        "customer_selectable": True,
+        "channel_slot": True,
+        "config_fields": [],
+    },
     "custom": {
-        "name": "Custom Channel",
-        "description": "Custom customer communication channel",
+        "name": "Custom / API Channel",
+        "description": "Custom customer communication surface",
+        "setup_mode": CHANNEL_SETUP_MANAGED,
+        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
+        "runtime_adapter": None,
+        "customer_selectable": True,
+        "channel_slot": True,
         "config_fields": [
             {"name": "endpoint", "label": "Endpoint", "required": True, "secret": False},
             {"name": "api_key", "label": "API Key", "required": False, "secret": True},
@@ -56,16 +175,63 @@ CHANNEL_CATALOG = {
 }
 
 
+def canonical_channel_type(channel_type: str | None) -> str:
+    value = str(channel_type or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return CHANNEL_ALIASES.get(value, value)
+
+
 def get_channel_definition(channel_type: str):
-    return CHANNEL_CATALOG.get(channel_type)
+    return CHANNEL_CATALOG.get(canonical_channel_type(channel_type))
+
+
+def get_channel_capability(channel_type: str):
+    key = canonical_channel_type(channel_type)
+    if key in INTERNAL_CHANNEL_CATALOG:
+        return {"type": key, **INTERNAL_CHANNEL_CATALOG[key]}
+    definition = CHANNEL_CATALOG.get(key)
+    if definition is None:
+        return None
+    return {"type": key, **definition}
 
 
 def list_channel_definitions():
     return [{"type": key, **value} for key, value in CHANNEL_CATALOG.items()]
 
 
+def list_customer_channel_capabilities():
+    items = [
+        {"type": key, **value}
+        for key, value in {**INTERNAL_CHANNEL_CATALOG, **CHANNEL_CATALOG}.items()
+        if value.get("customer_selectable") is True
+    ]
+    return items
+
+
+def customer_channel_types() -> tuple[str, ...]:
+    return tuple(item["type"] for item in list_customer_channel_capabilities())
+
+
+def live_self_service_channel_types() -> frozenset[str]:
+    return frozenset(
+        item["type"]
+        for item in list_customer_channel_capabilities()
+        if item.get("runtime_state") == CHANNEL_RUNTIME_LIVE
+        and item.get("setup_mode") in {CHANNEL_SETUP_SELF_SERVICE, CHANNEL_SETUP_INTERNAL}
+    )
+
+
+def live_managed_channel_types() -> frozenset[str]:
+    return frozenset(
+        item["type"]
+        for item in list_customer_channel_capabilities()
+        if item.get("runtime_state") == CHANNEL_RUNTIME_LIVE
+        and item.get("setup_mode") == CHANNEL_SETUP_MANAGED
+    )
+
+
 def validate_channel_config(channel_type: str, config: dict):
-    definition = get_channel_definition(channel_type)
+    key = canonical_channel_type(channel_type)
+    definition = get_channel_definition(key)
     if definition is None:
         raise ValueError(f"Unsupported channel type: {channel_type}")
 
@@ -82,7 +248,7 @@ def validate_channel_config(channel_type: str, config: dict):
     # per-channel llm_api_key. Other providers that use the generic voice-turn
     # endpoint must provide an explicit auth_token so that the public endpoint
     # can never become unauthenticated by configuration accident.
-    if channel_type == "voice":
+    if key == "voice":
         provider = str(config.get("provider") or "").strip().lower()
         if provider != "vapi" and not str(config.get("auth_token") or "").strip():
             missing.append("auth_token")

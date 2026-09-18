@@ -5,6 +5,11 @@ import json
 import re
 from typing import Any
 
+from backend.app.modules.channels.catalog import (
+    canonical_channel_type,
+    list_customer_channel_capabilities,
+)
+
 
 COMPILER_VERSION = 4
 
@@ -122,6 +127,24 @@ REQUIREMENT_CATALOG: dict[str, dict[str, Any]] = {
     },
 }
 
+# Communication channels are product capabilities, not arbitrary compiler
+# inventions. Keep their delivery truth in the channel registry and normalize
+# them into the compiler requirement catalog here. Action integrations such as
+# email_send and instagram_publish remain separate requirements above.
+for _channel in list_customer_channel_capabilities():
+    _key = str(_channel.get("type") or "").strip().lower()
+    if not _key or _key == "xvond":
+        continue
+    REQUIREMENT_CATALOG.setdefault(
+        _key,
+        {
+            "kind": "channel",
+            "status": "connection_required",
+            "delivery_mode": "connect",
+            "primitives": ["messaging"],
+        },
+    )
+
 _ALLOWED_KINDS = {
     "tool",
     "integration",
@@ -209,6 +232,7 @@ Rules:
 - Never use a missing Xvond feature as a reason to reject the job. For a novel digital requirement, return it and give it useful generic primitives so Xvond can compose it.
 - Set requires_connection=true only when the customer must connect an external account, grant access or provide credentials for the work to function.
 - Separate reading from acting where permissions differ, e.g. email_read and email_send.
+- Customer-selected communication surfaces must be represented as kind=channel requirements using their channel key. Email as a conversation surface is key=email; reading/sending mailbox work remains email_read/email_send. Instagram DM as a conversation surface is key=instagram; publishing remains instagram_publish.
 - Publishing, sending, purchasing, deleting, booking, changing external data, or other consequential external actions should normally use ask_before unless the customer's brief explicitly says to do them automatically.
 - Monitoring and recurring work must include scheduling/workflow primitives.
 - When the customer explicitly gives a recurring cadence or clock time, include a structured schedule on the requirement. Use kind=interval with every_minutes, kind=daily with hour/minute, or kind=weekly with weekdays (0=Monday..6=Sunday) plus hour/minute. Include timezone only when the customer explicitly gave one; otherwise Xvond will use the workspace timezone. Always include schedule.source_text copied verbatim from the Job Brief words that authorize that cadence/time.
@@ -442,10 +466,14 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         if not isinstance(item, dict):
             continue
         key = normalize_requirement_key(item.get("key"))
+        declared_kind = str(item.get("kind") or "custom").strip().lower()
+        if declared_kind == "channel":
+            key = canonical_channel_type(key)
+            if key == "xvond":
+                key = "xvond_workspace"
         if not key or key in seen_keys:
             continue
         seen_keys.add(key)
-        declared_kind = str(item.get("kind") or "custom").strip().lower()
         if declared_kind not in _ALLOWED_KINDS:
             declared_kind = "custom"
         catalog = REQUIREMENT_CATALOG.get(key)

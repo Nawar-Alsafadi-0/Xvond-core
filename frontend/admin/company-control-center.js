@@ -43,6 +43,37 @@ function wsChannelDetail(channel){
   }
   return `${local} · ${channel.connection_issue||'WhatsApp is not connected to Meta.'}`;
 }
+function wsManagedChannelRequests(agentId){
+  return (xvondWorkspace.data?.channels||[]).filter(channel=>{
+    if(+channel.agent_id!==+agentId)return false;
+    if(['website','whatsapp','voice'].includes(String(channel.channel_type||'')))return false;
+    return channel.setup_mode==='managed';
+  });
+}
+function wsManagedChannelPresentation(channel){
+  const state=String(channel?.config?.provisioning_state||'').toLowerCase();
+  if(channel?.enabled)return {label:'Live',kind:'good'};
+  if(state==='cancelled')return {label:'Cancelled',kind:'neutral'};
+  if(channel?.runtime_state!=='live')return {label:'Adapter required',kind:'bad'};
+  if(state==='connected')return {label:'Ready for launch',kind:'good'};
+  if(state==='requested')return {label:'Requested by Job Brief',kind:'neutral'};
+  return {label:'Xvond setup',kind:'neutral'};
+}
+function wsManagedChannelDetail(channel){
+  const source=String(channel?.config?.request_source||'').replaceAll('_',' ');
+  if(channel?.runtime_state!=='live'){
+    return `Requested${source?` via ${source}`:''}. Keep disabled until Xvond ships and validates the runtime adapter.`;
+  }
+  return `Xvond-managed provisioning${source?` requested via ${source}`:''}. Do not activate until provider/runtime verification is complete.`;
+}
+function renderManagedChannelRequests(agentId){
+  const items=wsManagedChannelRequests(agentId);
+  if(!items.length)return '';
+  return `<div class="workspace-panel" style="margin-top:14px"><div class="workspace-panel-head"><div><h4>Managed Channel Requests</h4><p>Requested by the employee contract. A request is not a live integration.</p></div></div><div class="channel-grid">${items.map(channel=>{
+    const state=wsManagedChannelPresentation(channel);
+    return `<div class="channel-card"><div><span class="channel-name">${f(channel.channel_name||channel.channel_type)}</span>${wsPill(state.label,state.kind)}</div><p>${f(wsManagedChannelDetail(channel))}</p><div class="meta">Runtime: ${f(channel.runtime_state||'unknown')} · Setup: Xvond managed · Local: ${channel.enabled?'Active':'Inactive'}</div></div>`;
+  }).join('')}</div></div>`;
+}
 function wsActiveOperations(){return (xvondWorkspace.data?.requests||[]).filter(x=>!['completed','cancelled'].includes(x.status))}
 function wsEnabledOperationCount(moduleName){return (xvondWorkspace.data?.agentMeta||[]).reduce((sum,row)=>sum+(row.actions||[]).filter(x=>x.enabled===true&&x.module===moduleName).length,0)}
 function wsPill(text,kind='neutral'){return `<span class="workspace-pill ${kind}">${f(text)}</span>`}
@@ -126,7 +157,7 @@ function renderChannelsTab(){
   return `<div class="workspace-panel"><div class="workspace-panel-head"><div><h3>Channels</h3><p>Configuration, local activation and provider connection are reported separately.</p></div></div>${d.agentMeta.length?d.agentMeta.map(row=>{
     const a=row.agent,web=wsChannel(a.id,'website'),wa=wsChannel(a.id,'whatsapp');
     const webState=wsChannelPresentation(web),waState=wsChannelPresentation(wa);
-    return `<div class="channel-employee"><div class="channel-employee-head"><strong>${f(a.name)}</strong><span class="meta">Shared brain, knowledge and actions</span></div><div class="channel-grid"><div class="channel-card"><div><span class="channel-name">Website Chat</span>${wsPill(webState.label,webState.kind)}</div><p>${f(wsChannelDetail(web))}</p><button class="table-button" onclick="openWebsiteChannel(${d.view.company.id},${a.id})">${web?'Website Settings':'Connect Website'}</button></div><div class="channel-card"><div><span class="channel-name">WhatsApp</span>${wsPill(waState.label,waState.kind)}</div><p>${f(wsChannelDetail(wa))}</p><div class="meta">Credentials: ${wa?.configured?'Configured':'Incomplete'} · Local state: ${wa?.enabled?'Active':'Inactive'}</div><div class="agent-actions">${wa?`<button class="table-button" onclick="openWhatsAppSetup(${a.id},${wa.id})">Settings</button>${wa.connected===true?'':`<button class="primary-button" onclick="openMetaWhatsAppConnect(${a.id})">Connect with Meta</button>`}${wa.configured?`<button class="table-button" onclick="setWorkspaceChannelStatus(${wa.id},${!wa.enabled})">${wa.enabled?'Deactivate':'Activate'}</button>`:''}`:`<button class="table-button" onclick="createWhatsAppChannelForEmployee(${d.view.company.id},${a.id})">Connect WhatsApp</button>`}</div></div></div></div>`;
+    return `<div class="channel-employee"><div class="channel-employee-head"><strong>${f(a.name)}</strong><span class="meta">Shared brain, knowledge and actions</span></div><div class="channel-grid"><div class="channel-card"><div><span class="channel-name">Website Chat</span>${wsPill(webState.label,webState.kind)}</div><p>${f(wsChannelDetail(web))}</p><button class="table-button" onclick="openWebsiteChannel(${d.view.company.id},${a.id})">${web?'Website Settings':'Connect Website'}</button></div><div class="channel-card"><div><span class="channel-name">WhatsApp</span>${wsPill(waState.label,waState.kind)}</div><p>${f(wsChannelDetail(wa))}</p><div class="meta">Credentials: ${wa?.configured?'Configured':'Incomplete'} · Local state: ${wa?.enabled?'Active':'Inactive'}</div><div class="agent-actions">${wa?`<button class="table-button" onclick="openWhatsAppSetup(${a.id},${wa.id})">Settings</button>${wa.connected===true?'':`<button class="primary-button" onclick="openMetaWhatsAppConnect(${a.id})">Connect with Meta</button>`}${wa.configured?`<button class="table-button" onclick="setWorkspaceChannelStatus(${wa.id},${!wa.enabled})">${wa.enabled?'Deactivate':'Activate'}</button>`:''}`:`<button class="table-button" onclick="createWhatsAppChannelForEmployee(${d.view.company.id},${a.id})">Connect WhatsApp</button>`}</div></div></div>${renderManagedChannelRequests(a.id)}</div>`;
   }).join(''):wsEmpty('Create an AI employee first')}</div>`;
 }
 

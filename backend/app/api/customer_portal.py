@@ -13,6 +13,12 @@ from backend.app.models.user import User
 from backend.app.modules.ai_agent.models import AIAgent, AIConversation, AIUsage
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
+from backend.app.modules.channels.catalog import (
+    canonical_channel_type,
+    get_channel_capability,
+    live_managed_channel_types,
+    live_self_service_channel_types,
+)
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.customer_ops.models import NotificationEvent
 from backend.app.modules.integrations.models import CompanyIntegration
@@ -27,7 +33,12 @@ from backend.app.modules.tools.business_models import ActionRequest, HumanHandof
 router = APIRouter(prefix="/customer", tags=["Customer Portal"])
 
 MANAGER_ROLES = {"owner", "admin", "manager"}
-LIVE_CUSTOMER_CHANNELS = ("whatsapp", "website", "voice", "instagram")
+LIVE_CUSTOMER_CHANNELS = tuple(
+    sorted(
+        (live_self_service_channel_types() | live_managed_channel_types())
+        - {"xvond"}
+    )
+)
 OPEN_OPERATION_STATES = {
     "pending",
     "awaiting_confirmation",
@@ -39,6 +50,41 @@ OPEN_OPERATION_STATES = {
     "pending_human",
 }
 ACTIVE_HANDOFF_STATES = {"pending", "in_progress"}
+
+
+def _portal_channel_state(channel: AgentChannel) -> dict:
+    channel_type = canonical_channel_type(channel.channel_type)
+    capability = get_channel_capability(channel_type) or {}
+    config = public_config(channel.config)
+    provisioning_state = str(config.get("provisioning_state") or "").strip().lower() or None
+
+    if channel.enabled:
+        status = "live"
+    elif provisioning_state == "connected":
+        status = "ready_for_launch"
+    elif provisioning_state == "requested":
+        status = "xvond_setup"
+    elif provisioning_state == "cancelled":
+        status = "cancelled"
+    elif capability.get("runtime_state") != "live":
+        status = "adapter_required"
+    else:
+        status = "setup_required"
+
+    return {
+        "id": channel.id,
+        "agent_id": channel.agent_id,
+        "type": channel_type,
+        "name": capability.get("name") or channel_type,
+        "enabled": channel.enabled,
+        "setup_mode": capability.get("setup_mode"),
+        "runtime_state": capability.get("runtime_state"),
+        "runtime_adapter": capability.get("runtime_adapter"),
+        "provisioning_state": provisioning_state,
+        "delivery_status": status,
+        "config": config,
+        "configured_secret_fields": configured_secret_fields(channel.config),
+    }
 
 
 def _plain_limit(value):
@@ -331,17 +377,7 @@ def overview(current_user: User = Depends(require_customer_user)):
                 "failed_ai_requests_24h": int(failed_ai_24h),
                 "service_limit_warnings": _limit_warning_count(services),
             },
-            "channels": [
-                {
-                    "id": item.id,
-                    "agent_id": item.agent_id,
-                    "type": item.channel_type,
-                    "enabled": item.enabled,
-                    "config": public_config(item.config),
-                    "configured_secret_fields": configured_secret_fields(item.config),
-                }
-                for item in channels
-            ],
+            "channels": [_portal_channel_state(item) for item in channels],
             "integrations": [
                 {
                     "id": item.id,

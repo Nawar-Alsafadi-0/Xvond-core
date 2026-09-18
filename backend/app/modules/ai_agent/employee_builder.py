@@ -2,6 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from backend.app.modules.channels.catalog import (
+    CHANNEL_RUNTIME_LIVE,
+    CHANNEL_SETUP_INTERNAL,
+    CHANNEL_SETUP_MANAGED,
+    CHANNEL_SETUP_SELF_SERVICE,
+    customer_channel_types,
+    get_channel_capability,
+)
+
 
 SUPPORTED_CAPABILITIES = (
     "customer_support",
@@ -17,13 +26,7 @@ SUPPORTED_CAPABILITIES = (
     "custom_task",
 )
 
-SUPPORTED_CHANNELS = (
-    "xvond",
-    "website",
-    "whatsapp",
-    "instagram",
-    "email",
-)
+SUPPORTED_CHANNELS = customer_channel_types()
 
 ACTION_CAPABILITIES = {
     "sales",
@@ -104,8 +107,34 @@ CHANNEL_KEYWORDS = {
     ),
     "website": ("website", "web site", "site chat", "موقع", "الموقع", "ويب سايت"),
     "whatsapp": ("whatsapp", "واتساب", "واتس", "واتس اب", "واتساب بزنس"),
-    "instagram": ("instagram", "insta", "dm", "dms", "انستغرام", "انستا", "إنستغرام"),
-    "email": ("email", "emails", "mail", "ايميل", "إيميل", "بريد"),
+    "voice": (
+        "voice", "phone call", "phone calls", "call customers", "telephone",
+        "مكالمة", "مكالمات", "اتصال هاتفي", "يتصل", "هاتف", "صوتي",
+    ),
+    "telegram": ("telegram", "تيليغرام", "تلغرام", "تليجرام", "تيليجرام"),
+    "instagram": (
+        "instagram dm", "instagram dms", "instagram messages", "insta dm",
+        "reply on instagram", "reply to instagram messages",
+        "رسائل انستغرام", "رسائل انستا", "رد على انستغرام", "رد على انستا",
+    ),
+    "messenger": (
+        "facebook messenger", "messenger", "facebook messages",
+        "ماسنجر", "فيسبوك ماسنجر", "رسائل فيسبوك",
+    ),
+    "email": (
+        "email channel", "customer email inbox", "reply by email",
+        "reply to customers by email", "email conversations",
+        "قناة ايميل", "قناة إيميل", "محادثات البريد",
+        "الرد على العملاء بالايميل", "الرد على العملاء بالإيميل",
+        "يرد على العملاء بالايميل", "يرد على العملاء بالإيميل",
+    ),
+    "sms": ("sms", "text message", "text messages", "رسائل نصية", "رسالة نصية"),
+    "slack": ("slack", "سلاك"),
+    "teams": ("microsoft teams", "ms teams", "teams chat", "تيمز", "مايكروسوفت تيمز"),
+    "custom": (
+        "custom channel", "custom api channel", "custom webhook channel",
+        "قناة مخصصة", "قناة api", "ويب هوك مخصص",
+    ),
 }
 
 BUSINESS_KEYWORDS = (
@@ -292,14 +321,24 @@ def blueprint_readiness(blueprint: EmployeeBlueprint) -> dict:
         else:
             capability_status[capability] = "planned"
 
-    channel_status = {
-        channel: (
-            "ready" if channel == "xvond"
-            else "connect_required" if channel in {"website", "whatsapp"}
-            else "planned"
-        )
-        for channel in blueprint.channels
-    }
+    channel_status = {}
+    for channel in blueprint.channels:
+        capability = get_channel_capability(channel) or {}
+        if capability.get("setup_mode") == CHANNEL_SETUP_INTERNAL:
+            status = "ready"
+        elif (
+            capability.get("runtime_state") == CHANNEL_RUNTIME_LIVE
+            and capability.get("setup_mode") == CHANNEL_SETUP_SELF_SERVICE
+        ):
+            status = "connect_required"
+        elif (
+            capability.get("runtime_state") == CHANNEL_RUNTIME_LIVE
+            and capability.get("setup_mode") == CHANNEL_SETUP_MANAGED
+        ):
+            status = "xvond_managed_setup"
+        else:
+            status = "xvond_adapter_required"
+        channel_status[channel] = status
     return {
         "capabilities": capability_status,
         "channels": channel_status,

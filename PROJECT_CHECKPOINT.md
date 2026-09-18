@@ -217,11 +217,26 @@ A correctly subscribed coexistence connection may serve AI traffic before the fi
 
 A live customer acceptance remains mandatory before WhatsApp is called service-ready: customer inbound, AI outbound, native human reply/echo, AI suppression while human owns the conversation, portal handoff/reply, explicit Return to AI and duplicate webhook replay.
 
-### Other communication surfaces
+### Unified communication channel delivery
 
-Voice has runtime/provisioning foundations but is not service-ready until a real provider/phone/call path passes end-to-end acceptance.
+The employee contract may request any registered communication surface. Xvond keeps channel request truth separate from runtime truth:
 
-Self-Service direct live channel support currently centers on **Website and WhatsApp**. Other compiled connection requirements must remain truthfully marked as needing an Xvond/provider adapter rather than being shown as magically connectable.
+- **Xvond Workspace** — built in; no external channel slot.
+- **Website Chat** — Self-Service setup; live Xvond widget runtime.
+- **WhatsApp** — Self-Service setup; live Meta Cloud API runtime.
+- **Voice / Phone** — Xvond-managed setup; live Vapi runtime foundation. It is not service-ready until a real phone/call path passes end-to-end acceptance.
+- **Telegram, Instagram DM, Facebook Messenger, Email, SMS, Slack, Microsoft Teams and Custom/API channels** — valid employee channel requests handled by Xvond Managed delivery, but their channel runtime remains `adapter_required` until a real adapter is implemented and validated.
+
+A requested Managed channel creates a durable, disabled provisioning work item for Xvond Admin. Removing that channel from the current Job Brief cancels/deactivates the request without fabricating a live connection.
+
+A channel must never be presented or activated as live merely because configuration values exist. Runtime activation requires a registered live adapter plus channel-specific readiness evidence. Voice specifically requires successful Vapi provisioning evidence before launch.
+
+Communication surfaces and action integrations remain distinct. For example:
+
+- `email` is an employee communication surface; `email_read` / `email_send` are mailbox action integrations.
+- `instagram` is Instagram DM; `instagram_publish` remains a publishing action integration.
+
+The public Builder, employee compiler, Self-Service readiness, Customer Portal and Xvond Admin all derive channel delivery truth from the same channel registry.
 
 ## Automation scheduler
 

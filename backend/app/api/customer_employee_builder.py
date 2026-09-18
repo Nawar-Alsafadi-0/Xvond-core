@@ -40,12 +40,22 @@ from backend.app.modules.ai_agent.self_service_policy import (
     communication_channels,
     is_self_service_company,
     self_service_channel_activation_blockers,
+    self_service_channel_slots,
     self_service_readiness,
     self_service_spec_view,
 )
 from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
+from backend.app.modules.channels.catalog import (
+    CHANNEL_RUNTIME_LIVE,
+    CHANNEL_SETUP_INTERNAL,
+    CHANNEL_SETUP_MANAGED,
+    CHANNEL_SETUP_SELF_SERVICE,
+    canonical_channel_type,
+    get_channel_capability,
+)
+from backend.app.modules.channels.delivery import reconcile_managed_channel_requests
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord, CompanyAIProfile
 from backend.app.modules.tools.models import AgentToolAssignment
@@ -217,11 +227,23 @@ def _store_provisioned_spec(
     compiled_spec, delivery = provision_compiled_capabilities(db, agent_id=agent.id, spec=spec)
     setup_answers = builder.get("setup_answers") or {}
     if isinstance(setup_answers, dict):
-        clean_answers = {
-            str(key).strip().lower(): str(value).strip()
-            for key, value in setup_answers.items()
-            if str(key or "").strip() and str(value or "").strip()
-        }
+        clean_answers: dict[str, str | dict] = {}
+        for raw_key, raw_value in setup_answers.items():
+            key = str(raw_key or "").strip().lower()
+            if not key:
+                continue
+            if isinstance(raw_value, dict):
+                fields = {
+                    str(field_key or "").strip().lower(): str(field_value or "").strip()
+                    for field_key, field_value in raw_value.items()
+                    if str(field_key or "").strip() and str(field_value or "").strip()
+                }
+                if fields:
+                    clean_answers[key] = fields
+            else:
+                value = str(raw_value or "").strip()
+                if value:
+                    clean_answers[key] = value
         if clean_answers:
             compiled_spec = dict(compiled_spec)
             compiled_spec["customer_inputs"] = clean_answers
@@ -231,6 +253,14 @@ def _store_provisioned_spec(
     settings["employee_builder"] = builder
     config.settings = settings
     company = db.query(Company).filter(Company.id == company_id).first()
+    if is_self_service_company(company):
+        reconcile_managed_channel_requests(
+            db,
+            company_id=company_id,
+            agent_id=agent.id,
+            desired_channel_types=self_service_channel_slots(builder),
+            request_source="compiled_employee_contract",
+        )
     agent.system_prompt = build_compiled_employee_system_prompt(
         owner_name=company.name if company else "the owner",
         spec=compiled_spec,
@@ -538,11 +568,16 @@ def _self_service_builder_journey(
     waiting_reasons: list[str] = []
     if compiled:
         missing_channels = {
-            str(item or "").strip().lower()
+            canonical_channel_type(item)
             for item in (state.get("missing_channels") or [])
-            if str(item or "").strip()
+            if canonical_channel_type(item)
         }
         for channel in sorted(missing_channels):
+            capability = get_channel_capability(channel) or {}
+            channel_name = str(capability.get("name") or channel.replace("_", " ").title())
+            setup_mode = capability.get("setup_mode")
+            runtime_state = capability.get("runtime_state")
+
             if channel == "website":
                 setup_actions.append(
                     _builder_action(
@@ -561,9 +596,15 @@ def _self_service_builder_journey(
                         key="whatsapp",
                     )
                 )
-            elif channel != "xvond":
+            elif setup_mode == CHANNEL_SETUP_INTERNAL:
+                continue
+            elif runtime_state == CHANNEL_RUNTIME_LIVE and setup_mode == CHANNEL_SETUP_MANAGED:
                 waiting_reasons.append(
-                    f"{channel.replace('_', ' ').title()} needs an Xvond/provider adapter."
+                    f"{channel_name}: Xvond managed provisioning is required before launch."
+                )
+            else:
+                waiting_reasons.append(
+                    f"{channel_name}: requested as an Xvond-managed channel; a runtime adapter must be provisioned before launch."
                 )
 
         resolved = {
@@ -573,7 +614,11 @@ def _self_service_builder_journey(
         for requirement in compiled_spec.get("requirements") or []:
             if not isinstance(requirement, dict):
                 continue
-            key = str(requirement.get("key") or "requirement").strip().lower()
+            key = (
+                canonical_channel_type(requirement.get("key"))
+                if str(requirement.get("kind") or "").strip().lower() == "channel"
+                else str(requirement.get("key") or "requirement").strip().lower()
+            )
             kind = str(requirement.get("kind") or "").strip().lower()
             status = str(requirement.get("status") or "").strip().lower()
             if status == "customer_input_required" and key not in resolved:
@@ -627,6 +672,10 @@ def _self_service_builder_journey(
                 if connection_status == "xvond_adapter_required":
                     waiting_reasons.append(
                         f"{key.replace('_', ' ').title()} needs an Xvond connection adapter."
+                    )
+                elif connection_status == "xvond_managed_available":
+                    waiting_reasons.append(
+                        f"{key.replace('_', ' ').title()} will be provisioned by Xvond."
                     )
                 elif kind != "channel":
                     waiting_reasons.append(
@@ -894,6 +943,15 @@ def create_employee(
                 )
             )
 
+        if is_self_service:
+            reconcile_managed_channel_requests(
+                db,
+                company_id=company.id,
+                agent_id=agent.id,
+                desired_channel_types=requested_channels,
+                request_source="job_brief",
+            )
+
         db.commit()
         db.refresh(agent)
         config = db.query(AgentConfig).filter(AgentConfig.agent_id == agent.id).first()
@@ -1002,6 +1060,13 @@ def revise_self_service_job_brief(
         )
 
         desired_channels = set(communication_channels(blueprint.channels))
+        managed_reconcile = reconcile_managed_channel_requests(
+            db,
+            company_id=company.id,
+            agent_id=agent.id,
+            desired_channel_types=desired_channels,
+            request_source="job_brief_revision",
+        )
         deactivated_channels = []
         channel_rows = (
             db.query(AgentChannel)
@@ -1054,6 +1119,7 @@ def revise_self_service_job_brief(
             "job_brief": blueprint.description,
             "requested_channels": list(communication_channels(blueprint.channels)),
             "deactivated_channels": deactivated_channels,
+            "managed_channel_requests": managed_reconcile,
             "missing_information": list(blueprint.missing_information),
         }
     except HTTPException:

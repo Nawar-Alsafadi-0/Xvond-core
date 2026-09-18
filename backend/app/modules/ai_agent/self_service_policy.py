@@ -19,7 +19,19 @@ from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
-from backend.app.modules.channels.catalog import validate_channel_config
+from backend.app.modules.channels.catalog import (
+    CHANNEL_RUNTIME_ADAPTER_REQUIRED,
+    CHANNEL_RUNTIME_LIVE,
+    CHANNEL_SETUP_INTERNAL,
+    CHANNEL_SETUP_MANAGED,
+    CHANNEL_SETUP_SELF_SERVICE,
+    canonical_channel_type,
+    customer_channel_types,
+    get_channel_capability,
+    live_managed_channel_types,
+    live_self_service_channel_types,
+    validate_channel_config,
+)
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
 from backend.app.modules.knowledge.models import AgentKnowledge, KnowledgeDocument
@@ -27,22 +39,16 @@ from backend.app.modules.knowledge.models import AgentKnowledge, KnowledgeDocume
 
 SELF_SERVICE_SOURCE = "self_service"
 
-# Only communication surfaces consume a channel slot. Gmail, email read/send,
-# Instagram publishing and similar systems are integrations, not chat channels.
-COMMUNICATION_CHANNELS = frozenset(
-    {
-        "xvond",
-        "website",
-        "whatsapp",
-        "voice",
-        "telegram",
-        "custom",
-    }
-)
-
+# Communication surfaces are defined once in the channel delivery registry.
+# Publishing/actions (for example Instagram publishing or send-email actions)
+# remain integrations; Instagram DM and Email can also be selected as employee
+# communication surfaces and follow the channel delivery contract below.
+COMMUNICATION_CHANNELS = frozenset(customer_channel_types())
 EXTERNAL_COMMUNICATION_CHANNELS = COMMUNICATION_CHANNELS - {"xvond"}
-SELF_SERVICE_LIVE_EXTERNAL_CHANNELS = frozenset({"whatsapp", "website"})
-SELF_SERVICE_DIRECT_CONNECTION_REQUIREMENTS = SELF_SERVICE_LIVE_EXTERNAL_CHANNELS
+SELF_SERVICE_LIVE_EXTERNAL_CHANNELS = (
+    live_self_service_channel_types() - {"xvond"}
+)
+MANAGED_LIVE_EXTERNAL_CHANNELS = live_managed_channel_types()
 
 
 def is_self_service_company(company: Company | None) -> bool:
@@ -55,7 +61,7 @@ def is_self_service_company(company: Company | None) -> bool:
 def communication_channels(values: Any) -> list[str]:
     result: list[str] = []
     for item in values or []:
-        key = str(item or "").strip().lower()
+        key = canonical_channel_type(item)
         if key in COMMUNICATION_CHANNELS and key not in result:
             result.append(key)
     return result
@@ -104,7 +110,7 @@ def assert_self_service_channel_selected(
         else None
     )
     selected = self_service_channel_slots(builder)
-    key = str(channel_type or "").strip().lower()
+    key = canonical_channel_type(channel_type)
     if key not in selected:
         raise HTTPException(
             409,
@@ -119,7 +125,7 @@ def _requirement_channel_keys(spec: dict) -> list[str]:
             continue
         if str(item.get("kind") or "").strip().lower() != "channel":
             continue
-        key = str(item.get("key") or "").strip().lower()
+        key = canonical_channel_type(item.get("key"))
         if key == "xvond_workspace":
             key = "xvond"
         if key in COMMUNICATION_CHANNELS and key not in result:
@@ -131,10 +137,28 @@ def self_service_connection_status(item: dict) -> str | None:
     status = str(item.get("status") or "").strip().lower()
     if status != "connection_required":
         return None
-    key = str(item.get("key") or "").strip().lower()
     kind = str(item.get("kind") or "").strip().lower()
-    if kind == "channel" and key in SELF_SERVICE_DIRECT_CONNECTION_REQUIREMENTS:
+    if kind != "channel":
+        return "xvond_adapter_required"
+
+    key = canonical_channel_type(item.get("key"))
+    if key == "xvond_workspace":
+        key = "xvond"
+    capability = get_channel_capability(key)
+    if capability is None:
+        return "xvond_adapter_required"
+    if capability.get("setup_mode") == CHANNEL_SETUP_INTERNAL:
+        return "internal_available"
+    if (
+        capability.get("runtime_state") == CHANNEL_RUNTIME_LIVE
+        and capability.get("setup_mode") == CHANNEL_SETUP_SELF_SERVICE
+    ):
         return "self_service_available"
+    if (
+        capability.get("runtime_state") == CHANNEL_RUNTIME_LIVE
+        and capability.get("setup_mode") == CHANNEL_SETUP_MANAGED
+    ):
+        return "xvond_managed_available"
     return "xvond_adapter_required"
 
 
@@ -153,6 +177,19 @@ def self_service_spec_view(spec: dict | None) -> dict | None:
         connection_status = self_service_connection_status(item)
         if connection_status:
             item["self_service_connection_status"] = connection_status
+        if str(item.get("kind") or "").strip().lower() == "channel":
+            channel_key = canonical_channel_type(item.get("key"))
+            if channel_key == "xvond_workspace":
+                channel_key = "xvond"
+            capability = get_channel_capability(channel_key)
+            if capability is not None:
+                item["channel_delivery"] = {
+                    "type": channel_key,
+                    "name": capability.get("name"),
+                    "setup_mode": capability.get("setup_mode"),
+                    "runtime_state": capability.get("runtime_state"),
+                    "runtime_adapter": capability.get("runtime_adapter"),
+                }
     return rendered
 
 
@@ -247,7 +284,7 @@ def enabled_channel_types(db, *, company_id: int, agent_id: int) -> list[str]:
     )
     result: list[str] = []
     for row in rows:
-        key = str(row.channel_type or "").strip().lower()
+        key = canonical_channel_type(row.channel_type)
         if key in EXTERNAL_COMMUNICATION_CHANNELS and key not in result:
             result.append(key)
     return result
@@ -265,13 +302,38 @@ def configured_channel_types(db, *, company_id: int, agent_id: int) -> list[str]
     )
     result: list[str] = []
     for row in rows:
-        key = str(row.channel_type or "").strip().lower()
-        if key not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS or key in result:
+        key = canonical_channel_type(row.channel_type)
+        if key in result:
             continue
+        capability = get_channel_capability(key)
+        if (
+            capability is None
+            or capability.get("runtime_state") != CHANNEL_RUNTIME_LIVE
+            or key not in EXTERNAL_COMMUNICATION_CHANNELS
+        ):
+            continue
+
+        config = reveal_config(row.config) or {}
         try:
-            validate_channel_config(key, reveal_config(row.config) or {})
+            validate_channel_config(key, config)
         except ValueError:
             continue
+
+        if capability.get("setup_mode") == CHANNEL_SETUP_MANAGED:
+            if key == "voice":
+                required = (
+                    "vapi_assistant_id",
+                    "vapi_phone_number_id",
+                    "vapi_llm_credential_id",
+                    "llm_api_key",
+                )
+                if str(config.get("provisioning_state") or "").strip().lower() != "connected":
+                    continue
+                if any(not str(config.get(item) or "").strip() for item in required):
+                    continue
+            else:
+                continue
+
         result.append(key)
     return result
 
@@ -285,11 +347,22 @@ def self_service_channel_activation_blockers(
 ) -> list[str]:
     """Live activation checks for Self-Service communication channels only."""
     blockers: list[str] = []
-    channel_type = str(channel.channel_type or "").strip().lower()
+    channel_type = canonical_channel_type(channel.channel_type)
 
     if channel.company_id != company.id or channel.agent_id != agent.id:
         return ["Communication channel ownership does not match this employee"]
-    if channel_type not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS:
+
+    capability = get_channel_capability(channel_type)
+    if capability is None:
+        return [f"{channel_type or 'channel'} is not a registered communication channel"]
+    if capability.get("runtime_state") != CHANNEL_RUNTIME_LIVE:
+        return [
+            f"{capability.get('name') or channel_type}: Xvond runtime adapter is still required"
+        ]
+    if (
+        capability.get("setup_mode") != CHANNEL_SETUP_MANAGED
+        and channel_type not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS
+    ):
         return [f"{channel_type or 'channel'} is not available for Self-Service launch"]
 
     if not company.active:
@@ -326,7 +399,9 @@ def self_service_channel_activation_blockers(
     try:
         validate_channel_config(channel_type, channel_config)
     except ValueError:
-        blockers.append(f"{channel_type.title()} channel configuration is incomplete")
+        blockers.append(
+            f"{capability.get('name') or channel_type.title()} channel configuration is incomplete"
+        )
         return blockers
 
     if channel_type == "whatsapp":
@@ -344,6 +419,17 @@ def self_service_channel_activation_blockers(
             blockers.append("Website widget key is missing")
         if settings.is_production and not settings.PUBLIC_BASE_URL:
             blockers.append("Xvond public API URL is not configured")
+    elif channel_type == "voice":
+        required = (
+            "vapi_assistant_id",
+            "vapi_phone_number_id",
+            "vapi_llm_credential_id",
+            "llm_api_key",
+        )
+        if str(channel_config.get("provisioning_state") or "").strip().lower() != "connected":
+            blockers.append("Voice: Xvond managed provisioning is not complete")
+        elif any(not str(channel_config.get(key) or "").strip() for key in required):
+            blockers.append("Voice: Vapi provisioning evidence is incomplete")
 
     return blockers
 
@@ -444,7 +530,7 @@ def _execution_blockers(
             continue
         key = str(item.get("key") or "requirement").strip()
         kind = str(item.get("kind") or "").strip().lower()
-        channel_key = "xvond" if key == "xvond_workspace" else key.lower()
+        channel_key = "xvond" if key == "xvond_workspace" else canonical_channel_type(key)
         status = str(item.get("status") or "").strip().lower()
         execution_status = str(item.get("execution_status") or "").strip().lower()
 
@@ -526,7 +612,12 @@ def evaluate_readiness(
     elif not provisioned:
         blockers.append("Employee action plan is not provisioned")
 
-    if channel_limit is not None and len(slot_channels) > channel_limit:
+    billed_slot_channels = [
+        item
+        for item in slot_channels
+        if (get_channel_capability(item) or {}).get("channel_slot") is True
+    ]
+    if channel_limit is not None and len(billed_slot_channels) > channel_limit:
         blockers.append(
             f"Selected communication channels exceed the plan limit ({channel_limit})"
         )
@@ -556,7 +647,8 @@ def evaluate_readiness(
         "active_channels": active,
         "missing_channels": missing_channels,
         "channel_limit": channel_limit,
-        "channel_slots_used": len(slot_channels),
+        "channel_slots_used": len(billed_slot_channels),
+        "billed_slot_channels": billed_slot_channels,
         "blockers": blockers,
     }
 

@@ -3,9 +3,15 @@
         ["xvond", "Xvond Workspace"],
         ["website", "Website Chat"],
         ["whatsapp", "WhatsApp"],
-        ["voice", "Voice"],
+        ["voice", "Voice / Phone"],
         ["telegram", "Telegram"],
-        ["custom", "Custom Channel"],
+        ["instagram", "Instagram DM"],
+        ["messenger", "Facebook Messenger"],
+        ["email", "Email"],
+        ["sms", "SMS"],
+        ["slack", "Slack"],
+        ["teams", "Microsoft Teams"],
+        ["custom", "Custom / API Channel"],
     ];
 
     function root() {
