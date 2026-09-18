@@ -32,6 +32,7 @@ from backend.app.modules.channels.catalog import (
     get_channel_capability,
     live_managed_channel_types,
     live_self_service_channel_types,
+    packaged_managed_channel_types,
     validate_channel_config,
 )
 from backend.app.modules.channels.models import AgentChannel
@@ -51,6 +52,7 @@ SELF_SERVICE_LIVE_EXTERNAL_CHANNELS = (
     live_self_service_channel_types() - {"xvond"}
 )
 MANAGED_LIVE_EXTERNAL_CHANNELS = live_managed_channel_types()
+PACKAGED_MANAGED_EXTERNAL_CHANNELS = packaged_managed_channel_types()
 
 
 def is_self_service_company(company: Company | None) -> bool:
@@ -160,7 +162,9 @@ def self_service_connection_status(item: dict) -> str | None:
         capability.get("runtime_state") == CHANNEL_RUNTIME_LIVE
         and capability.get("setup_mode") == CHANNEL_SETUP_MANAGED
     ):
-        return "xvond_managed_available"
+        if capability.get("packaged_provider") is True:
+            return "xvond_managed_available"
+        return "xvond_custom_provider_setup"
     return "xvond_adapter_required"
 
 
