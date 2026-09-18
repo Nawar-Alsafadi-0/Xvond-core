@@ -229,6 +229,13 @@
     function journeyMarkup(employee) {
         if (employee.delivery_mode !== "self_service") return "";
         const journey = employee.builder_journey || {};
+        const graphTrigger = employee.compiled_spec?.delivery?.graph_trigger || {};
+        const manualGraphReady = Boolean(
+            employee.enabled
+            && graphTrigger.trigger_type === "manual"
+            && graphTrigger.status === "ready"
+            && graphTrigger.workflow_id
+        );
         const stages = Array.isArray(journey.stages) ? journey.stages : [];
         if (!stages.length) return "";
         const progress = Number(journey.total_count || stages.length)
@@ -270,6 +277,16 @@
                 <div id="subscription-plans" class="employee-builder-section hidden"></div>
                 <div id="subscription-error" class="error"></div>
                 <div id="prepare-employee-error" class="error"></div>
+                ${manualGraphReady ? `
+                    <div id="employee-builder-manual-run-panel" class="employee-builder-section">
+                        <h3>Run now</h3>
+                        <p class="muted">Run this employee's live execution graph now. Optional JSON becomes the graph input.</p>
+                        <textarea id="employee-builder-manual-run-input" rows="4" placeholder='{"key":"value"}'></textarea>
+                        <button type="button" id="employee-builder-manual-run">Run employee</button>
+                        <pre id="employee-builder-manual-run-output" class="employee-builder-run-output hidden"></pre>
+                        <div id="employee-builder-manual-run-error" class="error"></div>
+                    </div>
+                ` : ""}
                 <div id="employee-builder-runs-panel" class="employee-builder-section">
                     <div class="employee-builder-current-head">
                         <div>
@@ -652,6 +669,42 @@
 
         document.getElementById("employee-builder-runs-refresh")?.addEventListener("click", loadExecutionHistory);
         loadExecutionHistory();
+
+        document.getElementById("employee-builder-manual-run")?.addEventListener("click", async () => {
+            const input = document.getElementById("employee-builder-manual-run-input");
+            const output = document.getElementById("employee-builder-manual-run-output");
+            const error = document.getElementById("employee-builder-manual-run-error");
+            if (error) error.textContent = "";
+            let inputData = {};
+            const raw = String(input?.value || "").trim();
+            if (raw) {
+                try {
+                    inputData = JSON.parse(raw);
+                    if (!inputData || Array.isArray(inputData) || typeof inputData !== "object") {
+                        throw new Error("Input must be a JSON object.");
+                    }
+                } catch (err) {
+                    if (error) error.textContent = err?.message || "Input must be valid JSON.";
+                    return;
+                }
+            }
+            try {
+                const result = await api(
+                    `/customer/employee-builder/${Number(employee.agent_id)}/run-graph`,
+                    {
+                        method: "POST",
+                        body: JSON.stringify({input_data: inputData}),
+                    }
+                );
+                if (output) {
+                    output.textContent = JSON.stringify(result.output_data || result, null, 2);
+                    output.classList.remove("hidden");
+                }
+                await loadExecutionHistory();
+            } catch (err) {
+                if (error) error.textContent = err?.message || "Could not run this employee.";
+            }
+        });
 
         async function loadBuilderConnections() {
             const selects = Array.from(document.querySelectorAll("[data-integration-select]"));
