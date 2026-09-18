@@ -236,6 +236,7 @@ Use this shape:
   ],
   "execution_graph": {
     "version": 1,
+    "trigger": {"type":"manual|schedule|webhook|event"},
     "nodes": [
       {
         "id": "stable_node_id",
@@ -258,6 +259,7 @@ Rules:
 - intake.known values must be copied from information explicitly present in the Job Brief. Never invent values. Do not place passwords, API keys, access tokens or other credentials in intake.known; credentials belong to protected connection flows.
 - Never use a missing Xvond feature as a reason to reject the job. For a novel digital requirement, return it and give it useful generic primitives so Xvond can compose it.
 - Always describe executable work as execution_graph nodes whenever the job contains more than a single conversational response. The graph is the general execution plan; requirements describe capabilities/connections needed to make that graph runnable.
+- execution_graph.trigger describes what starts the graph. Use manual when the user starts it explicitly, schedule for recurring/time-based work, webhook for an incoming external JSON event, and event for an internal Xvond event. Never invent a webhook/event trigger when the user did not request event-driven behavior.
 - Use generic node types, not use-case names. Examples: ai for reasoning/generation, media for generated visual media, action for a side effect through a requirement/connector, http_get_json for read-only JSON fetches, transform for data shaping, condition for branching gates, notify for an internal owner update.
 - action nodes must reference a requirement key in params.action_type. Do not encode provider-specific logic in the graph.
 - condition nodes use params.left, params.operator and params.right. Supported operators are eq, neq, gt, gte, lt, lte and contains. Any later node may use "when":"$nodes.<condition_id>.matched" to run only when that condition is true.
