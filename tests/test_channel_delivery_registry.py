@@ -75,8 +75,10 @@ def test_public_channel_catalog_exposes_delivery_truth_without_configs_or_secret
     assert items["voice"]["availability"] == "xvond_managed_live"
     assert items["telegram"]["availability"] == "xvond_managed_live"
     assert items["telegram"]["packaged_provider"] is True
-    assert items["instagram"]["availability"] == "xvond_managed_custom"
-    assert items["instagram"]["packaged_provider"] is False
+    assert items["instagram"]["availability"] == "xvond_managed_live"
+    assert items["instagram"]["packaged_provider"] is True
+    assert items["messenger"]["availability"] == "xvond_managed_live"
+    assert items["messenger"]["packaged_provider"] is True
     assert items["xvond"]["availability"] == "built_in"
 
     for item in payload["channels"]:
@@ -120,7 +122,7 @@ def test_compiler_cached_channel_view_uses_registry_delivery_truth():
     assert rows["telegram"]["self_service_connection_status"] == "xvond_managed_available"
     assert rows["telegram"]["channel_delivery"]["runtime_adapter"] == "xvond_managed"
     assert "n8n" not in str(rendered).lower()
-    assert rows["instagram_dm"]["self_service_connection_status"] == "xvond_custom_provider_setup"
+    assert rows["instagram_dm"]["self_service_connection_status"] == "xvond_managed_available"
     assert rows["instagram_dm"]["channel_delivery"]["type"] == "instagram"
     assert rows["email_send"]["self_service_connection_status"] == "xvond_adapter_required"
 
@@ -209,8 +211,9 @@ def test_managed_channels_share_one_xvond_runtime_adapter_but_provider_packaging
         assert capability["runtime_state"] == CHANNEL_RUNTIME_LIVE
         assert capability["setup_mode"] == CHANNEL_SETUP_MANAGED
 
-    assert get_channel_capability("telegram")["packaged_provider"] is True
-    for key in ("instagram", "messenger", "email", "sms", "slack", "teams", "custom"):
+    for key in ("telegram", "instagram", "messenger"):
+        assert get_channel_capability(key)["packaged_provider"] is True
+    for key in ("email", "sms", "slack", "teams", "custom"):
         assert get_channel_capability(key)["packaged_provider"] is False
 
 
