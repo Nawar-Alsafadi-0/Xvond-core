@@ -169,3 +169,101 @@ class ServicePaymentEvent(Base):
     provider_event_id: Mapped[str] = mapped_column(String(160), nullable=False)
     event_type: Mapped[str] = mapped_column(String(120), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+
+class ServicePaymentProfile(Base):
+    """Encrypted provider references for recurring service billing.
+
+    Raw card PAN/CVC data is never stored. Provider identifiers are kept inside
+    provider_config and protected with Xvond configuration encryption.
+    """
+
+    __tablename__ = "service_payment_profiles"
+    __table_args__ = (
+        UniqueConstraint(
+            "service_subscription_id",
+            "provider",
+            name="uq_service_payment_profiles_subscription_provider",
+        ),
+        Index(
+            "ix_service_payment_profiles_company_status",
+            "company_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(
+        ForeignKey("companies.id"),
+        nullable=False,
+        index=True,
+    )
+    service_subscription_id: Mapped[int] = mapped_column(
+        ForeignKey("service_subscriptions.id"),
+        nullable=False,
+        index=True,
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="active", nullable=False)
+    provider_config: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
+class ServiceRenewalAttempt(Base):
+    """One idempotent recurring-charge attempt for one subscription period."""
+
+    __tablename__ = "service_renewal_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "idempotency_key",
+            name="uq_service_renewal_attempt_provider_key",
+        ),
+        Index(
+            "ix_service_renewal_attempt_company_status",
+            "company_id",
+            "status",
+        ),
+        Index(
+            "ix_service_renewal_attempt_subscription_period",
+            "service_subscription_id",
+            "period_end",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(
+        ForeignKey("companies.id"),
+        nullable=False,
+        index=True,
+    )
+    service_subscription_id: Mapped[int] = mapped_column(
+        ForeignKey("service_subscriptions.id"),
+        nullable=False,
+        index=True,
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(220), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False, index=True)
+    provider_transaction_id: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+        index=True,
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    attempts: Mapped[int] = mapped_column(default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
