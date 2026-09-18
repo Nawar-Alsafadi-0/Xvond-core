@@ -974,10 +974,11 @@ def _self_service_builder_journey(
                             ),
                         )
                     )
-                elif execution_status not in {"", "ready"} or schedule_status not in {
+                elif execution_status not in {"", "ready", "permission_denied"} or schedule_status not in {
                     "",
                     "ready",
                     "not_required",
+                    "permission_denied",
                 }:
                     waiting_reasons.append(
                         f"Xvond execution setup is still required for {key.replace('_', ' ')}."
