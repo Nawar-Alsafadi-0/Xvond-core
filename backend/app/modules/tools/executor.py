@@ -9,6 +9,7 @@ from backend.app.modules.tools.business_models import ActionRequest
 from backend.app.modules.tools.models import AgentToolAssignment, ToolApprovalRequest
 from backend.app.modules.tools.registry import tool_registry
 from backend.app.modules.tools.bootstrap import register_builtin_tools
+from backend.app.modules.tools.generic_capability_runtime import generic_capability_readiness
 
 SENSITIVE_TOOLS = {"webhook", "custom_api"}
 LEGACY_BUSINESS_TOOLS = {"booking", "order", "lead"}
@@ -35,6 +36,8 @@ def _enabled_actions(config: dict | None) -> dict:
 def _operation_config_ready(action: dict) -> bool:
     destination = action.get("destination") or {}
     destination_type = str(destination.get("type") or "unconfigured").strip()
+    if destination_type == "xvond_internal" and destination.get("adapter") == "generic_capability":
+        return bool(generic_capability_readiness(action).get("ready"))
     if destination_type in {"unconfigured", "workflow_engine"}:
         # Generated workflow contracts still need an actual execution adapter.
         return False
