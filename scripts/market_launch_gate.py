@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from backend.app.core.config.settings import settings
 from backend.app.core.database.connection import SessionLocal
+from backend.app.core.config_secrets import reveal_config
 from backend.app.models.company import Company
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.billing.payment_gateway import payment_gateway
@@ -23,6 +24,7 @@ from backend.app.modules.channels.catalog import (
     validate_channel_config,
 )
 from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
 from scripts.production_acceptance import check_release
 
 
@@ -85,38 +87,64 @@ def _channel_gate(
             }
             continue
 
+        config = reveal_config(row.config) or {}
         try:
-            validate_channel_config(channel_type, row.config or {})
+            validate_channel_config(channel_type, config)
             configured = True
             config_issue = None
         except ValueError as exc:
             configured = False
             config_issue = str(exc)
 
+        connection = None
+        if configured and channel_type == "whatsapp":
+            connection = whatsapp_connection_state(config, verify_remote=True)
+            connected = bool(connection.get("connected"))
+        else:
+            connected = configured
+
         roundtrip = customer_roundtrip_verified(row)
+        coexistence_required = bool(
+            channel_type == "whatsapp"
+            and config.get("coexistence") is True
+        )
+        coexistence_ready = bool(
+            not coexistence_required
+            or (connection and connection.get("coexistence_ready") is True)
+        )
+        accepted = bool(
+            packaged
+            and configured
+            and connected
+            and row.enabled
+            and roundtrip
+            and coexistence_ready
+        )
         checks[channel_type] = {
-            "ok": bool(
-                packaged
-                and configured
-                and row.enabled
-                and roundtrip
-            ),
+            "ok": accepted,
             "packaged_provider": packaged,
             "configured": configured,
+            "connected": connected,
             "enabled": bool(row.enabled),
             "roundtrip_verified": roundtrip,
             "roundtrip_source": row.customer_roundtrip_source,
+            "coexistence_required": coexistence_required,
+            "coexistence_ready": coexistence_ready,
             "issue": config_issue,
             "reason": (
                 None
-                if packaged and configured and row.enabled and roundtrip
+                if accepted
                 else "provider_not_packaged"
                 if not packaged
                 else "configuration_incomplete"
                 if not configured
+                else "transport_not_connected"
+                if not connected
                 else "channel_not_enabled"
                 if not row.enabled
                 else "real_customer_roundtrip_missing"
+                if not roundtrip
+                else "human_takeover_acceptance_missing"
             ),
         }
 
