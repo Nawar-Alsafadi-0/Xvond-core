@@ -1669,6 +1669,17 @@ def bind_self_service_integration(
         ).first()
         if integration is None:
             raise HTTPException(404, "Connected system not found or disabled")
+        integration_config = reveal_config(integration.config) or {}
+        validation = integration_config.get("_xvond_validation")
+        if not (
+            isinstance(validation, dict)
+            and validation.get("validated") is True
+            and str(validation.get("validated_at") or "").strip()
+        ):
+            raise HTTPException(
+                409,
+                "Validate this connected system successfully before binding it to the AI employee",
+            )
 
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
