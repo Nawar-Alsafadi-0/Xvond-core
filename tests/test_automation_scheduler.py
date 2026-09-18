@@ -1329,18 +1329,57 @@ def test_graph_approval_resumes_same_run_without_replaying_prior_nodes(monkeypat
     engine.dispose()
 
 
-def test_graph_nested_approval_is_blocked_before_execution(monkeypatch):
+def test_graph_nested_approval_resumes_each_item_without_replay(monkeypatch):
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
+    calls = {"fetch": 0, "actions": []}
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_request(**kwargs):
+        calls["fetch"] += 1
+        return {
+            "status_code": 200,
+            "response": '{"ready":true}',
+            "truncated": False,
+        }
+
+    def fake_capability(*args, **kwargs):
+        details = kwargs.get("details") or {}
+        calls["actions"].append(details.get("id"))
+        return {"ok": True, "id": details.get("id")}
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "execute_generic_capability",
+        fake_capability,
+    )
 
     with Session(engine, autoflush=False) as db:
-        db.add(Company(id=1, name="Nested Approval", active=True))
+        db.add(
+            Company(
+                id=1,
+                name="Nested Approval",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
         db.add(
             AIAgent(
                 id=1,
                 company_id=1,
                 name="Nested worker",
-                system_prompt="State",
+                system_prompt="Ask before each send.",
                 provider="mock",
                 model="mock",
                 enabled=True,
@@ -1366,6 +1405,7 @@ def test_graph_nested_approval_is_blocked_before_execution(monkeypatch):
                         "send_one": {
                             "enabled": True,
                             "confirmation_required": True,
+                            "label": "Send one",
                             "destination": {
                                 "type": "xvond_internal",
                                 "adapter": "generic_capability",
@@ -1384,14 +1424,18 @@ def test_graph_nested_approval_is_blocked_before_execution(monkeypatch):
                 },
             )
         )
-        db.commit()
-
-        runtime = automation_runtime_module.AutomationRuntime()
-        try:
-            runtime.execute_step(
-                db=db,
-                company_id=1,
-                step={
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Nested approval graph",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+            },
+            steps=[
+                {
                     "type": "graph",
                     "agent_id": 1,
                     "graph": {
@@ -1402,36 +1446,110 @@ def test_graph_nested_approval_is_blocked_before_execution(monkeypatch):
                                 "type": "foreach",
                                 "depends_on": [],
                                 "params": {
-                                    "items": [{"id": 1}],
+                                    "items": [
+                                        {
+                                            "id": 1,
+                                            "url": "https://example.com/1",
+                                        },
+                                        {
+                                            "id": 2,
+                                            "url": "https://example.com/2",
+                                        },
+                                    ],
                                     "graph": {
                                         "version": 1,
                                         "nodes": [
                                             {
+                                                "id": "fetch",
+                                                "type": "http_get_json",
+                                                "depends_on": [],
+                                                "params": {"url": "$item.url"},
+                                            },
+                                            {
                                                 "id": "send",
                                                 "type": "action",
-                                                "depends_on": [],
+                                                "depends_on": ["fetch"],
                                                 "params": {
                                                     "action_type": "send_one",
                                                     "arguments": {
-                                                        "id": "$item.id"
+                                                        "id": "$item.id",
+                                                        "payload": "$nodes.fetch.result",
                                                     },
                                                 },
-                                            }
+                                            },
                                         ],
                                     },
                                 },
                             }
                         ],
                     },
-                },
-                state={"_xvond_execution_key": "nested-approval-test"},
-                run_id=1,
-                step_index=0,
-            )
-        except ValueError as exc:
-            assert "inside foreach" in str(exc)
-        else:
-            raise AssertionError("nested approval must fail closed")
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        waiting_first = runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={},
+        )
+
+        assert waiting_first.status == "waiting_approval"
+        assert calls == {"fetch": 1, "actions": []}
+        request_one = (
+            db.query(ActionRequest)
+            .filter(ActionRequest.status == "awaiting_confirmation")
+            .one()
+        )
+        meta_one = request_one.details["_xvond_automation"]
+        assert meta_one["approval_scope"] == "each[0]/send"
+        assert waiting_first.output_data["approval"]["graph_resume"]["foreach"]["loop_index"] == 0
+
+        request_one.status = "approved"
+        db.commit()
+        waiting_second = runtime.resume_approval(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=waiting_first,
+            request=request_one,
+        )
+
+        assert waiting_second.id == waiting_first.id
+        assert waiting_second.status == "waiting_approval"
+        assert calls == {"fetch": 2, "actions": [1]}
+        request_two = (
+            db.query(ActionRequest)
+            .filter(ActionRequest.status == "awaiting_confirmation")
+            .one()
+        )
+        assert request_two.id != request_one.id
+        meta_two = request_two.details["_xvond_automation"]
+        assert meta_two["approval_scope"] == "each[1]/send"
+        checkpoint = waiting_second.output_data["approval"]["graph_resume"]["foreach"]
+        assert checkpoint["loop_index"] == 1
+        assert len(checkpoint["completed_results"]) == 1
+
+        request_two.status = "approved"
+        db.commit()
+        finished = runtime.resume_approval(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=waiting_second,
+            request=request_two,
+        )
+
+        assert finished.id == waiting_first.id
+        assert finished.status == "success"
+        assert calls == {"fetch": 2, "actions": [1, 2]}
+        each = finished.output_data["steps"][-1]["result"]["graph_outputs"]["each"]
+        assert each["count"] == 2
+        assert len(each["items"]) == 2
 
     engine.dispose()
 
