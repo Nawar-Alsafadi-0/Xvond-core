@@ -689,12 +689,46 @@ def _self_service_builder_journey(
                         if is_sensitive_requirement_key(field_key):
                             sensitive_input = True
                         if not any(item["key"] == field_key for item in input_fields):
+                            field_meta = {
+                                "working_days": {
+                                    "label": "Working days",
+                                    "detail": "Example: Sunday, Monday, Tuesday, Wednesday, Thursday",
+                                },
+                                "opening_time": {
+                                    "label": "Opening time",
+                                    "type": "time",
+                                },
+                                "closing_time": {
+                                    "label": "Closing time",
+                                    "type": "time",
+                                },
+                                "slot_minutes": {
+                                    "label": "Appointment duration (minutes)",
+                                    "type": "number",
+                                    "min": "5",
+                                    "max": "720",
+                                },
+                            }.get(field_key, {})
                             input_fields.append(
                                 {
                                     "key": field_key,
-                                    "label": str(input_labels.get(field_key) or raw_field).strip()
+                                    "label": str(
+                                        input_labels.get(field_key)
+                                        or field_meta.get("label")
+                                        or raw_field
+                                    ).strip()
                                     or field_key.replace("_", " "),
-                                    "detail": str(input_purposes.get(field_key) or "").strip() or None,
+                                    "detail": str(
+                                        input_purposes.get(field_key)
+                                        or field_meta.get("detail")
+                                        or ""
+                                    ).strip()
+                                    or None,
+                                    **{
+                                        meta_key: meta_value
+                                        for meta_key, meta_value in field_meta.items()
+                                        if meta_key not in {"label", "detail"}
+                                    },
                                 }
                             )
                     if sensitive_input:
