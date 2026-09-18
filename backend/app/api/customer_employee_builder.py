@@ -2067,9 +2067,18 @@ def bind_self_service_integration(
         if str(requirement.get("kind") or "").strip().lower() == "channel":
             raise HTTPException(409, "Communication channels use their dedicated connection flow")
 
-        executable_types = {"custom_api", "pos", "crm", "erp", "webhook", "instagram_publish"}
+        executable_types = {
+            "custom_api",
+            "pos",
+            "crm",
+            "erp",
+            "webhook",
+            "instagram_publish",
+            "email_smtp",
+        }
         required_connector_types = {
             "instagram_publish": {"instagram_publish"},
+            "email_send": {"email_smtp"},
         }
         allowed_for_requirement = required_connector_types.get(key)
         if allowed_for_requirement and integration.integration_type not in allowed_for_requirement:
