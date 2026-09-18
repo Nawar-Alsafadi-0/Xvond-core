@@ -476,6 +476,7 @@ def _self_service_builder_journey(
     has_entitlement: bool,
     compiled_spec: dict | None,
     state: dict | None,
+    builder: dict | None = None,
 ) -> dict:
     """Render the Self-Service lifecycle as structured product steps.
 
@@ -485,6 +486,7 @@ def _self_service_builder_journey(
     """
 
     state = dict(state or {})
+    builder = dict(builder or {})
     subscription = dict(state.get("subscription") or {})
     compiled = isinstance(compiled_spec, dict)
     provisioned = bool(
@@ -562,6 +564,41 @@ def _self_service_builder_journey(
             "Build",
             "blocked",
             "Activate an AI Employee plan before AI-backed compilation.",
+        )
+
+    compiled_at = str(builder.get("compiled_at") or "").strip()
+    tested_build = bool(
+        compiled_at
+        and str(builder.get("last_tested_compiled_at") or "").strip() == compiled_at
+    )
+    if tested_build:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "complete",
+            "The current employee build has been tested safely without live channels or business actions.",
+        )
+    elif provisioned and has_entitlement:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "action_required",
+            "Chat with this exact draft before launch. Preview testing never sends through live channels or executes business actions.",
+            [_builder_action("test_employee", "Test employee", target="builder")],
+        )
+    elif provisioned:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "blocked",
+            "Activate the AI Employee plan before testing this build.",
+        )
+    else:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "blocked",
+            "Build the employee before testing it.",
         )
 
     setup_actions: list[dict] = []
@@ -759,13 +796,20 @@ def _self_service_builder_journey(
             "complete",
             "This AI employee is live.",
         )
-    elif state.get("ready"):
+    elif state.get("ready") and tested_build:
         add_stage(
             "launch",
             "Launch",
             "action_required",
-            "All launch requirements are ready.",
+            "All launch requirements are ready and this build has been preview-tested.",
             [_builder_action("launch_employee", "Launch employee", target="builder")],
+        )
+    elif state.get("ready") and not tested_build:
+        add_stage(
+            "launch",
+            "Launch",
+            "blocked",
+            "Test the current employee build once before launch.",
         )
     else:
         add_stage(
@@ -820,6 +864,7 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
                 has_entitlement=has_entitlement,
                 compiled_spec=compiled_spec if isinstance(compiled_spec, dict) else None,
                 state=self_service_state,
+                builder=builder if isinstance(builder, dict) else {},
             )
         display_channels = list(builder.get("requested_channels", []))
         if is_self_service_company(company):
@@ -845,9 +890,16 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
                 ),
                 "self_service_readiness": self_service_state,
                 "builder_journey": builder_journey,
+                "last_tested_at": builder.get("last_tested_at"),
+                "current_build_tested": bool(
+                    builder.get("compiled_at")
+                    and builder.get("last_tested_compiled_at") == builder.get("compiled_at")
+                ),
                 "can_launch": bool(
                     self_service_state
                     and self_service_state.get("ready")
+                    and builder.get("compiled_at")
+                    and builder.get("last_tested_compiled_at") == builder.get("compiled_at")
                     and not agent.enabled
                 ),
             }
@@ -1421,6 +1473,16 @@ def launch_self_service_employee(
             agent=agent,
             config=config,
         )
+        builder = dict((config.settings or {}).get("employee_builder") or {})
+        compiled_at = str(builder.get("compiled_at") or "").strip()
+        if not compiled_at or str(builder.get("last_tested_compiled_at") or "").strip() != compiled_at:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "Test the current employee build before launch",
+                    "blockers": ["Run Preview & Test once after the latest build or revision"],
+                },
+            )
         if not state["ready"]:
             raise HTTPException(
                 409,
@@ -1676,6 +1738,14 @@ def test_draft_employee(
             selected=selected,
             response=response,
         )
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        builder["last_tested_at"] = now_iso
+        builder["last_tested_compiled_at"] = builder.get("compiled_at")
+        builder["test_count"] = int(builder.get("test_count") or 0) + 1
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
         db.commit()
         return {
             "agent_id": agent.id,
