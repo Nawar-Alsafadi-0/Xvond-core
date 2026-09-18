@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 from backend.app.core.ai.provider_policy import runtime_selections
 from backend.app.core.config.settings import settings
+from backend.app.core.n8n_gateway import n8n_gateway
 from backend.app.core.config_secrets import reveal_config
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
@@ -25,6 +26,7 @@ from backend.app.modules.channels.catalog import (
     CHANNEL_SETUP_INTERNAL,
     CHANNEL_SETUP_MANAGED,
     CHANNEL_SETUP_SELF_SERVICE,
+    N8N_CHANNEL_ADAPTER,
     canonical_channel_type,
     customer_channel_types,
     get_channel_capability,
@@ -331,6 +333,11 @@ def configured_channel_types(db, *, company_id: int, agent_id: int) -> list[str]
                     continue
                 if any(not str(config.get(item) or "").strip() for item in required):
                     continue
+            elif capability.get("runtime_adapter") == N8N_CHANNEL_ADAPTER:
+                if not n8n_gateway.configured():
+                    continue
+                if not str(config.get("connection_key") or "").strip():
+                    continue
             else:
                 continue
 
@@ -430,6 +437,9 @@ def self_service_channel_activation_blockers(
             blockers.append("Voice: Xvond managed provisioning is not complete")
         elif any(not str(channel_config.get(key) or "").strip() for key in required):
             blockers.append("Voice: Vapi provisioning evidence is incomplete")
+    elif capability.get("runtime_adapter") == N8N_CHANNEL_ADAPTER:
+        if not n8n_gateway.configured():
+            blockers.append("Xvond managed channel gateway is not configured")
 
     return blockers
 
