@@ -521,6 +521,10 @@ def _provision_self_service_graph_trigger(
         plan = action_plan.get(action_type) or {}
         if not isinstance(action, dict):
             return "setup_required", None
+        if str(action.get("_xvond_permission_mode") or "").strip().lower() == "never":
+            # An owner-denied node is a deliberate no-op at runtime, not missing
+            # setup. Other graph work may still run normally.
+            continue
         if (
             action.get("confirmation_required", True)
             and action_type in nested_action_types
