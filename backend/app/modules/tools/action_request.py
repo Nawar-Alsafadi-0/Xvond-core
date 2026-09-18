@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import json
 
 from sqlalchemy import text
@@ -21,6 +22,12 @@ from backend.app.modules.integrations.email_smtp import (
 from backend.app.modules.integrations.email_imap import (
     EmailReadConnectorError,
     read_imap_messages,
+)
+from backend.app.modules.integrations.google_calendar import (
+    GoogleCalendarError,
+    google_calendar_create_event,
+    google_calendar_delete_event,
+    google_calendar_freebusy,
 )
 from backend.app.modules.automation.event_outbox import enqueue_automation_event
 from backend.app.modules.tools.base import AgentTool, ToolResult
@@ -521,6 +528,185 @@ def _email_read_call(
     return ToolResult(success=True, data=result)
 
 
+def _google_calendar_booking_window(
+    *,
+    action: dict,
+    details: dict,
+    config: dict,
+) -> tuple[str, str, str]:
+    date_field, time_field, _ = _schedule_fields(action)
+    date_value = str(details.get(date_field) or "").strip()
+    time_value = str(details.get(time_field) or "").strip()
+    if not date_value or not time_value:
+        raise GoogleCalendarError("Booking date and time are required")
+
+    timezone_name = str(
+        details.get("timezone")
+        or config.get("timezone")
+        or ""
+    ).strip()
+    if not timezone_name:
+        raise GoogleCalendarError("Company timezone is required for calendar booking")
+    try:
+        timezone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise GoogleCalendarError("Company timezone is invalid") from exc
+
+    try:
+        local_start = datetime.fromisoformat(
+            f"{date_value}T{time_value}"
+        )
+    except ValueError as exc:
+        raise GoogleCalendarError("Booking date or time is invalid") from exc
+    local_start = local_start.replace(tzinfo=timezone)
+
+    try:
+        duration = int(
+            details.get("duration_minutes")
+            or config.get("default_duration_minutes")
+            or 30
+        )
+    except (TypeError, ValueError) as exc:
+        raise GoogleCalendarError("Booking duration must be a number") from exc
+    duration = max(5, min(duration, 1440))
+    local_end = local_start + timedelta(minutes=duration)
+    return (
+        local_start.isoformat(timespec="seconds"),
+        local_end.isoformat(timespec="seconds"),
+        time_value,
+    )
+
+
+def _persist_google_token_updates(
+    db,
+    *,
+    integration: CompanyIntegration,
+    config: dict,
+    updates: dict,
+) -> dict:
+    if not updates:
+        return config
+    merged = {**config, **updates}
+    integration.config = merged
+    db.flush()
+    return merged
+
+
+def _google_calendar_call(
+    db,
+    *,
+    integration: CompanyIntegration,
+    config: dict,
+    action: dict,
+    payload: dict,
+    operation: str,
+    idempotency_key: str | None,
+) -> ToolResult:
+    details = payload.get("details") if isinstance(payload, dict) else {}
+    if not isinstance(details, dict):
+        details = {}
+
+    try:
+        if operation == "availability":
+            start, end, requested_time = _google_calendar_booking_window(
+                action=action,
+                details=details,
+                config=config,
+            )
+            freebusy, updates = google_calendar_freebusy(
+                config=config,
+                time_min=start,
+                time_max=end,
+            )
+            _persist_google_token_updates(
+                db,
+                integration=integration,
+                config=config,
+                updates=updates,
+            )
+            busy = list(freebusy.get("busy") or [])
+            available = not busy
+            return ToolResult(
+                success=True,
+                data={
+                    "available": available,
+                    "available_slots": [requested_time] if available else [],
+                    "busy": busy,
+                    "calendar_id": freebusy.get("calendar_id"),
+                    "start": start,
+                    "end": end,
+                },
+            )
+
+        if operation == "execute":
+            stable_key = str(idempotency_key or "").strip()
+            if not stable_key:
+                return ToolResult(
+                    success=False,
+                    error="Google Calendar booking requires a stable idempotency key",
+                )
+            start, end, _ = _google_calendar_booking_window(
+                action=action,
+                details=details,
+                config=config,
+            )
+            service = str(details.get("service") or "Appointment").strip()
+            customer = str(details.get("customer_name") or "").strip()
+            summary = service if not customer else f"{service} - {customer}"
+            description_parts = []
+            for key in ("phone", "notes"):
+                value = str(details.get(key) or "").strip()
+                if value:
+                    description_parts.append(f"{key.replace('_', ' ').title()}: {value}")
+            attendee = str(
+                details.get("email")
+                or details.get("customer_email")
+                or ""
+            ).strip()
+            created, updates = google_calendar_create_event(
+                config=config,
+                idempotency_key=stable_key,
+                summary=summary,
+                start_rfc3339=start,
+                end_rfc3339=end,
+                description="\n".join(description_parts),
+                attendees=[attendee] if attendee else [],
+            )
+            _persist_google_token_updates(
+                db,
+                integration=integration,
+                config=config,
+                updates=updates,
+            )
+            return ToolResult(success=True, data=created)
+
+        if operation == "cancel":
+            event_id = str(
+                payload.get("provider_event_id")
+                or details.get("provider_event_id")
+                or details.get("event_id")
+                or ""
+            ).strip()
+            deleted, updates = google_calendar_delete_event(
+                config=config,
+                event_id=event_id,
+            )
+            _persist_google_token_updates(
+                db,
+                integration=integration,
+                config=config,
+                updates=updates,
+            )
+            return ToolResult(success=True, data=deleted)
+
+        return ToolResult(
+            success=False,
+            error="Unsupported Google Calendar operation",
+        )
+    except GoogleCalendarError as exc:
+        return ToolResult(success=False, error=str(exc))
+
+
 def _integration_call(
     db,
     context: dict,
@@ -576,6 +762,17 @@ def _integration_call(
         headers.setdefault("Idempotency-Key", idempotency_key)
         headers.setdefault("X-Xvond-Idempotency-Key", idempotency_key)
     integration_type = integration.integration_type
+
+    if integration_type == "google_calendar":
+        return _google_calendar_call(
+            db,
+            integration=integration,
+            config=config,
+            action=action,
+            payload=payload,
+            operation=operation,
+            idempotency_key=idempotency_key,
+        )
 
     if integration_type == "instagram_publish":
         return _instagram_publish_call(
@@ -1021,6 +1218,12 @@ class ActionRequestTool(AgentTool):
         db.commit()
         db.refresh(request)
 
+        execute_result = current.get("result") if isinstance(current, dict) else {}
+        provider_event_id = (
+            (execute_result or {}).get("provider_event_id")
+            if isinstance(execute_result, dict)
+            else None
+        )
         result = _integration_call(
             db,
             context,
@@ -1029,6 +1232,7 @@ class ActionRequestTool(AgentTool):
             {
                 "operation": "cancel",
                 "request_id": request.id,
+                "provider_event_id": provider_event_id,
                 "details": _customer_details(request.details or {}),
             },
             "cancel",
