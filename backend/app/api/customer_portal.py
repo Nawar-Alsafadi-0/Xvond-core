@@ -233,6 +233,17 @@ def overview(current_user: User = Depends(require_customer_user)):
             portal_service_codes,
             enabled_modules,
         )
+        if has_self_service_employee:
+            navigation.insert(
+                1,
+                {
+                    "id": "employee-builder",
+                    "label": "Build your employee",
+                    "loader": "employee-builder",
+                    "group": "AI Workforce",
+                    "service_code": "ai_agents",
+                },
+            )
         navigation.insert(
             max(len(navigation) - 1, 1),
             {
