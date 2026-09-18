@@ -72,19 +72,19 @@ def _workflow_payload(result: dict) -> dict:
 
 
 class WorkflowActionRequestTool(ActionRequestTool):
-    """Authoritative business-action tool backed by the workflow engine.
+    """Authoritative business-action dispatcher.
 
     Xvond remains the control plane: it validates scope, collects customer data,
-    records request state and decides which action is allowed. The external
-    workflow engine is the only execution plane for availability checks,
-    execution and cancellation.
+    records request state and decides which action is allowed. Xvond-native
+    capabilities and customer-owned generic API integrations execute through the
+    hardened Core adapter so encrypted customer credentials never leave Xvond.
+    Packaged/managed workflow actions continue through the workflow engine.
     """
 
     description = (
-        "Run configured business actions through the Xvond Workflow Engine. "
-        "Xvond validates and tracks the request, while the workflow engine performs "
-        "availability checks, bookings, orders, CRM/POS/ERP/API work, notifications, "
-        "cancellations and other operational side effects."
+        "Run configured business actions through the correct Xvond execution path. "
+        "Native capabilities and protected customer connections stay inside Xvond; "
+        "packaged managed workflows use the Xvond Workflow Engine."
     )
 
     @staticmethod
@@ -127,9 +127,9 @@ class WorkflowActionRequestTool(ActionRequestTool):
             )
 
         destination = action.get("destination") or {}
-        # Xvond-native capabilities (for example the built-in booking system)
-        # stay inside the Core control/runtime path. Existing external systems
-        # continue through the workflow engine.
+        # Xvond-native capabilities and customer-owned generic integrations
+        # stay inside the hardened Core path. This keeps customer secrets encrypted
+        # at rest in Xvond instead of propagating them through workflow payloads.
         if str(destination.get("type") or "").strip() in {"xvond_internal", "integration"}:
             return super().execute(arguments, context)
 
