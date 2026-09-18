@@ -190,7 +190,11 @@ def self_service_spec_view(spec: dict | None) -> dict | None:
                     "name": capability.get("name"),
                     "setup_mode": capability.get("setup_mode"),
                     "runtime_state": capability.get("runtime_state"),
-                    "runtime_adapter": capability.get("runtime_adapter"),
+                    "runtime_adapter": (
+                        "xvond_managed"
+                        if capability.get("setup_mode") == CHANNEL_SETUP_MANAGED
+                        else "xvond_native"
+                    ),
                 }
     return rendered
 
