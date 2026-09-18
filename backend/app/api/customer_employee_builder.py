@@ -66,7 +66,12 @@ from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord
 from backend.app.modules.tools.models import AgentToolAssignment
 from backend.app.modules.tools.business_models import ActionRequest
 from backend.app.modules.integrations.models import CompanyIntegration
-from backend.app.modules.integrations.catalog import integration_validation_ready
+from backend.app.modules.integrations.catalog import (
+    compatible_integration_types,
+    executable_integration_types,
+    integration_requires_operation_endpoints,
+    integration_validation_ready,
+)
 
 router = APIRouter(
     prefix="/customer/employee-builder",
@@ -2067,31 +2072,17 @@ def bind_self_service_integration(
         if str(requirement.get("kind") or "").strip().lower() == "channel":
             raise HTTPException(409, "Communication channels use their dedicated connection flow")
 
-        executable_types = {
-            "custom_api",
-            "pos",
-            "crm",
-            "erp",
-            "webhook",
-            "instagram_publish",
-            "email_smtp",
-            "email_imap",
-        }
-        required_connector_types = {
-            "instagram_publish": {"instagram_publish"},
-            "email_send": {"email_smtp"},
-            "email_read": {"email_imap"},
-        }
-        allowed_for_requirement = required_connector_types.get(key)
-        if allowed_for_requirement and integration.integration_type not in allowed_for_requirement:
-            raise HTTPException(
-                409,
-                f"{key.replace('_', ' ').title()} requires its packaged Xvond connector.",
-            )
+        executable_types = executable_integration_types()
+        compatible_types = compatible_integration_types(key)
         if integration.integration_type not in executable_types:
             raise HTTPException(
                 409,
-                "This connected-system type does not have a generic execution adapter. Use Custom API or an Xvond packaged connector.",
+                "This connected-system type does not have a real execution adapter yet.",
+            )
+        if integration.integration_type not in compatible_types:
+            raise HTTPException(
+                409,
+                f"{key.replace('_', ' ').title()} requires a compatible Xvond connector.",
             )
         if key == "booking" and integration.integration_type == "webhook":
             raise HTTPException(
@@ -2099,9 +2090,9 @@ def bind_self_service_integration(
                 "Booking needs a two-way API so Xvond can verify availability before creating the booking",
             )
 
-        execute_required = integration.integration_type in {
-            "custom_api", "pos", "crm", "erp"
-        }
+        execute_required = integration_requires_operation_endpoints(
+            integration.integration_type
+        )
         execute_endpoint = _relative_endpoint(
             data.execute_endpoint,
             required=execute_required,
