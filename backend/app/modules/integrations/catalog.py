@@ -2,6 +2,10 @@ INTEGRATION_CATALOG = {
 
     "email_smtp": {
         "name": "Email (SMTP)",
+        "execution_adapter": "email_smtp",
+        "requirement_keys": ["email_send"],
+        "generic_requirements": False,
+        "operation_endpoints": False,
         "description": "Send email securely through the customer's SMTP provider",
         "config_fields": [
             {
@@ -40,6 +44,10 @@ INTEGRATION_CATALOG = {
 
     "email_imap": {
         "name": "Email Inbox (IMAP)",
+        "execution_adapter": "email_imap",
+        "requirement_keys": ["email_read"],
+        "generic_requirements": False,
+        "operation_endpoints": False,
         "description": "Read email securely from the customer's inbox without marking messages as read",
         "config_fields": [
             {
@@ -79,6 +87,10 @@ INTEGRATION_CATALOG = {
 
     "instagram_publish": {
         "name": "Instagram Publishing",
+        "execution_adapter": "instagram_publish",
+        "requirement_keys": ["instagram_publish"],
+        "generic_requirements": False,
+        "operation_endpoints": False,
         "description": "Publish media and captions to an Instagram professional account",
         "config_fields": [
             {
@@ -98,6 +110,10 @@ INTEGRATION_CATALOG = {
 
     "pos": {
         "name": "POS",
+        "execution_adapter": "http_api",
+        "requirement_keys": [],
+        "generic_requirements": True,
+        "operation_endpoints": True,
         "description": "Point of Sale system",
         "config_fields": [
             {
@@ -123,6 +139,10 @@ INTEGRATION_CATALOG = {
 
     "crm": {
         "name": "CRM",
+        "execution_adapter": "http_api",
+        "requirement_keys": [],
+        "generic_requirements": True,
+        "operation_endpoints": True,
         "description": "Customer Relationship Management system",
         "config_fields": [
             {
@@ -148,6 +168,10 @@ INTEGRATION_CATALOG = {
 
     "erp": {
         "name": "ERP",
+        "execution_adapter": "http_api",
+        "requirement_keys": [],
+        "generic_requirements": True,
+        "operation_endpoints": True,
         "description": "Enterprise Resource Planning system",
         "config_fields": [
             {
@@ -198,6 +222,10 @@ INTEGRATION_CATALOG = {
 
     "webhook": {
         "name": "Webhook",
+        "execution_adapter": "webhook",
+        "requirement_keys": [],
+        "generic_requirements": True,
+        "operation_endpoints": False,
         "description": "Send business events to an external webhook",
         "config_fields": [
             {
@@ -217,6 +245,10 @@ INTEGRATION_CATALOG = {
 
     "custom_api": {
         "name": "Custom API",
+        "execution_adapter": "http_api",
+        "requirement_keys": [],
+        "generic_requirements": True,
+        "operation_endpoints": True,
         "description": "Connect any external business API",
         "config_fields": [
             {
@@ -259,6 +291,41 @@ def list_integration_definitions():
         for key, value
         in INTEGRATION_CATALOG.items()
     ]
+
+
+def executable_integration_types() -> set[str]:
+    return {
+        key
+        for key, definition in INTEGRATION_CATALOG.items()
+        if str(definition.get("execution_adapter") or "").strip()
+    }
+
+
+def compatible_integration_types(requirement_key: str) -> set[str]:
+    key = str(requirement_key or "").strip().lower()
+    packaged = {
+        integration_type
+        for integration_type, definition in INTEGRATION_CATALOG.items()
+        if key
+        and key in {
+            str(item or "").strip().lower()
+            for item in (definition.get("requirement_keys") or [])
+        }
+        and str(definition.get("execution_adapter") or "").strip()
+    }
+    if packaged:
+        return packaged
+    return {
+        integration_type
+        for integration_type, definition in INTEGRATION_CATALOG.items()
+        if definition.get("generic_requirements") is True
+        and str(definition.get("execution_adapter") or "").strip()
+    }
+
+
+def integration_requires_operation_endpoints(integration_type: str) -> bool:
+    definition = get_integration_definition(str(integration_type or "").strip().lower())
+    return bool(definition and definition.get("operation_endpoints") is True)
 
 
 def validate_integration_config(
