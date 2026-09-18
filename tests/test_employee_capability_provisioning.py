@@ -22,7 +22,7 @@ from backend.app.modules.ai_agent.employee_capability_builder import build_manag
 from backend.app.modules.ai_agent.employee_compiler import normalize_compiled_spec
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
-from backend.app.modules.automation.models import AutomationWorkflow
+from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.tools.business_models import ActionRequest
 from backend.app.modules.tools.models import AgentToolAssignment
 from backend.app.modules.tools.executor import ToolExecutor
@@ -596,28 +596,37 @@ def test_self_service_job_brief_revision_clears_only_generated_build_artifacts(d
             "destination": {"type": "integration", "integration_id": 99},
         }
         assignment.config = assignment_config
-        db.add_all([
-            AutomationWorkflow(
+        generated = AutomationWorkflow(
+            company_id=1,
+            name="Generated old schedule",
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_requirement_key": KEY,
+            },
+            steps=[],
+            enabled=False,
+        )
+        manual = AutomationWorkflow(
+            company_id=1,
+            name="Manual schedule",
+            trigger_type="schedule",
+            trigger_config={"schedule": {"kind": "interval", "every_minutes": 60}},
+            steps=[],
+            enabled=False,
+        )
+        db.add_all([generated, manual])
+        db.flush()
+        db.add(
+            AutomationRun(
                 company_id=1,
-                name="Generated old schedule",
-                trigger_type="schedule",
-                trigger_config={
-                    "_xvond_source": "self_service_employee",
-                    "_xvond_agent_id": 1,
-                    "_xvond_requirement_key": KEY,
-                },
-                steps=[],
-                enabled=False,
-            ),
-            AutomationWorkflow(
-                company_id=1,
-                name="Manual schedule",
-                trigger_type="schedule",
-                trigger_config={"schedule": {"kind": "interval", "every_minutes": 60}},
-                steps=[],
-                enabled=False,
-            ),
-        ])
+                workflow_id=generated.id,
+                status="completed",
+                input_data={},
+                output_data={"historical": True},
+            )
+        )
         db.commit()
 
     revised = "Create content drafts for my social posts and organize the writing work."
@@ -649,8 +658,16 @@ def test_self_service_job_brief_revision_clears_only_generated_build_artifacts(d
         assert set(actions) == {"operator_action"}
         assert actions["operator_action"]["destination"]["integration_id"] == 99
 
-        workflows = db.query(AutomationWorkflow).all()
-        assert [item.name for item in workflows] == ["Manual schedule"]
+        workflows = {item.name: item for item in db.query(AutomationWorkflow).all()}
+        assert set(workflows) == {"Generated old schedule", "Manual schedule"}
+        retired = workflows["Generated old schedule"]
+        assert retired.enabled is False
+        assert retired.trigger_config["_xvond_source"] == "self_service_employee_retired"
+        assert retired.trigger_config["_xvond_retired_at"]
+        assert db.query(AutomationRun).filter_by(workflow_id=retired.id).count() == 1
+        assert workflows["Manual schedule"].trigger_config == {
+            "schedule": {"kind": "interval", "every_minutes": 60}
+        }
 
 
 def test_job_brief_revision_is_self_service_only(database):
