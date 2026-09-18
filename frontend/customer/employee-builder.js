@@ -127,6 +127,42 @@
             return '<span class="muted">A company Owner or Admin must choose the plan.</span>';
         }
 
+        if (type === "connect_system") {
+            const encodedKey = encodeURIComponent(String(action?.key || ""));
+            const isBooking = String(action?.key || "") === "booking";
+            return `
+                <div class="employee-builder-setup-answer" data-connect-system="${encodedKey}">
+                    <strong>${escapeHtml(action?.label || "Connect existing system")}</strong>
+                    ${action?.detail ? `<p class="muted">${escapeHtml(action.detail)}</p>` : ""}
+                    <label>
+                        <span>Connected system</span>
+                        <select data-integration-select="${encodedKey}">
+                            <option value="">Loading connections…</option>
+                        </select>
+                    </label>
+                    <label>
+                        <span>${isBooking ? "Create booking endpoint" : "Execute endpoint"}</span>
+                        <input type="text" data-integration-execute="${encodedKey}" placeholder="/api/bookings">
+                    </label>
+                    ${isBooking ? `
+                        <label>
+                            <span>Availability endpoint</span>
+                            <input type="text" data-integration-availability="${encodedKey}" placeholder="/api/availability">
+                        </label>
+                    ` : ""}
+                    <label>
+                        <span>Cancel endpoint (optional)</span>
+                        <input type="text" data-integration-cancel="${encodedKey}" placeholder="/api/bookings/{id}/cancel">
+                    </label>
+                    <div class="employee-builder-actions">
+                        <button type="button" data-bind-integration="${encodedKey}">Use this connection</button>
+                        <button type="button" data-open-integrations>Manage connections</button>
+                    </div>
+                    <div class="error" data-integration-bind-error="${encodedKey}"></div>
+                </div>
+            `;
+        }
+
         if (type === "provide_input") {
             const encodedKey = encodeURIComponent(String(action?.key || ""));
             const fields = Array.isArray(action?.fields) ? action.fields : [];
@@ -498,6 +534,66 @@
                 button.disabled = true;
                 try {
                     await runJourneyAction(String(button.dataset.builderAction || ""));
+                } finally {
+                    if (document.body.contains(button)) button.disabled = false;
+                }
+            });
+        });
+
+        async function loadBuilderConnections() {
+            const selects = Array.from(document.querySelectorAll("[data-integration-select]"));
+            if (!selects.length) return;
+            try {
+                const result = await api("/manage/integrations");
+                const integrations = (result.integrations || []).filter(item => item.enabled && item.configured);
+                const options = '<option value="">Choose a connected system</option>' + integrations.map(item =>
+                    `<option value="${Number(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(item.integration_type)}</option>`
+                ).join("");
+                for (const select of selects) select.innerHTML = options;
+            } catch (err) {
+                for (const select of selects) {
+                    select.innerHTML = '<option value="">Could not load connections</option>';
+                }
+            }
+        }
+        loadBuilderConnections();
+
+        document.querySelectorAll("[data-open-integrations]").forEach(button => {
+            button.addEventListener("click", () => openJourneyPage("integrations"));
+        });
+
+        document.querySelectorAll("[data-bind-integration]").forEach(button => {
+            button.addEventListener("click", async () => {
+                const encodedKey = String(button.dataset.bindIntegration || "");
+                const key = decodeURIComponent(encodedKey);
+                const select = document.querySelector(`[data-integration-select="${encodedKey}"]`);
+                const execute = document.querySelector(`[data-integration-execute="${encodedKey}"]`);
+                const availability = document.querySelector(`[data-integration-availability="${encodedKey}"]`);
+                const cancel = document.querySelector(`[data-integration-cancel="${encodedKey}"]`);
+                const error = document.querySelector(`[data-integration-bind-error="${encodedKey}"]`);
+                if (error) error.textContent = "";
+                const integrationId = Number(select?.value || 0);
+                if (!integrationId) {
+                    if (error) error.textContent = "Choose a connected system first.";
+                    return;
+                }
+                button.disabled = true;
+                try {
+                    await api(
+                        `/customer/employee-builder/${Number(employee.agent_id)}/connections/${encodeURIComponent(key)}`,
+                        {
+                            method: "POST",
+                            body: JSON.stringify({
+                                integration_id: integrationId,
+                                execute_endpoint: String(execute?.value || "").trim() || null,
+                                availability_endpoint: String(availability?.value || "").trim() || null,
+                                cancel_endpoint: String(cancel?.value || "").trim() || null,
+                            }),
+                        }
+                    );
+                    await loadEmployeeBuilder();
+                } catch (err) {
+                    if (error) error.textContent = err?.message || "Could not connect this system.";
                 } finally {
                     if (document.body.contains(button)) button.disabled = false;
                 }
