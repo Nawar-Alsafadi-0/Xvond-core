@@ -2503,6 +2503,92 @@ def test_draft_employee(
 
         config = _employee_config_or_404(db, agent)
 
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            builder.get("pending_revision")
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        pending_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            and isinstance(pending.get("compiled_spec"), dict)
+            else None
+        )
+        if pending_spec is not None:
+            if not _has_ai_agents_entitlement(db, current_user.company_id):
+                raise HTTPException(
+                    403,
+                    detail={
+                        "message": "Subscribe to test a staged live revision",
+                        "subscription_required": True,
+                    },
+                )
+            limits_service.check_token_limit(db, current_user.company_id)
+            selections = runtime_selections(
+                db,
+                current_user.company_id,
+                agent.provider,
+                agent.model,
+                message=data.message,
+            )
+            if not selections:
+                raise HTTPException(503, "No eligible AI provider/model is available")
+
+            response = None
+            selected = None
+            staged_prompt = build_compiled_employee_system_prompt(
+                owner_name=company.name,
+                spec=pending_spec,
+            )
+            for candidate in selections:
+                try:
+                    response = ai_engine.generate(
+                        provider_name=candidate.provider,
+                        system_prompt=staged_prompt,
+                        user_message=data.message,
+                        model=candidate.model,
+                        tools=None,
+                    )
+                    selected = candidate
+                    break
+                except ProviderExecutionError:
+                    continue
+            if response is None or selected is None:
+                raise HTTPException(503, "AI provider is temporarily unavailable")
+
+            _record_ai_usage(
+                db,
+                company_id=current_user.company_id,
+                agent_id=agent.id,
+                selected=selected,
+                response=response,
+            )
+            now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            pending["last_tested_at"] = now_iso
+            pending["last_tested_compiled_at"] = pending.get("compiled_at")
+            pending["test_count"] = int(pending.get("test_count") or 0) + 1
+            pending["status"] = "tested"
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "agent_id": agent.id,
+                "lifecycle": "live",
+                "test_target": "pending_revision",
+                "message": response.text,
+                "usage": {
+                    "input_tokens": response.input_tokens,
+                    "output_tokens": response.output_tokens,
+                    "total_tokens": response.total_tokens,
+                },
+                "free_tests_remaining": None,
+                "tools_used": False,
+                "channels_used": False,
+            }
+
         has_entitlement = _has_ai_agents_entitlement(db, current_user.company_id)
         is_self_service = str(company.onboarding_source or "managed") == "self_service"
         free_tests_remaining = None
