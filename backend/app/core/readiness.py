@@ -9,6 +9,7 @@ from backend.app.core.config_secrets import (
     reveal_config,
 )
 from backend.app.core.error_safety import safe_error_label
+from backend.app.core.n8n_channel_gateway import N8NChannelGatewayError, n8n_channel_gateway
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
 from backend.app.models.company_profile import CompanyProfile
@@ -21,7 +22,11 @@ from backend.app.modules.ai_agent.self_service_policy import (
 )
 from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
 from backend.app.modules.channels.acceptance import customer_roundtrip_verified
-from backend.app.modules.channels.catalog import validate_channel_config
+from backend.app.modules.channels.catalog import (
+    N8N_CHANNEL_RUNTIME_ADAPTER,
+    get_channel_capability,
+    validate_channel_config,
+)
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
 from backend.app.modules.integrations.catalog import validate_integration_config
@@ -310,19 +315,48 @@ def company_readiness(db, company_id: int):
                 channel.channel_type,
                 channel_config,
             )
+            capability = get_channel_capability(channel.channel_type) or {}
+            if (
+                configured
+                and capability.get("runtime_adapter") == N8N_CHANNEL_RUNTIME_ADAPTER
+                and str(channel_config.get("provisioning_state") or "").strip().lower()
+                != "connected"
+            ):
+                configured = False
+                error = "Xvond managed channel provisioning is incomplete"
+
             connection = None
             if configured and channel.channel_type == "whatsapp":
                 connection = whatsapp_connection_state(
                     channel_config,
                     verify_remote=True,
                 )
-            connected = bool(
+                connected = bool(connection["connected"])
+            elif (
                 configured
-                and (
-                    channel.channel_type != "whatsapp"
-                    or (connection and connection["connected"] is True)
-                )
-            )
+                and capability.get("runtime_adapter") == N8N_CHANNEL_RUNTIME_ADAPTER
+            ):
+                if not n8n_channel_gateway.configured():
+                    connected = False
+                    error = "Xvond managed channel gateway is not configured"
+                else:
+                    try:
+                        route = n8n_channel_gateway.check_channel(
+                            company_id=channel.company_id,
+                            agent_id=channel.agent_id,
+                            channel_id=channel.id,
+                            channel_type=channel.channel_type,
+                        )
+                    except N8NChannelGatewayError:
+                        route = {"success": False}
+                    connected = bool(
+                        route.get("success")
+                        and (route.get("data") or {}).get("connected") is True
+                    )
+                    if not connected:
+                        error = "Xvond managed channel route is unavailable"
+            else:
+                connected = bool(configured)
             roundtrip_verified = customer_roundtrip_verified(channel_config)
             customer_accepted = _channel_customer_accepted(
                 channel_type=channel.channel_type,
