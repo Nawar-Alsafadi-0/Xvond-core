@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import json
 
 from sqlalchemy import text
 
@@ -269,6 +270,123 @@ def _internal_slots(
     )
 
 
+def _instagram_publish_call(
+    *,
+    config: dict,
+    payload: dict,
+    operation: str,
+) -> ToolResult:
+    if operation != "execute":
+        return ToolResult(
+            success=False,
+            error="Instagram publishing currently supports execute only",
+        )
+
+    instagram_user_id = str(config.get("instagram_user_id") or "").strip()
+    access_token = str(config.get("access_token") or "").strip()
+    if not instagram_user_id or not access_token:
+        return ToolResult(
+            success=False,
+            error="Instagram publishing connection is incomplete",
+        )
+
+    details = payload.get("details") if isinstance(payload, dict) else {}
+    if not isinstance(details, dict):
+        details = {}
+    image_url = str(
+        details.get("image_url")
+        or details.get("media_url")
+        or ""
+    ).strip()
+    caption = str(
+        details.get("caption")
+        or details.get("ai_response")
+        or details.get("text")
+        or ""
+    ).strip()
+    if not image_url:
+        return ToolResult(
+            success=False,
+            error="Instagram publishing requires image_url or media_url",
+        )
+
+    try:
+        validate_public_http_url(image_url)
+        container = safe_http_request(
+            url=f"https://graph.facebook.com/{instagram_user_id}/media",
+            method="POST",
+            headers={"Authorization": f"Bearer {access_token}"},
+            form_data={
+                "image_url": image_url,
+                "caption": caption[:2200],
+            },
+            timeout=20,
+            max_response_bytes=128_000,
+        )
+    except Exception as exc:
+        return ToolResult(success=False, error=str(exc))
+
+    container_status = int(container.get("status_code") or 0)
+    if not 200 <= container_status < 300:
+        return ToolResult(
+            success=False,
+            data={"container_http": container},
+            error=f"Instagram media container returned HTTP {container_status}",
+        )
+    try:
+        container_body = json.loads(container.get("response") or "{}")
+    except ValueError:
+        return ToolResult(
+            success=False,
+            data={"container_http": container},
+            error="Instagram media container returned invalid JSON",
+        )
+    creation_id = str(container_body.get("id") or "").strip()
+    if not creation_id:
+        return ToolResult(
+            success=False,
+            data={"container_http": container},
+            error="Instagram media container did not return a creation id",
+        )
+
+    try:
+        published = safe_http_request(
+            url=f"https://graph.facebook.com/{instagram_user_id}/media_publish",
+            method="POST",
+            headers={"Authorization": f"Bearer {access_token}"},
+            form_data={"creation_id": creation_id},
+            timeout=20,
+            max_response_bytes=128_000,
+        )
+    except Exception as exc:
+        return ToolResult(success=False, error=str(exc))
+
+    publish_status = int(published.get("status_code") or 0)
+    if not 200 <= publish_status < 300:
+        return ToolResult(
+            success=False,
+            data={
+                "creation_id": creation_id,
+                "publish_http": published,
+            },
+            error=f"Instagram publish returned HTTP {publish_status}",
+        )
+    try:
+        publish_body = json.loads(published.get("response") or "{}")
+    except ValueError:
+        publish_body = {}
+
+    return ToolResult(
+        success=True,
+        data={
+            "provider": "instagram",
+            "creation_id": creation_id,
+            "media_id": publish_body.get("id"),
+        },
+        error=None,
+    )
+
+
 def _integration_call(
     db,
     context: dict,
@@ -324,6 +442,13 @@ def _integration_call(
         headers.setdefault("Idempotency-Key", idempotency_key)
         headers.setdefault("X-Xvond-Idempotency-Key", idempotency_key)
     integration_type = integration.integration_type
+
+    if integration_type == "instagram_publish":
+        return _instagram_publish_call(
+            config=config,
+            payload=payload,
+            operation=operation,
+        )
 
     if integration_type == "webhook":
         url = str(config.get("url") or "").strip()
