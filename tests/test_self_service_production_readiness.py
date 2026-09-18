@@ -208,6 +208,46 @@ def test_self_service_knowledge_requirement_resolves_only_after_enabled_knowledg
     assert "knowledge" not in state["resolved_requirements"]
 
     with factory() as db:
+        db.add(
+            Company(
+                id=9,
+                name="Other tenant",
+                active=False,
+                lifecycle_status="onboarding",
+                onboarding_source="self_service",
+            )
+        )
+        db.flush()
+        foreign_document = KnowledgeDocument(
+            company_id=9,
+            title="Wrong tenant knowledge",
+            source_type="text",
+            content="This must never satisfy another tenant.",
+            enabled=True,
+        )
+        db.add(foreign_document)
+        db.flush()
+        db.add(
+            AgentKnowledge(
+                agent_id=1,
+                document_id=foreign_document.id,
+                enabled=True,
+            )
+        )
+        db.commit()
+
+    with factory() as db:
+        state = self_service_policy.self_service_readiness(
+            db,
+            company=db.get(Company, 1),
+            agent=db.get(AIAgent, 1),
+            config=db.query(AgentConfig).filter_by(agent_id=1).one(),
+        )
+    assert state["ready"] is False
+    assert "knowledge: setup required" in state["blockers"]
+    assert "knowledge" not in state["resolved_requirements"]
+
+    with factory() as db:
         document = KnowledgeDocument(
             company_id=1,
             title="Owner rules",
