@@ -63,6 +63,14 @@ class Settings:
     PADDLE_CHECKOUT_URL = os.getenv("PADDLE_CHECKOUT_URL", "").strip()
     PADDLE_PRICE_MAP_JSON = os.getenv("PADDLE_PRICE_MAP_JSON", "{}").strip() or "{}"
     PADDLE_WEBHOOK_TOLERANCE_SECONDS = max(5, int(os.getenv("PADDLE_WEBHOOK_TOLERANCE_SECONDS", "30")))
+    TAP_SECRET_KEY = os.getenv("TAP_SECRET_KEY", "").strip()
+    TAP_MERCHANT_ID = os.getenv("TAP_MERCHANT_ID", "").strip()
+    TAP_SOURCE_ID = os.getenv("TAP_SOURCE_ID", "src_all").strip() or "src_all"
+    TAP_SAVE_CARD_FOR_RECURRING = os.getenv(
+        "TAP_SAVE_CARD_FOR_RECURRING",
+        "true",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    TAP_REDIRECT_URL = os.getenv("TAP_REDIRECT_URL", "").strip()
     KNOWLEDGE_SEMANTIC_ENABLED = os.getenv("KNOWLEDGE_SEMANTIC_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     KNOWLEDGE_EMBEDDING_PROVIDER = os.getenv("KNOWLEDGE_EMBEDDING_PROVIDER", "openai").strip().lower()
     KNOWLEDGE_EMBEDDING_MODEL = os.getenv("KNOWLEDGE_EMBEDDING_MODEL", "text-embedding-3-small").strip()
@@ -95,8 +103,8 @@ class Settings:
             errors.append("ACCESS_TOKEN_EXPIRE_MINUTES must be between 5 and 1440")
         if self.KNOWLEDGE_EMBEDDING_PROVIDER not in {"openai"}:
             errors.append("KNOWLEDGE_EMBEDDING_PROVIDER must be a supported provider")
-        if self.BILLING_PROVIDER not in {"none", "paddle"}:
-            errors.append("BILLING_PROVIDER must be none or paddle")
+        if self.BILLING_PROVIDER not in {"none", "paddle", "tap"}:
+            errors.append("BILLING_PROVIDER must be none, paddle or tap")
         if self.PADDLE_ENVIRONMENT not in {"sandbox", "live"}:
             errors.append("PADDLE_ENVIRONMENT must be sandbox or live")
         if self.BILLING_PROVIDER == "paddle":
@@ -112,6 +120,20 @@ class Settings:
                 errors.append("PADDLE_ENVIRONMENT must be live in production when Paddle billing is enabled")
             if self.is_production and not self.PADDLE_CHECKOUT_URL.startswith("https://"):
                 errors.append("PADDLE_CHECKOUT_URL must use HTTPS in production")
+        if self.BILLING_PROVIDER == "tap":
+            if not self.TAP_SECRET_KEY:
+                errors.append("TAP_SECRET_KEY is required when Tap billing is enabled")
+            if not self.TAP_MERCHANT_ID:
+                errors.append("TAP_MERCHANT_ID is required when Tap billing is enabled")
+            if self.is_production and not self.TAP_SECRET_KEY.startswith("sk_live_"):
+                errors.append("TAP_SECRET_KEY must be a live key in production")
+            tap_redirect = self.TAP_REDIRECT_URL or (
+                f"{self.PUBLIC_BASE_URL}/billing/return"
+                if self.PUBLIC_BASE_URL
+                else ""
+            )
+            if self.is_production and not tap_redirect.startswith("https://"):
+                errors.append("Tap redirect URL must use HTTPS in production")
         if self.N8N_ENABLED:
             if not self.N8N_WEBHOOK_URL:
                 errors.append("N8N_WEBHOOK_URL is required when n8n is enabled")
