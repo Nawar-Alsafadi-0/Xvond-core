@@ -12,6 +12,7 @@ services:
       APP_ENV: production
       DATABASE_URL: ${DATABASE_URL_DOCKER:?DATABASE_URL_DOCKER is required}
       REDIS_URL: redis://redis:6379/0
+      MEDIA_STORAGE_DIR: /var/lib/xvond/media
       BACKUP_STATUS_DIR: /backup-status
       BACKUP_STALE_AFTER_SECONDS: ${BACKUP_STALE_AFTER_SECONDS:-129600}
     volumes:
