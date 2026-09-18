@@ -649,41 +649,6 @@ def _self_service_builder_journey(
             "Activate an AI Employee plan before AI-backed compilation.",
         )
 
-    compiled_at = str(builder.get("compiled_at") or "").strip()
-    tested_build = bool(
-        compiled_at
-        and str(builder.get("last_tested_compiled_at") or "").strip() == compiled_at
-    )
-    if tested_build:
-        add_stage(
-            "test",
-            "Preview & Test",
-            "complete",
-            "The current employee build has been tested safely without live channels or business actions.",
-        )
-    elif provisioned and has_entitlement:
-        add_stage(
-            "test",
-            "Preview & Test",
-            "action_required",
-            "Chat with this exact draft before launch. Preview testing never sends through live channels or executes business actions.",
-            [_builder_action("test_employee", "Test employee", target="builder")],
-        )
-    elif provisioned:
-        add_stage(
-            "test",
-            "Preview & Test",
-            "blocked",
-            "Activate the AI Employee plan before testing this build.",
-        )
-    else:
-        add_stage(
-            "test",
-            "Preview & Test",
-            "blocked",
-            "Build the employee before testing it.",
-        )
-
     setup_actions: list[dict] = []
     waiting_reasons: list[str] = []
     if compiled:
@@ -915,6 +880,51 @@ def _self_service_builder_journey(
             "blocked",
             "Build the employee first so Xvond can determine the exact setup it needs.",
         )
+
+    compiled_at = str(builder.get("compiled_at") or "").strip()
+    tested_build = bool(
+        compiled_at
+        and str(builder.get("last_tested_compiled_at") or "").strip() == compiled_at
+    )
+    setup_stage = next((item for item in stages if item.get("id") == "setup"), {})
+    setup_complete = setup_stage.get("status") == "complete"
+    if tested_build and setup_complete:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "complete",
+            "The current employee build has been tested safely without live channels or business actions.",
+        )
+    elif provisioned and has_entitlement and setup_complete:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "action_required",
+            "Chat with this exact draft before launch. Preview testing never sends through live channels or executes business actions.",
+            [_builder_action("test_employee", "Test employee", target="builder")],
+        )
+    elif provisioned and not setup_complete:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "blocked",
+            "Finish the required setup for this build before preview testing.",
+        )
+    elif provisioned:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "blocked",
+            "Activate the AI Employee plan before testing this build.",
+        )
+    else:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "blocked",
+            "Build the employee before testing it.",
+        )
+
 
     if agent.enabled:
         add_stage(
