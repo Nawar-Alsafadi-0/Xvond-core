@@ -125,17 +125,28 @@ def test_release_rechecks_workflow_can_reach_new_api_after_cutover():
 
 
 def test_workflow_sync_publishes_and_sets_active_before_restart():
-    publish = WORKFLOW_SYNC.index('publish:workflow --id="$WORKFLOW_ID"')
-    activate = WORKFLOW_SYNC.index('update:workflow --id="$WORKFLOW_ID" --active=true')
+    helper = WORKFLOW_SYNC.index("sync_one_workflow()")
+    publish = WORKFLOW_SYNC.index('publish:workflow --id="$workflow_id"', helper)
+    activate = WORKFLOW_SYNC.index(
+        'update:workflow --id="$workflow_id" --active=true',
+        helper,
+    )
+    action_sync = WORKFLOW_SYNC.index(
+        'sync_one_workflow "$ACTION_WORKFLOW_FILE" "$ACTION_WORKFLOW_ID"'
+    )
+    channel_sync = WORKFLOW_SYNC.index(
+        'sync_one_workflow "$CHANNEL_WORKFLOW_FILE" "$CHANNEL_WORKFLOW_ID"'
+    )
     restart = WORKFLOW_SYNC.index("up -d --no-deps workflow-engine")
-    assert publish < activate < restart
+    assert helper < publish < activate < action_sync < channel_sync < restart
 
 
 def test_workflow_sync_retries_transient_runtime_startup_failures():
     assert 'attempts="${1:-90}"' in WORKFLOW_SYNC
     assert 'process.exit(2)' in WORKFLOW_SYNC
     assert 'sleep 1' in WORKFLOW_SYNC
-    assert 'invalid_contract_response' in WORKFLOW_SYNC
+    assert 'invalid_action_gateway_response' in WORKFLOW_SYNC
+    assert 'invalid_channel_gateway_response' in WORKFLOW_SYNC
     assert 'Last runtime probe error:' in WORKFLOW_SYNC
 
 
