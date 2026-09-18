@@ -5,6 +5,11 @@ import re
 from urllib.parse import urlparse
 
 from backend.app.core.config_secrets import reveal_config
+from backend.app.models.company import Company
+from backend.app.models.company_profile import CompanyProfile
+from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.automation.models import AutomationWorkflow
+from backend.app.modules.automation.schedule import ScheduleConfigError, normalize_schedule_config
 from backend.app.modules.ai_agent.employee_compiler import normalize_requirement_key
 from backend.app.modules.tools.models import AgentToolAssignment
 
@@ -83,10 +88,140 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
             "allowed_hosts": _grounded_https_hosts(spec),
             "job_summary": str(spec.get("summary") or "")[:1000],
             "job_brief": str(spec.get("job_brief") or "")[:2000],
+            "runtime_inputs": dict(requirement.get("runtime_inputs") or {}),
         },
         "availability": {"mode": "none"},
         "xvond_generated": True,
     }
+
+
+def _scheduled_runtime_fields(requirement: dict) -> list[str]:
+    result: list[str] = []
+    for step in requirement.get("execution_plan") or []:
+        if not isinstance(step, dict):
+            continue
+        field = None
+        if step.get("op") == "http_get_json":
+            field = step.get("url_field")
+        elif step.get("op") == "compare":
+            field = step.get("value_field")
+        key = normalize_requirement_key(field)
+        if key and key not in result:
+            result.append(key)
+    return result
+
+
+def _company_context(db, agent_id: int) -> tuple[Company | None, str | None]:
+    agent = db.query(AIAgent).filter(AIAgent.id == agent_id).first()
+    if agent is None:
+        return None, None
+    company = db.query(Company).filter(Company.id == agent.company_id).first()
+    profile = (
+        db.query(CompanyProfile)
+        .filter(CompanyProfile.company_id == agent.company_id)
+        .first()
+    )
+    timezone = str(profile.timezone or "").strip() if profile is not None else None
+    return company, timezone or None
+
+
+def _generated_schedule_workflow(
+    db,
+    *,
+    company_id: int,
+    agent_id: int,
+    requirement_key: str,
+) -> AutomationWorkflow | None:
+    rows = (
+        db.query(AutomationWorkflow)
+        .filter(
+            AutomationWorkflow.company_id == company_id,
+            AutomationWorkflow.trigger_type == "schedule",
+        )
+        .all()
+    )
+    for row in rows:
+        config = row.trigger_config if isinstance(row.trigger_config, dict) else {}
+        if (
+            config.get("_xvond_source") == "self_service_employee"
+            and int(config.get("_xvond_agent_id") or 0) == int(agent_id)
+            and str(config.get("_xvond_requirement_key") or "") == requirement_key
+        ):
+            return row
+    return None
+
+
+def _provision_self_service_schedule(
+    db,
+    *,
+    company: Company,
+    timezone: str | None,
+    agent_id: int,
+    requirement: dict,
+    action: dict,
+) -> tuple[str, int | None]:
+    if str(company.onboarding_source or "").strip().lower() != "self_service":
+        return "managed_delivery", None
+    if "scheduler" not in (requirement.get("primitives") or []):
+        return "not_required", None
+    if action.get("confirmation_required", True):
+        return "approval_required", None
+    raw_schedule = requirement.get("schedule")
+    if not isinstance(raw_schedule, dict):
+        return "schedule_required", None
+
+    try:
+        schedule = normalize_schedule_config(
+            raw_schedule,
+            default_timezone=timezone,
+        )
+    except ScheduleConfigError:
+        return "schedule_setup_required", None
+
+    runtime_inputs = dict(requirement.get("runtime_inputs") or {})
+    missing = [
+        key
+        for key in _scheduled_runtime_fields(requirement)
+        if key not in runtime_inputs
+    ]
+    if missing:
+        requirement["schedule_missing_inputs"] = missing
+        return "runtime_inputs_required", None
+
+    key = str(requirement.get("key") or "")
+    workflow = _generated_schedule_workflow(
+        db,
+        company_id=company.id,
+        agent_id=agent_id,
+        requirement_key=key,
+    )
+    if workflow is not None and not workflow.enabled:
+        return "disabled", workflow.id
+    if workflow is None:
+        workflow = AutomationWorkflow(
+            company_id=company.id,
+            name=(str(requirement.get("purpose") or key.replace("_", " ")) or "Scheduled employee task")[:200],
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": agent_id,
+                "_xvond_requirement_key": key,
+                "_xvond_generated": True,
+                "schedule": schedule,
+                "input_data": runtime_inputs,
+            },
+            steps=[
+                {
+                    "type": "scheduled_action",
+                    "agent_id": agent_id,
+                    "action_type": key,
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.flush()
+    return "ready", workflow.id
 
 
 def _refresh_delivery_fields(spec: dict) -> dict:
@@ -128,8 +263,9 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
     config = dict(config or {})
     actions = dict(config.get("actions") or {})
     action_plan = {}
+    automation_plan = {}
     changed = False
-
+    company, company_timezone = _company_context(db, agent_id)
     for item in requirements:
         if not isinstance(item, dict):
             continue
@@ -170,10 +306,35 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             execution_status = "adapter_required"
         else:
             execution_status = "runtime_validation_required"
+        schedule_status = "not_required"
+        schedule_workflow_id = None
+        if (
+            company is not None
+            and execution_status == "ready"
+            and "scheduler" in (item.get("primitives") or [])
+        ):
+            schedule_status, schedule_workflow_id = _provision_self_service_schedule(
+                db,
+                company=company,
+                timezone=company_timezone,
+                agent_id=agent_id,
+                requirement=item,
+                action=action,
+            )
+            if schedule_status not in {"ready", "not_required", "managed_delivery"}:
+                execution_status = "setup_required"
         item["status"] = MANAGED_STATUS
         item["provisioned"] = True
         item["delivery_mode"] = "compose"
         item["execution_status"] = execution_status
+        if schedule_status != "not_required":
+            item["schedule_status"] = schedule_status
+        if schedule_workflow_id is not None:
+            item["schedule_workflow_id"] = schedule_workflow_id
+            automation_plan[key] = {
+                "workflow_id": schedule_workflow_id,
+                "status": schedule_status,
+            }
         action_plan[key] = {
             "tool_name": "action_request",
             "action_type": key,
@@ -181,6 +342,8 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             "status": "contract_provisioned",
             "execution_status": execution_status,
             "source": "generated" if action.get("xvond_generated") else "existing",
+            "schedule_status": schedule_status,
+            "automation_workflow_id": schedule_workflow_id,
         }
 
     if changed:
@@ -200,6 +363,7 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
     delivery = {
         "provisioning_version": 1,
         "action_plan": action_plan,
+        "automation_plan": automation_plan,
         "managed_capabilities": [
             item.get("key")
             for item in requirements

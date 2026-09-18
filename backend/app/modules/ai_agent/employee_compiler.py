@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 
-COMPILER_VERSION = 3
+COMPILER_VERSION = 4
 
 GENERIC_PRIMITIVES = {
     "workflow_engine",
@@ -137,6 +137,19 @@ _ALLOWED_EXECUTION_OPS = {"http_get_json", "extract", "compare", "notify"}
 _ALLOWED_COMPARE_OPERATORS = {"lt", "lte", "gt", "gte", "eq", "neq"}
 
 
+_SENSITIVE_RUNTIME_INPUT_KEYS = {
+    "authorization",
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "credential",
+    "credentials",
+}
+
 COMPILER_SYSTEM_PROMPT = """You are Xvond's AI Employee Compiler.
 Your only task is to convert a customer's open-ended job brief into a structured employee specification and delivery plan.
 
@@ -161,6 +174,8 @@ Use this shape:
       "requires_connection": false,
       "customer_inputs": [],
       "primitives": ["workflow_engine"],
+      "schedule": {"kind":"interval|daily|weekly","every_minutes":60,"hour":8,"minute":0,"weekdays":[0,1,2,3,4],"timezone":"Asia/Muscat","source_text":"exact cadence/time words copied from the customer Job Brief"},
+      "runtime_inputs": {"url":"https://example.com/data","target_price":100},
       "execution_plan": [
         {"id":"fetch","op":"http_get_json","url_field":"url"},
         {"id":"value","op":"extract","source":"fetch","path":"price"},
@@ -182,6 +197,10 @@ Rules:
 - Separate reading from acting where permissions differ, e.g. email_read and email_send.
 - Publishing, sending, purchasing, deleting, booking, changing external data, or other consequential external actions should normally use ask_before unless the customer's brief explicitly says to do them automatically.
 - Monitoring and recurring work must include scheduling/workflow primitives.
+- When the customer explicitly gives a recurring cadence or clock time, include a structured schedule on the requirement. Use kind=interval with every_minutes, kind=daily with hour/minute, or kind=weekly with weekdays (0=Monday..6=Sunday) plus hour/minute. Include timezone only when the customer explicitly gave one; otherwise Xvond will use the workspace timezone. Always include schedule.source_text copied verbatim from the Job Brief words that authorize that cadence/time.
+- Do not invent a cadence, clock time, weekday, or timezone that the customer did not request.
+- For recurring/background work the customer explicitly asked to happen automatically, use permission mode automatic for that exact capability/purpose. If automatic execution is not authorized, keep ask_before and Xvond will not schedule it.
+- runtime_inputs may contain only simple scalar values explicitly present in the customer's Job Brief and required by execution_plan. Never invent runtime input values.
 - If the job needs private data or an external account, include the relevant connection requirement and customer input.
 - Do not claim a system or account is already connected.
 - For xvond_build work, include execution_plan only when the job can be represented with the allowed runtime ops: http_get_json, extract, compare, notify.
@@ -301,6 +320,77 @@ def _normalize_execution_plan(values: Any) -> list[dict]:
     return result
 
 
+def _normalize_schedule_spec(value: Any, *, job_brief: str) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    kind = str(value.get("kind") or "").strip().lower()
+    if kind not in {"interval", "daily", "weekly"}:
+        return None
+
+    source_text = _bounded_text(value.get("source_text"), limit=500)
+    source = str(job_brief or "")
+    if not source_text or source_text.casefold() not in source.casefold():
+        return None
+
+    if kind == "interval":
+        try:
+            every_minutes = int(value.get("every_minutes"))
+        except (TypeError, ValueError):
+            return None
+        if every_minutes < 5 or every_minutes > 60 * 24 * 30:
+            return None
+        return {"kind": "interval", "every_minutes": every_minutes, "source_text": source_text}
+
+    try:
+        hour = int(value.get("hour"))
+        minute = int(value.get("minute", 0))
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return None
+
+    result = {"kind": kind, "hour": hour, "minute": minute, "source_text": source_text}
+    timezone = _bounded_text(value.get("timezone"), limit=100)
+    if timezone:
+        result["timezone"] = timezone
+
+    if kind == "weekly":
+        weekdays = []
+        for raw in value.get("weekdays") or []:
+            try:
+                day = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= day <= 6 and day not in weekdays:
+                weekdays.append(day)
+        if not weekdays:
+            return None
+        result["weekdays"] = sorted(weekdays)
+    return result
+
+
+def _grounded_runtime_inputs(value: Any, *, job_brief: str) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    source = str(job_brief or "").casefold()
+    result: dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = normalize_requirement_key(raw_key)[:80]
+        if (
+            not key
+            or key in _SENSITIVE_RUNTIME_INPUT_KEYS
+            or not isinstance(raw_value, (str, int, float, bool))
+        ):
+            continue
+        rendered = str(raw_value).strip()
+        if not rendered or rendered.casefold() not in source:
+            continue
+        result[key] = raw_value
+        if len(result) >= 20:
+            break
+    return result
+
+
 def normalize_requirement_key(value: Any) -> str:
     key = _bounded_text(value, limit=120).lower().replace(" ", "_")
     if key and not re.fullmatch(r"[a-z0-9][a-z0-9_\-]{0,127}", key):
@@ -374,6 +464,11 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         elif customer_inputs and status == "xvond_build":
             status = "customer_input_required"
             delivery_mode = "configure"
+        schedule = _normalize_schedule_spec(item.get("schedule"), job_brief=job_brief)
+        if schedule:
+            for primitive in ("scheduler", "workflow_engine"):
+                if primitive not in primitives:
+                    primitives.append(primitive)
         requirements.append({
             "key": key,
             "kind": kind,
@@ -381,6 +476,11 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
             "status": status,
             "delivery_mode": delivery_mode,
             "primitives": primitives,
+            "schedule": schedule,
+            "runtime_inputs": _grounded_runtime_inputs(
+                item.get("runtime_inputs"),
+                job_brief=job_brief,
+            ),
             "execution_plan": _normalize_execution_plan(item.get("execution_plan")),
             "customer_inputs": customer_inputs,
             "known_to_xvond": bool(catalog),
@@ -476,7 +576,7 @@ OPERATING RULES:
 - Use only tools, integrations, channels, automations and knowledge that are actually attached and available in the current runtime.
 - connection_required means the owner must connect or authorize an external account. customer_input_required means the owner must provide required data or files.
 - xvond_build means Xvond owns the build/provisioning work. Do not describe it as unsupported. Do not claim an external action succeeded until its runtime capability is actually provisioned and returns success.
-- xvond_managed means an action contract is stored, not that its execution adapter is ready. adapter_required means Xvond still needs to configure execution. Creating a contract does not run tasks, install schedules, connect accounts or perform external actions.
+- xvond_managed means an action contract is stored, not that its execution adapter is ready by itself. execution_status=ready means the runtime capability is executable. schedule_status=ready means Xvond has provisioned the recurring scheduler for that capability. Never infer a running schedule from a contract alone, and never claim external work happened without a successful runtime result.
 - Follow the permission mode for each action. For ask_before actions, obtain approval before execution.
 - Never invent emails, bookings, orders, prices, account data, analytics, files, external results or successful publishing.
 - Preserve context across the employee's connected channels and avoid asking the owner to repeat known information.

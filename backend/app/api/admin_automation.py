@@ -9,14 +9,16 @@ from backend.app.models.company import Company
 from backend.app.models.user import User
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.automation.runtime import automation_runtime
+from backend.app.modules.automation.schedule import ScheduleConfigError, normalize_schedule_config
 from backend.app.modules.billing.service_limits import service_limits
 
 router = APIRouter(prefix="/admin/automation", tags=["Xvond Admin - Automation"])
 
 ALLOWED_TRIGGERS = {"manual", "webhook", "schedule", "event"}
-IMPLEMENTED_TRIGGERS = {"manual"}
-ALLOWED_STEP_TYPES = {"ai", "tool", "condition", "webhook", "transform"}
-TERMINAL_SIDE_EFFECT_TYPES = {"tool", "webhook"}
+IMPLEMENTED_TRIGGERS = {"manual", "schedule"}
+ALLOWED_STEP_TYPES = {"ai", "tool", "condition", "webhook", "transform", "scheduled_action"}
+TERMINAL_SIDE_EFFECT_TYPES = {"tool", "webhook", "scheduled_action"}
+SCHEDULE_SAFE_STEP_TYPES = {"transform", "condition", "scheduled_action"}
 SENSITIVE_WORKFLOW_KEYS = {
     "authorization",
     "password",
@@ -55,6 +57,11 @@ def require_company(db, company_id: int):
     return company
 
 
+def _billing_service_for_workflow(item: AutomationWorkflow) -> str:
+    source = str((item.trigger_config or {}).get("_xvond_source") or "").strip()
+    return "ai_agents" if source == "self_service_employee" else "automation"
+
+
 def _reject_inline_secrets(value, path: str = "workflow"):
     if isinstance(value, dict):
         for key, item in value.items():
@@ -85,6 +92,16 @@ def validate_workflow(
     _reject_inline_secrets(trigger_config or {}, "trigger_config")
     _reject_inline_secrets(steps or [], "steps")
 
+    if trigger == "schedule":
+        config = dict(trigger_config or {})
+        raw_schedule = config.get("schedule")
+        if not isinstance(raw_schedule, dict):
+            raw_schedule = config
+        try:
+            normalize_schedule_config(raw_schedule)
+        except ScheduleConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     for index, step in enumerate(steps or []):
         if not isinstance(step, dict):
             raise HTTPException(
@@ -96,6 +113,14 @@ def validate_workflow(
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported step type at {index}",
+            )
+        if trigger == "schedule" and step_type not in SCHEDULE_SAFE_STEP_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Scheduled step '{step_type}' is not production-safe yet. "
+                    "Use the idempotent scheduled_action execution path."
+                ),
             )
         if step_type in TERMINAL_SIDE_EFFECT_TYPES and index != len(steps) - 1:
             raise HTTPException(
@@ -242,7 +267,7 @@ def update_workflow(
                     ),
                 )
             if data.enabled and settings.is_production:
-                service_limits.entitlement(db, item.company_id, "automation")
+                service_limits.entitlement(db, item.company_id, _billing_service_for_workflow(item))
             item.enabled = data.enabled
         db.commit()
         db.refresh(item)
@@ -269,15 +294,13 @@ def run_workflow(
         )
         if workflow is None:
             raise HTTPException(status_code=404, detail="Workflow not found")
-        if workflow.trigger_type not in IMPLEMENTED_TRIGGERS:
+        if workflow.trigger_type != "manual":
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"Trigger '{workflow.trigger_type}' does not have a live dispatcher yet"
-                ),
+                detail="Run now is only available for manual workflows; scheduled workflows use the scheduler dispatcher",
             )
         if settings.is_production:
-            service_limits.entitlement(db, workflow.company_id, "automation")
+            service_limits.entitlement(db, workflow.company_id, _billing_service_for_workflow(workflow))
         try:
             run = automation_runtime.execute(
                 db=db,

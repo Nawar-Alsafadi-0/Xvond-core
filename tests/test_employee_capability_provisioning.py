@@ -17,10 +17,12 @@ from backend.app.core.config_secrets import reveal_config
 from backend.app.core.database.base import Base
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
+from backend.app.models.company_profile import CompanyProfile
 from backend.app.modules.ai_agent.employee_capability_builder import build_managed_action_config
 from backend.app.modules.ai_agent.employee_compiler import normalize_compiled_spec
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
+from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.tools.business_models import ActionRequest
 from backend.app.modules.tools.models import AgentToolAssignment
 from backend.app.modules.tools.executor import ToolExecutor
@@ -400,3 +402,177 @@ def test_stored_contract_reaches_generic_runtime_and_fails_closed_without_plan(d
     assert destination["type"] == "xvond_internal"
     assert destination["adapter"] == "generic_capability"
     assert destination["capability_key"] == KEY
+
+
+
+def _scheduled_payload(*, permission_mode="automatic", schedule=None):
+    schedule = deepcopy(schedule) if schedule is not None else {
+        "kind": "interval",
+        "every_minutes": 60,
+        "source_text": "every 60 minutes",
+    }
+    source_text = str(schedule.get("source_text") or "every 60 minutes")
+    schedule["source_text"] = source_text
+    brief = (
+        "Monitor https://prices.example.com "
+        + source_text
+        + " automatically and notify me when the value reaches 100."
+    )
+    payload = {
+        "role": "Price monitor",
+        "scope": "personal",
+        "summary": "Monitor a price endpoint.",
+        "tasks": [{"name": "Monitor", "description": brief, "trigger": "recurring"}],
+        "requirements": [{
+            "key": KEY,
+            "kind": "custom",
+            "purpose": "Monitor price",
+            "primitives": ["http_api", "scheduler", "workflow_engine"],
+            "schedule": schedule,
+            "runtime_inputs": {
+                "url": "https://prices.example.com",
+                "threshold": 100,
+            },
+            "execution_plan": [
+                {"id": "fetch", "op": "http_get_json", "url_field": "url"},
+                {"id": "value", "op": "extract", "source": "fetch", "path": "value"},
+                {
+                    "id": "matched",
+                    "op": "compare",
+                    "source": "value",
+                    "operator": "gte",
+                    "value_field": "threshold",
+                },
+                {
+                    "id": "notify",
+                    "op": "notify",
+                    "when": "matched",
+                    "title": "Price monitor",
+                    "message": "Target reached.",
+                },
+            ],
+        }],
+        "permissions": [{"action": "Monitor price", "mode": permission_mode}],
+        "setup_questions": [],
+    }
+    return brief, payload
+
+
+def test_self_service_recurring_capability_provisions_one_real_schedule_workflow(database):
+    factory, calls = database
+    brief, payload = _scheduled_payload()
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        agent = db.get(AIAgent, 1)
+        agent.description = brief
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings = deepcopy(config.settings)
+        settings["employee_builder"]["source_description"] = brief
+        config.settings = settings
+        db.commit()
+
+    spec = normalize_compiled_spec(payload, job_brief=brief)
+    _cache(factory, spec)
+    result = api.compile_employee(1, USER)
+
+    requirement = result["spec"]["requirements"][0]
+    assert requirement["execution_status"] == "ready"
+    assert requirement["schedule_status"] == "ready"
+    assert requirement["schedule_workflow_id"]
+    assert result["spec"]["delivery"]["automation_plan"][KEY]["status"] == "ready"
+
+    with factory() as db:
+        rows = db.query(AutomationWorkflow).all()
+        assert len(rows) == 1
+        workflow = rows[0]
+        assert workflow.enabled is True
+        assert workflow.trigger_type == "schedule"
+        assert workflow.trigger_config["_xvond_source"] == "self_service_employee"
+        assert workflow.trigger_config["_xvond_agent_id"] == 1
+        assert workflow.trigger_config["_xvond_requirement_key"] == KEY
+        assert workflow.trigger_config["schedule"] == {
+            "kind": "interval",
+            "every_minutes": 60,
+        }
+        assert workflow.trigger_config["input_data"] == {
+            "url": "https://prices.example.com",
+            "threshold": 100,
+        }
+        assert workflow.steps == [{
+            "type": "scheduled_action",
+            "agent_id": 1,
+            "action_type": KEY,
+        }]
+
+    # Cached compilation repairs/reuses the same generated workflow instead of
+    # creating duplicates or paying for another compiler call.
+    api.compile_employee(1, USER)
+    with factory() as db:
+        assert db.query(AutomationWorkflow).count() == 1
+    assert calls == []
+
+
+def test_self_service_schedule_requires_explicit_automatic_permission(database):
+    factory, _ = database
+    brief, payload = _scheduled_payload(permission_mode="ask_before")
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+    requirement = result["spec"]["requirements"][0]
+
+    assert requirement["execution_status"] == "setup_required"
+    assert requirement["schedule_status"] == "approval_required"
+    with factory() as db:
+        assert db.query(AutomationWorkflow).count() == 0
+
+
+def test_self_service_daily_schedule_inherits_workspace_timezone(database):
+    factory, _ = database
+    brief, payload = _scheduled_payload(
+        schedule={"kind": "daily", "hour": 8, "minute": 15, "source_text": "every day at 8:15"},
+    )
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.add(CompanyProfile(company_id=1, timezone="Asia/Muscat"))
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+    requirement = result["spec"]["requirements"][0]
+
+    assert requirement["execution_status"] == "ready"
+    assert requirement["schedule_status"] == "ready"
+    with factory() as db:
+        workflow = db.query(AutomationWorkflow).one()
+        assert workflow.trigger_config["schedule"] == {
+            "kind": "daily",
+            "hour": 8,
+            "minute": 15,
+            "timezone": "Asia/Muscat",
+        }
+
+
+def test_self_service_schedule_blocks_when_required_runtime_input_is_missing(database):
+    factory, _ = database
+    brief, payload = _scheduled_payload()
+    payload["requirements"][0]["runtime_inputs"].pop("threshold")
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+    requirement = result["spec"]["requirements"][0]
+
+    assert requirement["execution_status"] == "setup_required"
+    assert requirement["schedule_status"] == "runtime_inputs_required"
+    assert requirement["schedule_missing_inputs"] == ["threshold"]
+    with factory() as db:
+        assert db.query(AutomationWorkflow).count() == 0

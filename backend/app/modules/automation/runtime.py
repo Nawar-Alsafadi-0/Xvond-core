@@ -7,11 +7,20 @@ from backend.app.modules.automation.models import AutomationRun, AutomationWorkf
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.tools.executor import tool_executor
+from backend.app.modules.tools.generic_capability_runtime import execute_generic_capability
+from backend.app.modules.tools.models import AgentToolAssignment
 
 
 def _utcnow_naive() -> datetime:
     """Return UTC without tzinfo for compatibility with existing naive DB timestamps."""
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _billing_contract(workflow: AutomationWorkflow) -> tuple[str, str]:
+    source = str((workflow.trigger_config or {}).get("_xvond_source") or "").strip()
+    if source == "self_service_employee":
+        return "ai_agents", "automation_runs"
+    return "automation", "runs"
 
 
 class AutomationRuntime:
@@ -28,11 +37,12 @@ class AutomationRuntime:
             raise ValueError("Workflow is disabled")
 
         original_input = dict(input_data or {})
+        billing_service, billing_metric = _billing_contract(workflow)
         service_limits.record(
             db,
             company_id,
-            "automation",
-            "runs",
+            billing_service,
+            billing_metric,
             quantity=1,
             metadata={"workflow_id": workflow.id},
         )
@@ -88,8 +98,8 @@ class AutomationRuntime:
                 service_limits.record(
                     db,
                     company_id,
-                    "automation",
-                    "runs",
+                    billing_service,
+                    billing_metric,
                     quantity=1,
                     metadata={"workflow_id": workflow.id, "status": "failed"},
                 )
@@ -183,6 +193,58 @@ class AutomationRuntime:
                 raise ValueError(result.get("error") or "Tool execution failed")
             return {"tool_result": result.get("data")}
 
+        if step_type == "scheduled_action":
+            agent_id = step.get("agent_id")
+            action_type = str(step.get("action_type") or "").strip()
+            execution_key = str(state.get("_xvond_execution_key") or "").strip()
+            if not agent_id or not action_type:
+                raise ValueError("Scheduled action requires agent_id and action_type")
+            if not execution_key:
+                raise ValueError("Scheduled action requires a stable execution key")
+
+            assignment = (
+                db.query(AgentToolAssignment)
+                .filter(
+                    AgentToolAssignment.agent_id == int(agent_id),
+                    AgentToolAssignment.tool_name == "action_request",
+                    AgentToolAssignment.enabled.is_(True),
+                )
+                .first()
+            )
+            if assignment is None:
+                raise ValueError("Scheduled action contract is not assigned to this employee")
+            config = reveal_config(assignment.config) or {}
+            action = (config.get("actions") or {}).get(action_type)
+            if not isinstance(action, dict) or not action.get("enabled", True):
+                raise ValueError("Scheduled action is not enabled")
+            destination = action.get("destination") or {}
+            if (
+                destination.get("type") != "xvond_internal"
+                or destination.get("adapter") != "generic_capability"
+            ):
+                raise ValueError("Scheduled action does not use the generic capability runtime")
+            if action.get("confirmation_required", True):
+                raise ValueError(
+                    "Scheduled action requires automatic permission before background execution"
+                )
+
+            details = {
+                key: value
+                for key, value in state.items()
+                if not str(key).startswith("_xvond_")
+            }
+            details.update(step.get("arguments") or {})
+            result = execute_generic_capability(
+                db,
+                company_id=company_id,
+                agent_id=int(agent_id),
+                action_type=action_type,
+                action_config=action,
+                details=details,
+                idempotency_key=f"{execution_key}:{step_index}",
+            )
+            return {"scheduled_action_result": result}
+
         if step_type == "webhook":
             integration_id = step.get("integration_id")
             if not integration_id:
@@ -203,7 +265,12 @@ class AutomationRuntime:
             url = str(config.get("url") or "").strip()
             if not url:
                 raise ValueError("Webhook URL is invalid")
-            idempotency_key = f"xvond-automation-{company_id}-{run_id}-{step_index}-v1"
+            execution_key = str(state.get("_xvond_execution_key") or "").strip()
+            idempotency_key = (
+                f"{execution_key}:{step_index}"
+                if execution_key
+                else f"xvond-automation-{company_id}-{run_id}-{step_index}-v1"
+            )
             headers = {
                 "Idempotency-Key": idempotency_key,
                 "X-Xvond-Idempotency-Key": idempotency_key,

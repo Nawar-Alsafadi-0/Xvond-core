@@ -170,7 +170,23 @@ def _execution_blockers(spec: dict, *, resolved_channels: list[str]) -> list[str
             "adapter_required",
             "runtime_validation_required",
         }:
-            blockers.append(f"{key}: execution setup required")
+            schedule_status = str(item.get("schedule_status") or "").strip().lower()
+            if schedule_status == "approval_required":
+                blockers.append(f"{key}: automatic permission required for scheduled execution")
+            elif schedule_status == "schedule_required":
+                blockers.append(f"{key}: schedule configuration required")
+            elif schedule_status == "schedule_setup_required":
+                blockers.append(f"{key}: valid workspace timezone or schedule setup required")
+            elif schedule_status == "runtime_inputs_required":
+                missing = ", ".join(str(x) for x in (item.get("schedule_missing_inputs") or []))
+                blockers.append(
+                    f"{key}: scheduled runtime inputs required"
+                    + (f" ({missing})" if missing else "")
+                )
+            elif schedule_status == "disabled":
+                blockers.append(f"{key}: scheduled workflow is disabled")
+            else:
+                blockers.append(f"{key}: execution setup required")
     return blockers
 
 

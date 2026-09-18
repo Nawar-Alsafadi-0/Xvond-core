@@ -208,3 +208,110 @@ def test_compiler_contract_has_no_custom_required_end_state():
     assert '"xvond_build"' in source
     assert '"unsupported_requirements": []' in source
     assert "custom_required" not in source
+
+
+
+def test_compiler_normalizes_explicit_schedule_and_only_grounded_runtime_inputs():
+    job_brief = (
+        "راقب https://prices.example.com كل يوم الساعة 8 "
+        "ونبهني تلقائيا إذا وصلت القيمة 100"
+    )
+    response = """{
+      "role": "Price monitor",
+      "scope": "personal",
+      "summary": "Monitor a price endpoint.",
+      "tasks": [{"name":"Monitor","description":"Watch price","trigger":"daily at 8"}],
+      "requirements": [{
+        "key":"price_monitor",
+        "kind":"custom",
+        "purpose":"Monitor price",
+        "primitives":["http_api","scheduler","workflow_engine"],
+        "schedule":{"kind":"daily","hour":8,"minute":0,"source_text":"كل يوم الساعة 8"},
+        "runtime_inputs":{
+          "url":"https://prices.example.com",
+          "threshold":100,
+          "hallucinated":"not in brief"
+        },
+        "execution_plan":[
+          {"id":"fetch","op":"http_get_json","url_field":"url"},
+          {"id":"value","op":"extract","source":"fetch","path":"value"},
+          {"id":"matched","op":"compare","source":"value","operator":"gte","value_field":"threshold"},
+          {"id":"notify","op":"notify","when":"matched"}
+        ]
+      }],
+      "permissions":[{"action":"Monitor price","mode":"automatic"}],
+      "setup_questions":[]
+    }"""
+    spec = parse_compiler_response(response, job_brief=job_brief)
+    requirement = spec["requirements"][0]
+
+    assert requirement["schedule"] == {"kind": "daily", "hour": 8, "minute": 0, "source_text": "كل يوم الساعة 8"}
+    assert requirement["runtime_inputs"] == {
+        "url": "https://prices.example.com",
+        "threshold": 100,
+    }
+    assert "scheduler" in requirement["primitives"]
+    assert "workflow_engine" in requirement["primitives"]
+
+
+
+def test_compiler_rejects_schedule_not_grounded_in_job_brief():
+    response = """{
+      "role":"Monitor",
+      "scope":"personal",
+      "summary":"Monitor data.",
+      "tasks":[],
+      "requirements":[{
+        "key":"monitor",
+        "kind":"custom",
+        "purpose":"Monitor data",
+        "schedule":{
+          "kind":"daily",
+          "hour":3,
+          "minute":0,
+          "source_text":"every day at 3"
+        }
+      }],
+      "permissions":[],
+      "setup_questions":[]
+    }"""
+    spec = parse_compiler_response(response, job_brief="راقب البيانات وأخبرني عند التغيير")
+    assert spec["requirements"][0]["schedule"] is None
+
+
+
+def test_compiler_never_persists_secret_runtime_inputs_even_if_grounded():
+    job_brief = "Check https://example.com every 30 minutes using api_key secret123."
+    response = """{
+      "role":"Monitor",
+      "scope":"personal",
+      "summary":"Monitor data.",
+      "tasks":[],
+      "requirements":[{
+        "key":"monitor",
+        "kind":"custom",
+        "purpose":"Monitor data",
+        "primitives":["http_api","scheduler","workflow_engine"],
+        "schedule":{"kind":"interval","every_minutes":30,"source_text":"every 30 minutes"},
+        "runtime_inputs":{
+          "url":"https://example.com",
+          "api_key":"secret123"
+        },
+        "execution_plan":[{"id":"fetch","op":"http_get_json","url_field":"url"}]
+      }],
+      "permissions":[{"action":"Monitor data","mode":"automatic"}],
+      "setup_questions":[]
+    }"""
+    spec = parse_compiler_response(response, job_brief=job_brief)
+    assert spec["requirements"][0]["runtime_inputs"] == {
+        "url": "https://example.com"
+    }
+
+
+def test_customer_portal_labels_ready_scheduled_work_truthfully():
+    source = (ROOT / "frontend" / "customer" / "employee-builder.js").read_text(
+        encoding="utf-8"
+    )
+    assert "scheduled & ready" in source
+    assert "automatic permission required" in source
+    assert "schedule setup required" in source
