@@ -57,6 +57,57 @@ def communication_channels(values: Any) -> list[str]:
     return result
 
 
+def self_service_channel_slots(builder: dict | None) -> list[str]:
+    """Return only communication surfaces required by the current Self-Service job.
+
+    This is intentionally a presentation/provisioning view: it combines channels
+    explicitly requested by the Job Brief with channel requirements emitted by
+    the compiled specification. Stale configured/active channels are not added,
+    so customer setup UI follows the current employee contract rather than old
+    connection state.
+    """
+
+    builder = dict(builder or {})
+    slots = communication_channels(builder.get("requested_channels") or [])
+    spec = builder.get("compiled_spec")
+    if isinstance(spec, dict):
+        for item in _requirement_channel_keys(spec):
+            if item not in slots:
+                slots.append(item)
+    return slots
+
+
+def assert_self_service_channel_selected(
+    db,
+    *,
+    company: Company,
+    agent: AIAgent,
+    channel_type: str,
+) -> None:
+    """Fail closed when customer setup targets a channel outside the current job."""
+
+    if not is_self_service_company(company):
+        return
+
+    config = (
+        db.query(AgentConfig)
+        .filter(AgentConfig.agent_id == agent.id)
+        .first()
+    )
+    builder = (
+        dict(config.settings or {}).get("employee_builder")
+        if config is not None
+        else None
+    )
+    selected = self_service_channel_slots(builder)
+    key = str(channel_type or "").strip().lower()
+    if key not in selected:
+        raise HTTPException(
+            409,
+            f"{key or 'channel'} is not selected by this employee's current Job Brief",
+        )
+
+
 def _requirement_channel_keys(spec: dict) -> list[str]:
     result: list[str] = []
     for item in spec.get("requirements") or []:

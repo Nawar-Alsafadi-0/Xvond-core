@@ -9,6 +9,7 @@ from backend.app.core.agent_runtime import agent_runtime
 from backend.app.core.database.connection import SessionLocal
 from backend.app.core.dependencies import require_customer_manager
 
+from backend.app.models.company import Company
 from backend.app.models.user import User
 
 from backend.app.modules.ai_agent.customer_access import can_view_conversations
@@ -16,6 +17,10 @@ from backend.app.modules.ai_agent.models import (
     AIAgent,
     AIConversation,
     AIMessage,
+)
+from backend.app.modules.ai_agent.self_service_policy import (
+    is_self_service_company,
+    self_service_channel_slots,
 )
 from backend.app.modules.channels.conversation_source import bind_conversation_source
 
@@ -82,6 +87,19 @@ def list_agents(
             .order_by(AIAgent.id.asc())
             .all()
         )
+        company = db.query(Company).filter(Company.id == current_user.company_id).first()
+        self_service = is_self_service_company(company)
+        configs_by_agent = {}
+        if self_service and agents:
+            configs_by_agent = {
+                item.agent_id: item
+                for item in (
+                    db.query(AgentConfig)
+                    .filter(AgentConfig.agent_id.in_([agent.id for agent in agents]))
+                    .all()
+                )
+            }
+
         return {
             "company_id": current_user.company_id,
             "agents": [
@@ -90,6 +108,20 @@ def list_agents(
                     "name": item.name,
                     "description": item.description,
                     "enabled": item.enabled,
+                    "self_service_channel_slots": (
+                        self_service_channel_slots(
+                            dict(
+                                (
+                                    configs_by_agent.get(item.id).settings
+                                    if configs_by_agent.get(item.id) is not None
+                                    else {}
+                                )
+                                or {}
+                            ).get("employee_builder")
+                        )
+                        if self_service
+                        else None
+                    ),
                 }
                 for item in agents
             ],

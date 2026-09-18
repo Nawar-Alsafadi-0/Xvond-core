@@ -65,6 +65,10 @@ async function xvondDecorateCustomerAgentsWithWebsite() {
     const cards = Array.from(document.querySelectorAll("#agents-list .agent"));
     await Promise.all((agents || []).map(async (agent, index) => {
         const card = cards[index];
+        const slots = Array.isArray(agent?.self_service_channel_slots)
+            ? agent.self_service_channel_slots
+            : [];
+        if (!slots.includes("website")) return;
         if (!card || card.querySelector(".xvond-website-connect")) return;
 
         const box = document.createElement("div");

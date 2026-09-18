@@ -82,6 +82,23 @@ def website_database(monkeypatch):
                 enabled=False,
             ),
         ])
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={
+                    "employee_builder": {
+                        "onboarding_source": "self_service",
+                        "delivery_mode": "self_service",
+                        "requested_channels": ["website"],
+                        "compiled_spec": None,
+                    }
+                },
+                capabilities={},
+                customer_controls={},
+            )
+        )
         db.commit()
 
     yield factory
@@ -189,6 +206,16 @@ def test_live_employee_must_be_deactivated_before_customer_website_edit(website_
         assert reveal_config(channel.config)["allowed_domain"] == "example.com"
 
 
+def test_customer_website_setup_rejects_unselected_self_service_channel(
+    website_database,
+):
+    user = SimpleNamespace(company_id=2, role="owner")
+    with pytest.raises(HTTPException) as exc_info:
+        api.customer_get_website_config(2, user)
+    assert exc_info.value.status_code == 409
+    assert "current Job Brief" in str(exc_info.value.detail)
+
+
 def test_customer_website_setup_is_tenant_scoped_and_self_service_only(website_database):
     with pytest.raises(HTTPException) as other:
         api.customer_get_website_config(2, USER)
@@ -206,33 +233,27 @@ def test_customer_website_setup_flows_into_atomic_self_service_launch(
 ):
     factory = website_database
     with factory() as db:
-        db.add(
-            AgentConfig(
-                agent_id=1,
-                agent_type="employee",
-                settings={
-                    "employee_builder": {
-                        "onboarding_source": "self_service",
-                        "delivery_mode": "self_service",
-                        "source_description": "Reply to website visitors.",
-                        "requested_channels": ["website"],
-                        "compiled_spec": {
-                            "scope": "business",
-                            "requirements": [
-                                {
-                                    "key": "website",
-                                    "kind": "channel",
-                                    "status": "connection_required",
-                                }
-                            ],
-                            "delivery": {"provisioning_version": 1},
-                        },
-                    }
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        config.settings = {
+            "employee_builder": {
+                "onboarding_source": "self_service",
+                "delivery_mode": "self_service",
+                "source_description": "Reply to website visitors.",
+                "requested_channels": ["website"],
+                "compiled_spec": {
+                    "scope": "business",
+                    "requirements": [
+                        {
+                            "key": "website",
+                            "kind": "channel",
+                            "status": "connection_required",
+                        }
+                    ],
+                    "delivery": {"provisioning_version": 1},
                 },
-                capabilities={"customer_support": True},
-                customer_controls={},
-            )
-        )
+            }
+        }
+        config.capabilities = {"customer_support": True}
         db.commit()
 
     monkeypatch.setattr(
