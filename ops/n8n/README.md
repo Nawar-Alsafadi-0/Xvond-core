@@ -48,7 +48,10 @@ docker compose -f docker-compose.production.yml --profile workflow up -d workflo
 
 ## Master workflow
 
-Import `ops/n8n/xvond-actions.workflow.json`.
+Import and activate both Xvond-owned gateway workflows:
+
+- `ops/n8n/xvond-actions.workflow.json` for outbound actions and managed-channel sends.
+- `ops/n8n/xvond-channel-inbound.workflow.json` for normalized inbound communication-channel messages.
 
 The first supported action is intentionally non-destructive: `health_check`.
 
@@ -97,6 +100,7 @@ Current contracts include:
 - `pos.create_order`
 - `custom_api.execute`
 - `notification.send`
+- `channel.send`
 
 Every side-effecting action must carry a stable `idempotency_key`. Xvond generates and persists that identity before dispatch. The workflow must reuse it when calling the third-party provider and must not invent a new request identity on retry.
 
@@ -115,6 +119,19 @@ A successful side-effect response must only be returned after the external provi
 ```
 
 Failures must return `success: false` and an error message without pretending the business operation succeeded.
+
+## Managed communication channels
+
+Telegram, Instagram DM, Facebook Messenger, Email, SMS, Slack, Microsoft Teams and Custom/API channels use one Xvond-managed channel contract instead of separate Core adapters. The provider workflow normalizes inbound events to `ops/n8n/channel-adapter.contract.json`; Xvond Core owns conversation continuity, AI execution, knowledge, tools and handoff state.
+
+Set these workflow-engine environment values:
+
+- `XVOND_INTERNAL_CHANNEL_URL=http://app:8000/internal/channels/message`
+- `XVOND_CHANNEL_ROUTES_JSON` with keys in the form `company_id:connection_key`
+
+A channel route points to a provider-specific webhook owned by the workflow engine. Provider OAuth/API credentials stay in that provider workflow or its credential store. Do not store those provider credentials in Xvond Core. A managed channel must remain disabled until its Xvond channel config contains a non-secret `connection_key`, `provisioning_state=connected`, and the shared Xvond workflow gateway is enabled.
+
+Inbound provider workflows must supply a stable provider message ID as `external_message_id`. Xvond uses it for deduplication, so provider retries do not create duplicate customer turns. Outbound `channel.send` calls must honor the provided `idempotency_key` before performing a side effect.
 
 ## Booking adapter
 
