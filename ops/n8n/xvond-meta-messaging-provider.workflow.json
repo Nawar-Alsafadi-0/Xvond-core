@@ -160,8 +160,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        690,
-        340
+        920,
+        300
       ]
     },
     {
@@ -338,6 +338,56 @@
         1430,
         650
       ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "meta-rejected",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "reject",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-meta-reject",
+      "name": "Reject Meta Request?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        680,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {status:'rejected'} }}",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "id": "reject-meta-inbound",
+      "name": "Reject Meta Inbound",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        920,
+        420
+      ]
     }
   ],
   "pinData": {},
@@ -397,7 +447,7 @@
       "main": [
         [
           {
-            "node": "Forward Meta Message?",
+            "node": "Reject Meta Request?",
             "type": "main",
             "index": 0
           }
@@ -489,6 +539,24 @@
         [
           {
             "node": "Return Meta Provider",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reject Meta Request?": {
+      "main": [
+        [
+          {
+            "node": "Reject Meta Inbound",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Forward Meta Message?",
             "type": "main",
             "index": 0
           }
