@@ -45,7 +45,7 @@ def normalize_execution_graph(value: Any) -> dict:
             trigger_type = "manual"
         trigger = {"type": trigger_type}
         if trigger_type == "event":
-            event_name = _bounded(raw_trigger.get("event"), 120)
+            event_name = _bounded(raw_trigger.get("event"), 120).lower()
             if event_name:
                 trigger["event"] = event_name
         if trigger_type == "schedule" and isinstance(raw_trigger.get("schedule"), dict):
