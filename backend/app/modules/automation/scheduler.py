@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from backend.app.core.database.connection import SessionLocal
 from backend.app.models.company import Company
+from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.automation.runtime import automation_runtime
 from backend.app.modules.automation.schedule import (
@@ -89,6 +90,21 @@ def run_due_workflow(workflow_id: int, *, now: datetime | None = None) -> dict:
         if not company.active or str(company.lifecycle_status or "").lower() != "live":
             db.rollback()
             return {"workflow_id": workflow.id, "status": "company_not_live"}
+
+        trigger_config = dict(workflow.trigger_config or {})
+        generated_agent_id = int(trigger_config.get("_xvond_agent_id") or 0)
+        if generated_agent_id:
+            employee = (
+                db.query(AIAgent)
+                .filter(
+                    AIAgent.id == generated_agent_id,
+                    AIAgent.company_id == workflow.company_id,
+                )
+                .first()
+            )
+            if employee is None or not employee.enabled:
+                db.rollback()
+                return {"workflow_id": workflow.id, "status": "employee_not_live"}
 
         raw_schedule = _schedule_payload(workflow)
         try:
