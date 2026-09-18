@@ -164,6 +164,7 @@ def safe_http_request(
     method: str = "GET",
     headers: dict | None = None,
     json_data=None,
+    form_data: dict | None = None,
     timeout: float = 15.0,
     max_response_bytes: int = 1_000_000,
 ) -> dict:
@@ -216,7 +217,8 @@ def safe_http_request(
             method,
             url,
             headers=request_headers,
-            json=json_data,
+            json=json_data if form_data is None else None,
+            data=form_data,
         ) as response:
 
             body = bytearray()
