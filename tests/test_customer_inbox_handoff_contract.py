@@ -30,6 +30,7 @@ def test_customer_inbox_returns_current_mode_channel_and_assignment():
 def test_handoff_capability_matrix_matches_real_delivery_adapters():
     whatsapp = customer_inbox._handoff_capabilities("whatsapp")
     website = customer_inbox._handoff_capabilities("website")
+    instagram = customer_inbox._handoff_capabilities("instagram")
     voice = customer_inbox._handoff_capabilities("voice")
     unknown = customer_inbox._handoff_capabilities("future_channel")
 
@@ -42,6 +43,11 @@ def test_handoff_capability_matrix_matches_real_delivery_adapters():
         "handoff_supported": True,
         "human_reply_supported": True,
         "human_reply_delivery": "website_widget",
+    }
+    assert instagram == {
+        "handoff_supported": True,
+        "human_reply_supported": True,
+        "human_reply_delivery": "n8n_channel",
     }
     assert voice["handoff_supported"] is False
     assert voice["human_reply_supported"] is False
@@ -101,6 +107,15 @@ def test_whatsapp_human_reply_is_durable_and_idempotent_before_network_delivery(
     assert "Previous WhatsApp delivery outcome is unknown; do not resend blindly" in source
     assert "WhatsApp delivery outcome is unknown; the reply is recorded for reconciliation and will not be resent automatically" in source
     assert "WhatsApp delivery was rejected temporarily; the saved reply can be retried without duplication" in source
+
+
+def test_n8n_managed_channel_human_reply_uses_generic_delivery_gateway():
+    source = inspect.getsource(customer_inbox.send_human_reply)
+    assert 'delivery == "n8n_channel"' in source
+    assert "n8n_channel_gateway.send_message" in source
+    assert "external_contact_id" in source
+    assert "idempotency_key" in source
+    assert 'action="customer_inbox.human_reply_prepared"' in source
 
 
 def test_website_human_reply_uses_canonical_conversation_delivery():
