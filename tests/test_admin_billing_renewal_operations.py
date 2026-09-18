@@ -20,4 +20,4 @@ def test_unresolved_billing_renewals_are_bounded_and_operator_only():
     signature = inspect.signature(admin_operations.unresolved_billing_renewals)
     assert "require_xvond_operator" in str(signature)
     assert "min(int(limit or 100), 500)" in source
-    assert 'ServiceRenewalAttempt.status.in_(("sending", "unknown", "failed"))' in source
+    assert 'ServiceRenewalAttempt.status.in_(("sending", "submitted", "unknown", "failed"))' in source
