@@ -82,8 +82,8 @@ def test_public_channel_catalog_exposes_delivery_truth_without_configs_or_secret
 
 def test_open_ended_builder_detects_managed_and_self_service_channels():
     blueprint = build_employee_blueprint(
-        "بدي موظف يرد على واتساب وانستغرام، يتصل هاتفيًا، "
-        "ويتابع Telegram وSlack ويرد بالإيميل وSMS"
+        "بدي موظف يرد على واتساب ورسائل انستغرام، يتصل هاتفيًا، "
+        "ويتابع Telegram وSlack ويرد على العملاء بالإيميل وSMS"
     )
 
     for key in ("whatsapp", "instagram", "voice", "telegram", "slack", "email", "sms"):
