@@ -583,7 +583,7 @@ def _enabled_business_modules(db, company_id: int) -> set[str]:
         .filter(
             CompanyModule.company_id == company_id,
             CompanyModule.enabled.is_(True),
-            CompanyModule.module_name.in_(list(BUSINESS_MODULES)),
+            CompanyModule.module_name.in_(list(BUSINESS_MODULES) + ["tools"]),
         )
         .all()
     )
