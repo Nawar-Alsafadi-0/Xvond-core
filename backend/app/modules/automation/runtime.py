@@ -743,12 +743,19 @@ class AutomationRuntime:
                                     **state,
                                     "_xvond_loop_item": loop_item,
                                     "_xvond_loop_index": loop_index,
+                                    "_xvond_nested_graph_depth": (
+                                        int(state.get("_xvond_nested_graph_depth") or 0) + 1
+                                    ),
                                 },
                                 run_id=run_id,
                                 step_index=(step_index * 100000)
                                 + (node_index * 1000)
                                 + loop_index
                                 + 1,
+                            )
+                        except AutomationApprovalRequired:
+                            raise ValueError(
+                                "Approval-required actions inside foreach are not supported yet"
                             )
                         except Exception as exc:
                             raise ValueError(
@@ -780,6 +787,8 @@ class AutomationRuntime:
                         run_id=run_id,
                         step_index=(step_index * 1000) + node_index + 1,
                     )
+                except AutomationApprovalRequired:
+                    raise
                 except Exception as exc:
                     raise ValueError(
                         f"Execution graph node {node_id} ({node_type}) failed: {exc}"
