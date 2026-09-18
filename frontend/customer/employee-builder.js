@@ -115,13 +115,33 @@
 
     function journeyActionMarkup(action) {
         const type = String(action?.type || "");
+        if (type === "provide_input") {
+            const encodedKey = encodeURIComponent(String(action?.key || ""));
+            return `
+                <div class="employee-builder-setup-answer">
+                    <strong>${escapeHtml(action?.label || "Provide required information")}</strong>
+                    ${action?.detail ? `<p class="muted">${escapeHtml(action.detail)}</p>` : ""}
+                    <textarea
+                        rows="3"
+                        data-setup-answer-input="${encodedKey}"
+                        placeholder="Enter the information this employee needs"
+                    ></textarea>
+                    <button
+                        type="button"
+                        class="employee-builder-journey-action"
+                        data-save-setup-answer="${encodedKey}"
+                    >Save setup data</button>
+                    <div class="error" data-setup-answer-error="${encodedKey}"></div>
+                </div>
+            `;
+        }
+
         const runnable = new Set([
             "choose_plan",
             "build_employee",
             "manage_knowledge",
             "setup_website",
             "setup_whatsapp",
-            "provide_input",
             "launch_employee",
         ]).has(type);
         if (!runnable) return "";
@@ -406,10 +426,6 @@
                 await launchEmployee(employee.agent_id);
                 return;
             }
-            if (actionType === "provide_input") {
-                document.getElementById("employee-builder-setup-questions")?.scrollIntoView({behavior: "smooth", block: "center"});
-                return;
-            }
             if (actionType === "manage_knowledge") {
                 await openJourneyPage("agents");
                 if (typeof window.openCustomerAgentSettings === "function") {
@@ -446,6 +462,37 @@
                 button.disabled = true;
                 try {
                     await runJourneyAction(String(button.dataset.builderAction || ""));
+                } finally {
+                    if (document.body.contains(button)) button.disabled = false;
+                }
+            });
+        });
+
+        document.querySelectorAll("[data-save-setup-answer]").forEach(button => {
+            button.addEventListener("click", async () => {
+                if (button.disabled) return;
+                const encodedKey = String(button.dataset.saveSetupAnswer || "");
+                const key = decodeURIComponent(encodedKey);
+                const input = document.querySelector(`[data-setup-answer-input="${encodedKey}"]`);
+                const error = document.querySelector(`[data-setup-answer-error="${encodedKey}"]`);
+                const value = String(input?.value || "").trim();
+                if (error) error.textContent = "";
+                if (!value) {
+                    if (error) error.textContent = "Enter the required setup information.";
+                    return;
+                }
+                button.disabled = true;
+                try {
+                    await api(
+                        `/customer/employee-builder/${Number(employee.agent_id)}/setup/${encodeURIComponent(key)}`,
+                        {
+                            method: "PUT",
+                            body: JSON.stringify({value})
+                        }
+                    );
+                    await loadEmployeeBuilder();
+                } catch (err) {
+                    if (error) error.textContent = err?.message || "Could not save setup information.";
                 } finally {
                     if (document.body.contains(button)) button.disabled = false;
                 }
