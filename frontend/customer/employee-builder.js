@@ -77,6 +77,7 @@
             if (scheduleStatus === "runtime_inputs_required") return "add task inputs";
             if (scheduleStatus === "disabled") return "schedule paused";
             if (item.execution_status === "ready") return "ready";
+            if (item.execution_status === "permission_denied") return "owner disabled";
             if (item.execution_status === "disabled") return "action paused";
             return "execution setup pending";
         }
