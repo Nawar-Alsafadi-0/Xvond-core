@@ -114,6 +114,12 @@ def build_internal_booking_action_config(*, requirement: dict, spec: dict) -> di
     except ValueError:
         slot_minutes = 0
     slot_minutes = slot_minutes if 5 <= slot_minutes <= 720 else 0
+    try:
+        capacity_match = re.search(r"\d+", str(values.get("capacity") or ""))
+        capacity = int(capacity_match.group(0)) if capacity_match else 1
+    except ValueError:
+        capacity = 1
+    capacity = max(1, min(capacity, 100))
 
     schedule_ready = bool(weekdays and start and end and slot_minutes)
     fields = [
@@ -145,7 +151,7 @@ def build_internal_booking_action_config(*, requirement: dict, spec: dict) -> di
                 "start": start,
                 "end": end,
                 "slot_minutes": slot_minutes or None,
-                "capacity": 1,
+                "capacity": capacity,
             },
         },
         "xvond_generated": True,
