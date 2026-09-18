@@ -6,10 +6,12 @@ from typing import Any
 from fastapi import HTTPException
 
 from backend.app.core.config.settings import settings
+from backend.app.core.config_secrets import reveal_config
 from backend.app.models.company import Company
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.billing.service_limits import service_limits
+from backend.app.modules.channels.catalog import validate_channel_config
 from backend.app.modules.channels.models import AgentChannel
 
 
@@ -145,6 +147,29 @@ def enabled_channel_types(db, *, company_id: int, agent_id: int) -> list[str]:
         key = str(row.channel_type or "").strip().lower()
         if key in EXTERNAL_COMMUNICATION_CHANNELS and key not in result:
             result.append(key)
+    return result
+
+
+def configured_channel_types(db, *, company_id: int, agent_id: int) -> list[str]:
+    """Communication channels with complete stored config, regardless of live state."""
+    rows = (
+        db.query(AgentChannel)
+        .filter(
+            AgentChannel.company_id == company_id,
+            AgentChannel.agent_id == agent_id,
+        )
+        .all()
+    )
+    result: list[str] = []
+    for row in rows:
+        key = str(row.channel_type or "").strip().lower()
+        if key not in EXTERNAL_COMMUNICATION_CHANNELS or key in result:
+            continue
+        try:
+            validate_channel_config(key, reveal_config(row.config) or {})
+        except ValueError:
+            continue
+        result.append(key)
     return result
 
 
@@ -290,14 +315,33 @@ def self_service_readiness(
         company_id=company.id,
         agent_id=agent.id,
     )
+    requested_channels = list(builder.get("requested_channels") or [])
+    resolved_channels = active_channels
+    prepared_channels: list[str] = []
+    if not agent.enabled:
+        desired = set(communication_channels(requested_channels))
+        desired.update(_requirement_channel_keys(spec or {}))
+        prepared_channels = [
+            item
+            for item in configured_channel_types(
+                db,
+                company_id=company.id,
+                agent_id=agent.id,
+            )
+            if item in desired
+        ]
+        resolved_channels = prepared_channels
+
     state = evaluate_readiness(
         subscribed=bool(billing["active"]),
         channel_limit=billing["channel_limit"],
-        requested_channels=list(builder.get("requested_channels") or []),
-        enabled_channels=active_channels,
+        requested_channels=requested_channels,
+        enabled_channels=resolved_channels,
         compiled_spec=spec,
         provisioned=provisioned,
     )
+    state["active_channels"] = active_channels
+    state["prepared_channels"] = prepared_channels
     state["subscription"] = {
         "active": bool(billing["active"]),
         "plan_name": billing["plan_name"],
