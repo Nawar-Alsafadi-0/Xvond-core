@@ -1,5 +1,6 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from types import SimpleNamespace
 
 from backend.app.main import app  # noqa: F401 - register metadata
 from backend.app.core.database.base import Base
@@ -22,6 +23,7 @@ from backend.app.modules.channels.catalog import (
 )
 from backend.app.modules.channels.delivery import reconcile_managed_channel_requests
 from backend.app.modules.channels.models import AgentChannel
+from backend.app.api.admin_channels import _activation_blockers
 from backend.app.api.public_employee_builder import public_employee_builder_channels
 
 
@@ -193,3 +195,17 @@ def test_non_live_channel_capability_cannot_be_mistaken_for_runtime():
     assert instagram["runtime_adapter"] is None
     assert telegram["runtime_state"] == CHANNEL_RUNTIME_ADAPTER_REQUIRED
     assert instagram["runtime_state"] == CHANNEL_RUNTIME_ADAPTER_REQUIRED
+
+
+def test_adapter_required_channel_cannot_be_activated_by_admin_config():
+    channel = SimpleNamespace(channel_type="telegram")
+    blockers = _activation_blockers(None, channel)
+    assert blockers
+    assert "runtime adapter is not available yet" in blockers[0]
+
+
+def test_custom_channel_is_registered_but_not_claimed_live_without_gateway():
+    custom = get_channel_capability("custom")
+    assert custom["setup_mode"] == CHANNEL_SETUP_MANAGED
+    assert custom["runtime_state"] == CHANNEL_RUNTIME_ADAPTER_REQUIRED
+    assert custom["runtime_adapter"] is None
