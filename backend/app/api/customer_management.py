@@ -423,6 +423,13 @@ def _serialize_integration(item: CompanyIntegration) -> dict:
         "requirement_keys": list(definition.get("requirement_keys") or []),
         "generic_requirements": bool(definition.get("generic_requirements") is True),
         "operation_endpoints": bool(definition.get("operation_endpoints") is True),
+        "connection_mode": definition.get("connection_mode") or "config",
+        "oauth_provider": definition.get("oauth_provider"),
+        "oauth_status": (
+            plain.get("_xvond_oauth_status")
+            if definition.get("connection_mode") == "oauth"
+            else None
+        ),
         "config": public_config(item.config),
         "configured_secret_fields": configured_secret_fields(item.config),
         "configured": configured,
