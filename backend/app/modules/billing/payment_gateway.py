@@ -369,6 +369,7 @@ class TapGateway:
                 "xvond_plan_id": str(plan_id),
                 "xvond_service_code": str(service_code),
                 "xvond_renewal": "true",
+                "xvond_renewal_key": str(idempotency_key),
             },
             "reference": {
                 "transaction": f"xvond-renew-{service_subscription_id}-{plan_id}",
