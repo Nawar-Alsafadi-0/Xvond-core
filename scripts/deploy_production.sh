@@ -33,6 +33,21 @@ wait_healthy() {
     return 1
 }
 
+wait_whatsapp_worker_lease() {
+    attempts="${1:-30}"
+    count=0
+    while [ "$count" -lt "$attempts" ]; do
+        if compose exec -T whatsapp-worker python -c "from backend.app.modules.channels.whatsapp_queue import whatsapp_job_queue; status=whatsapp_job_queue.stats(); raise SystemExit(0 if status.get('configured') and status.get('worker_active') else 1)" >/dev/null 2>&1; then
+            return 0
+        fi
+        count=$((count + 1))
+        sleep 1
+    done
+    echo "WhatsApp worker did not acquire its Redis lease" >&2
+    docker logs --tail 100 xvond-whatsapp-worker >&2 || true
+    return 1
+}
+
 wait_scheduler_heartbeat() {
     attempts="${1:-30}"
     count=0
@@ -228,6 +243,7 @@ fi
 compose up -d --no-deps --force-recreate whatsapp-worker automation-scheduler
 wait_healthy xvond-whatsapp-worker
 wait_healthy xvond-automation-scheduler
+wait_whatsapp_worker_lease
 wait_scheduler_heartbeat
 
 app_image="$(docker inspect --format '{{.Image}}' xvond-core)"
