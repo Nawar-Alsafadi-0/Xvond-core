@@ -226,7 +226,7 @@ def test_compiler_normalizes_explicit_schedule_and_only_grounded_runtime_inputs(
         "kind":"custom",
         "purpose":"Monitor price",
         "primitives":["http_api","scheduler","workflow_engine"],
-        "schedule":{"kind":"daily","hour":8,"minute":0},
+        "schedule":{"kind":"daily","hour":8,"minute":0,"source_text":"كل يوم الساعة 8"},
         "runtime_inputs":{
           "url":"https://prices.example.com",
           "threshold":100,
@@ -245,10 +245,35 @@ def test_compiler_normalizes_explicit_schedule_and_only_grounded_runtime_inputs(
     spec = parse_compiler_response(response, job_brief=job_brief)
     requirement = spec["requirements"][0]
 
-    assert requirement["schedule"] == {"kind": "daily", "hour": 8, "minute": 0}
+    assert requirement["schedule"] == {"kind": "daily", "hour": 8, "minute": 0, "source_text": "كل يوم الساعة 8"}
     assert requirement["runtime_inputs"] == {
         "url": "https://prices.example.com",
         "threshold": 100,
     }
     assert "scheduler" in requirement["primitives"]
     assert "workflow_engine" in requirement["primitives"]
+
+
+
+def test_compiler_rejects_schedule_not_grounded_in_job_brief():
+    response = """{
+      "role":"Monitor",
+      "scope":"personal",
+      "summary":"Monitor data.",
+      "tasks":[],
+      "requirements":[{
+        "key":"monitor",
+        "kind":"custom",
+        "purpose":"Monitor data",
+        "schedule":{
+          "kind":"daily",
+          "hour":3,
+          "minute":0,
+          "source_text":"every day at 3"
+        }
+      }],
+      "permissions":[],
+      "setup_questions":[]
+    }"""
+    spec = parse_compiler_response(response, job_brief="راقب البيانات وأخبرني عند التغيير")
+    assert spec["requirements"][0]["schedule"] is None
