@@ -150,4 +150,7 @@ def test_customer_ui_renders_backend_navigation_and_unified_inbox():
     assert "/customer/operations/customers" in operations
     assert "/customer/operations/notifications" in operations
     assert "/customer/operations/analytics" in operations
+    assert "/manage/integrations" in js
+    assert "capabilityModule" in js
+    assert "module=${encodeURIComponent(capabilityModule)}" in js
     assert '"online_payments_enabled": False' in api_source
