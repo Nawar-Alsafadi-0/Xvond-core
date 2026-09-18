@@ -2,8 +2,10 @@ from datetime import UTC, datetime
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from fastapi import HTTPException
 
 from backend.app.main import app  # noqa: F401 - register model metadata
+from backend.app.api.admin_automation import validate_workflow
 from backend.app.core.database.base import Base
 from backend.app.models.company import Company
 from backend.app.modules.ai_agent.models import AIAgent
@@ -186,3 +188,22 @@ def test_scheduler_does_not_run_when_generated_employee_is_paused(monkeypatch):
     )
     assert result["status"] == "employee_not_live"
     engine.dispose()
+
+
+
+def test_schedule_validation_allows_only_idempotent_execution_path():
+    trigger = validate_workflow(
+        "schedule",
+        [{"type": "scheduled_action", "agent_id": 1, "action_type": "monitor"}],
+        {"schedule": {"kind": "interval", "every_minutes": 15}},
+    )
+    assert trigger == "schedule"
+
+    with __import__("pytest").raises(HTTPException) as exc:
+        validate_workflow(
+            "schedule",
+            [{"type": "tool", "agent_id": 1, "tool_name": "action_request"}],
+            {"schedule": {"kind": "interval", "every_minutes": 15}},
+        )
+    assert exc.value.status_code == 400
+    assert "not production-safe yet" in str(exc.value.detail)
