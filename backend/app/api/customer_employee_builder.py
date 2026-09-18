@@ -544,6 +544,88 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
     return compiled_spec
 
 
+def _carry_forward_requirement_bindings(previous_spec: dict | None, next_spec: dict) -> dict:
+    previous = {
+        normalize_requirement_key(item.get("key")): item
+        for item in ((previous_spec or {}).get("requirements") or [])
+        if isinstance(item, dict) and normalize_requirement_key(item.get("key"))
+    }
+    updated = deepcopy(next_spec)
+    requirements = []
+    carry_fields = {
+        "integration_id",
+        "integration_type",
+        "integration_operations",
+        "fulfillment_mode",
+        "validation_required",
+        "requires_connection",
+    }
+    for raw in updated.get("requirements") or []:
+        if not isinstance(raw, dict):
+            requirements.append(raw)
+            continue
+        item = dict(raw)
+        prior = previous.get(normalize_requirement_key(item.get("key")))
+        if isinstance(prior, dict):
+            for field in carry_fields:
+                if field in prior and field not in item:
+                    item[field] = deepcopy(prior[field])
+        requirements.append(item)
+    updated["requirements"] = requirements
+    return updated
+
+
+def _compile_staged_employee_spec(
+    db,
+    *,
+    company_id: int,
+    agent: AIAgent,
+    job_brief: str,
+    requested_channels: list[str],
+    previous_spec: dict | None,
+) -> dict:
+    selections = runtime_selections(
+        db,
+        company_id,
+        agent.provider,
+        agent.model,
+        message=job_brief,
+    )
+    if not selections:
+        raise HTTPException(503, "No eligible AI provider/model is available")
+
+    for candidate in selections:
+        try:
+            response = ai_engine.generate(
+                provider_name=candidate.provider,
+                system_prompt=COMPILER_SYSTEM_PROMPT,
+                user_message=build_compiler_user_message(
+                    job_brief=job_brief,
+                    requested_channels=requested_channels,
+                ),
+                model=candidate.model,
+                tools=None,
+            )
+            spec = parse_compiler_response(response.text, job_brief=job_brief)
+            spec = _carry_forward_requirement_bindings(previous_spec, spec)
+            _record_ai_usage(
+                db,
+                company_id=company_id,
+                agent_id=agent.id,
+                selected=candidate,
+                response=response,
+            )
+            return {
+                "compiled_spec": spec,
+                "compiled_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "compiler_provider": candidate.provider,
+                "compiler_model": candidate.model,
+            }
+        except (ProviderExecutionError, ValueError):
+            continue
+    raise HTTPException(502, "AI employee compiler could not produce a valid staged specification")
+
+
 
 def _builder_action(
     action_type: str,
@@ -1432,8 +1514,6 @@ def refine_self_service_employee(
         )
         if agent is None:
             raise HTTPException(404, "AI employee not found")
-        if agent.enabled:
-            raise HTTPException(409, "Deactivate this employee before refining it")
         config = _employee_config_or_404(db, agent)
         builder = dict((config.settings or {}).get("employee_builder") or {})
         current_brief = str(builder.get("source_description") or agent.description or "").strip()
@@ -1454,6 +1534,74 @@ def refine_self_service_employee(
                 409,
                 "This employee has accumulated too many refinements. Consolidate the Job Brief before continuing.",
             )
+
+        if agent.enabled:
+            try:
+                blueprint = _build_final_blueprint(
+                    EmployeeBuilderCreateRequest(
+                        description=revised,
+                        name=agent.name,
+                    )
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+
+            pending = {
+                "version": 1,
+                "status": "draft",
+                "source_description": blueprint.description,
+                "job_brief": blueprint.description,
+                "audience": blueprint.audience,
+                "requested_channels": list(
+                    communication_channels(blueprint.channels)
+                ),
+                "permissions": dict(blueprint.permissions),
+                "capabilities": {
+                    item: True for item in blueprint.capabilities
+                },
+                "setup_answers": deepcopy(builder.get("setup_answers") or {}),
+                "base_compiled_at": builder.get("compiled_at"),
+                "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "compiled_spec": None,
+            }
+            if _has_ai_agents_entitlement(db, company.id):
+                staged = _compile_staged_employee_spec(
+                    db,
+                    company_id=company.id,
+                    agent=agent,
+                    job_brief=blueprint.description,
+                    requested_channels=pending["requested_channels"],
+                    previous_spec=(
+                        builder.get("compiled_spec")
+                        if isinstance(builder.get("compiled_spec"), dict)
+                        else None
+                    ),
+                )
+                pending.update(staged)
+                pending["status"] = "built"
+
+            settings_value = dict(config.settings or {})
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": (
+                    "revision_staged_and_built"
+                    if pending.get("compiled_spec")
+                    else "revision_staged"
+                ),
+                "agent_id": agent.id,
+                "live_employee_unchanged": True,
+                "pending_revision": {
+                    "status": pending.get("status"),
+                    "compiled": isinstance(pending.get("compiled_spec"), dict),
+                    "compiled_at": pending.get("compiled_at"),
+                    "created_at": pending.get("created_at"),
+                    "job_brief": pending.get("source_description"),
+                    "requested_channels": pending.get("requested_channels") or [],
+                },
+            }
     finally:
         db.close()
 
