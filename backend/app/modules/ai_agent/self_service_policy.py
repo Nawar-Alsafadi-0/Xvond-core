@@ -57,6 +57,26 @@ def communication_channels(values: Any) -> list[str]:
     return result
 
 
+def self_service_channel_slots(builder: dict | None) -> list[str]:
+    """Return only communication surfaces required by the current Self-Service job.
+
+    This is intentionally a presentation/provisioning view: it combines channels
+    explicitly requested by the Job Brief with channel requirements emitted by
+    the compiled specification. Stale configured/active channels are not added,
+    so customer setup UI follows the current employee contract rather than old
+    connection state.
+    """
+
+    builder = dict(builder or {})
+    slots = communication_channels(builder.get("requested_channels") or [])
+    spec = builder.get("compiled_spec")
+    if isinstance(spec, dict):
+        for item in _requirement_channel_keys(spec):
+            if item not in slots:
+                slots.append(item)
+    return slots
+
+
 def _requirement_channel_keys(spec: dict) -> list[str]:
     result: list[str] = []
     for item in spec.get("requirements") or []:
