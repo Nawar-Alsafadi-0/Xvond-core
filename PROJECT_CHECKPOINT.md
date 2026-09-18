@@ -225,7 +225,8 @@ The employee contract may request any registered communication surface. Xvond ke
 - **Website Chat** — Self-Service setup; live Xvond widget runtime.
 - **WhatsApp** — Self-Service setup; live Meta Cloud API runtime.
 - **Voice / Phone** — Xvond-managed setup; live Vapi runtime foundation. It is not service-ready until a real phone/call path passes end-to-end acceptance.
-- **Telegram, Instagram DM, Facebook Messenger, Email, SMS, Slack, Microsoft Teams and Custom/API channels** — use the shared Xvond Managed Channel Gateway runtime. Xvond Core remains the employee/control plane; the workflow engine normalizes provider events and performs provider-specific delivery behind Xvond. Each channel remains disabled until Xvond provisioning records `provisioning_state=connected`, a tenant-scoped `connection_key`, and the shared workflow gateway is actually configured.
+- **Telegram** — uses the shared Xvond Managed Channel Gateway plus a source-controlled Telegram Bot API provider workflow. Inbound webhook updates are normalized with stable `update_id` identity; outbound `sendMessage` must return Telegram `message_id` before Xvond accepts delivery. Bot tokens and webhook/provider secrets remain in the workflow plane. Telegram still requires real tenant provisioning and external round-trip acceptance before a sold customer channel is called service-ready.
+- **Instagram DM, Facebook Messenger, Email, SMS, Slack, Microsoft Teams and Custom/API channels** — the shared Xvond Managed Channel Gateway runtime exists, but these currently require a custom/provider-specific Xvond binding. They must not be presented as packaged live connectors until a source-controlled provider binding and real external acceptance exist.
 
 A requested Managed channel creates a durable, disabled provisioning work item for Xvond Admin. Removing that channel from the current Job Brief cancels/deactivates the request without fabricating a live connection. The shared runtime does not make a provider service-ready by itself: each provider workflow, credential set, webhook and real customer round-trip still require external acceptance before that connector is sold as live.
 
@@ -236,7 +237,7 @@ Communication surfaces and action integrations remain distinct. For example:
 - `email` is an employee communication surface; `email_read` / `email_send` are mailbox action integrations.
 - `instagram` is Instagram DM; `instagram_publish` remains a publishing action integration.
 
-The public Builder, employee compiler, Self-Service readiness, Customer Portal and Xvond Admin all derive channel delivery truth from the same channel registry.
+The public Builder, employee compiler, Self-Service readiness, Customer Portal and Xvond Admin all derive channel delivery truth from the same channel registry. The registry distinguishes a generic live gateway from a packaged provider binding, so a channel may be requestable through Xvond Managed delivery without being advertised as a completed connector.
 
 ## Automation scheduler
 
@@ -384,9 +385,9 @@ Repository state through the Self-Service channel-contract work is **code valida
 
 Highest-priority remaining external/product work:
 
-1. Merge the durable managed-channel delivery/reconciliation release after full CI validation.
+1. Promote and externally validate the packaged Telegram provider path: provision a real bot -> Telegram webhook -> Xvond employee -> durable outbound -> provider message id -> human handoff -> Return to AI.
 2. Configure/approve the production Merchant-of-Record account, recurring prices and signed webhook destination; run sandbox and then real-money payment acceptance.
-3. Add the first real provider-specific managed-channel binding (Telegram), prove inbound -> employee -> durable outbound -> provider message id -> handoff -> resume, then repeat for Instagram/Messenger and the next launch channels.
+3. Add packaged provider bindings for the next launch channels (Instagram/Messenger first), keeping generic gateway-only channels labeled as custom Xvond setup until their provider binding passes external acceptance.
 4. Deploy the reviewed `main` release to the server using the canonical Nginx + deploy flow.
 5. Run production end-to-end acceptance for Self-Service signup -> Job Brief -> dynamic missing information -> plan/checkout -> build -> required channel setup -> launch -> customer conversation/action -> handoff -> resume.
 6. Run managed-customer acceptance for the same employee runtime through Xvond Admin, proving the Managed and Self-Service provisioning models converge on one runtime without sharing lifecycle UX.
