@@ -106,8 +106,12 @@ def test_active_channel_resolves_channel_connection_requirement():
     assert state["missing_channels"] == []
 
 
-def test_email_and_instagram_publishing_are_not_channel_slots():
-    assert communication_channels(["email", "instagram", "whatsapp"]) == ["whatsapp"]
+def test_email_and_instagram_actions_remain_integrations_while_channels_are_explicit():
+    assert communication_channels(["email", "instagram", "whatsapp"]) == [
+        "email",
+        "instagram",
+        "whatsapp",
+    ]
     spec = _spec(
         requirements=[
             {
@@ -125,7 +129,7 @@ def test_email_and_instagram_publishing_are_not_channel_slots():
     state = evaluate_readiness(
         subscribed=True,
         channel_limit=1,
-        requested_channels=["email", "instagram"],
+        requested_channels=[],
         enabled_channels=[],
         compiled_spec=spec,
         provisioned=True,
@@ -136,8 +140,20 @@ def test_email_and_instagram_publishing_are_not_channel_slots():
     assert "email_read: Xvond connection adapter required" in state["blockers"]
     assert "instagram_publish: Xvond connection adapter required" in state["blockers"]
 
+    channel_state = evaluate_readiness(
+        subscribed=True,
+        channel_limit=2,
+        requested_channels=["email", "instagram"],
+        enabled_channels=[],
+        compiled_spec=_spec(scope="business"),
+        provisioned=True,
+    )
+    assert channel_state["channel_slots_used"] == 2
+    assert channel_state["channels_required"] is True
+    assert channel_state["missing_channels"] == ["email", "instagram"]
 
-def test_plan_channel_slots_are_enforced():
+
+def test_plan_channel_slots_exclude_built_in_xvond_workspace():
     state = evaluate_readiness(
         subscribed=True,
         channel_limit=1,
@@ -146,9 +162,9 @@ def test_plan_channel_slots_are_enforced():
         compiled_spec=_spec(scope="business"),
         provisioned=True,
     )
-    assert state["channel_slots_used"] == 2
-    assert state["ready"] is False
-    assert any("plan limit (1)" in item for item in state["blockers"])
+    assert state["channel_slots_used"] == 1
+    assert state["billed_slot_channels"] == ["whatsapp"]
+    assert state["ready"] is True
 
 
 def test_enabled_channel_consumes_slot_even_if_not_in_job_brief():
@@ -183,14 +199,15 @@ def test_channels_per_employee_limit_overrides_legacy_channels_limit():
     assert channel_limit_from_plan(plan) == 2
 
 
-def test_interaction_mode_does_not_treat_integrations_as_channels():
+def test_interaction_mode_distinguishes_email_integration_from_email_channel():
     spec = _spec(
         scope="personal",
         requirements=[
             {"key": "email_read", "kind": "integration", "status": "connection_required"}
         ],
     )
-    assert interaction_mode(spec, ["email"]) == "personal"
+    assert interaction_mode(spec, []) == "personal"
+    assert interaction_mode(spec, ["email"]) == "hybrid"
 
 
 def test_self_service_spec_view_annotates_cached_connection_truth_without_recompile():
@@ -220,7 +237,9 @@ def test_self_service_spec_view_annotates_cached_connection_truth_without_recomp
 
     assert rows["whatsapp"]["self_service_connection_status"] == "self_service_available"
     assert rows["email_send"]["self_service_connection_status"] == "xvond_adapter_required"
-    assert rows["voice"]["self_service_connection_status"] == "xvond_adapter_required"
+    assert rows["voice"]["self_service_connection_status"] == "xvond_managed_available"
+    assert rows["voice"]["channel_delivery"]["setup_mode"] == "managed"
+    assert rows["voice"]["channel_delivery"]["runtime_state"] == "live"
     assert "self_service_connection_status" not in cached["requirements"][0]
 
 
