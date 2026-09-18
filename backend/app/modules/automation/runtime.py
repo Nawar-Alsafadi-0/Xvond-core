@@ -313,6 +313,49 @@ class AutomationRuntime:
             db.commit()
             db.refresh(run)
             return run
+        except AutomationApprovalRequired as next_approval:
+            next_request = ActionRequest(
+                company_id=company_id,
+                agent_id=next_approval.agent_id,
+                conversation_id=None,
+                action_type=next_approval.action_type,
+                details={
+                    **next_approval.arguments,
+                    "_xvond_automation": {
+                        "run_id": run.id,
+                        "workflow_id": workflow.id,
+                        "workflow_step_index": next_approval.workflow_step_index,
+                        "node_id": next_approval.node_id,
+                        "execution_key": state.get("_xvond_execution_key"),
+                    },
+                },
+                summary=next_approval.summary,
+                status="awaiting_confirmation",
+            )
+            db.add(next_request)
+            db.flush()
+            state.pop("_xvond_approved_request_id", None)
+            state.pop("_xvond_graph_resume", None)
+            run.status = "waiting_approval"
+            run.error_message = None
+            run.output_data = {
+                "state": state,
+                "steps": step_results,
+                "approval": {
+                    "request_id": next_request.id,
+                    "agent_id": next_approval.agent_id,
+                    "action_type": next_approval.action_type,
+                    "summary": next_approval.summary,
+                    "workflow_step_index": next_approval.workflow_step_index,
+                    "node_id": next_approval.node_id,
+                    "node_outputs": next_approval.node_outputs,
+                    "status": "awaiting_confirmation",
+                },
+            }
+            run.finished_at = None
+            db.commit()
+            db.refresh(run)
+            return run
         except Exception as exc:
             run.status = "failed"
             run.error_message = str(exc)[:2000]
@@ -348,7 +391,13 @@ class AutomationRuntime:
 
             resume = state.get("_xvond_graph_resume")
             resume = resume if isinstance(resume, dict) else {}
-            resume_for_step = int(resume.get("workflow_step_index") or -1) == int(step_index)
+            raw_resume_step = resume.get("workflow_step_index")
+            resume_step_index = (
+                int(raw_resume_step)
+                if raw_resume_step is not None
+                else -1
+            )
+            resume_for_step = resume_step_index == int(step_index)
             node_outputs: dict[str, dict] = (
                 deepcopy(resume.get("node_outputs") or {})
                 if resume_for_step
