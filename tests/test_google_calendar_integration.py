@@ -350,3 +350,50 @@ def test_google_calendar_slot_lock_blocks_concurrent_create(monkeypatch):
         )
 
     assert "being booked" in str(exc.value)
+
+
+
+def test_calendar_lock_scope_separates_different_connections():
+    first = calendar._calendar_lock_scope(
+        {
+            "provider": "google",
+            "calendar_id": "primary",
+            "timezone": "Asia/Muscat",
+            "access_token": "token-a",
+        }
+    )
+    second = calendar._calendar_lock_scope(
+        {
+            "provider": "google",
+            "calendar_id": "primary",
+            "timezone": "Asia/Muscat",
+            "access_token": "token-b",
+        }
+    )
+    assert first != second
+
+
+def test_calendar_rejects_nonexistent_dst_time():
+    config = {
+        **_config(),
+        "timezone": "America/New_York",
+    }
+    with pytest.raises(calendar.CalendarConnectorError) as exc:
+        calendar._local_interval(
+            config,
+            {"date": "2026-03-08", "time": "02:30"},
+        )
+    assert "does not exist" in str(exc.value)
+
+
+def test_calendar_rejects_ambiguous_dst_time():
+    config = {
+        **_config(),
+        "timezone": "America/New_York",
+    }
+    with pytest.raises(calendar.CalendarConnectorError) as exc:
+        calendar._local_interval(
+            config,
+            {"date": "2026-11-01", "time": "01:30"},
+        )
+    assert "ambiguous" in str(exc.value)
