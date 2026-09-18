@@ -334,12 +334,10 @@ def self_service_channel_activation_blockers(
         return [
             f"{capability.get('name') or channel_type}: Xvond runtime adapter is still required"
         ]
-    if capability.get("setup_mode") == CHANNEL_SETUP_MANAGED:
-        if not channel.enabled:
-            return [
-                f"{capability.get('name') or channel_type}: Xvond managed provisioning is not complete"
-            ]
-    elif channel_type not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS:
+    if (
+        capability.get("setup_mode") != CHANNEL_SETUP_MANAGED
+        and channel_type not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS
+    ):
         return [f"{channel_type or 'channel'} is not available for Self-Service launch"]
 
     if not company.active:
@@ -396,6 +394,17 @@ def self_service_channel_activation_blockers(
             blockers.append("Website widget key is missing")
         if settings.is_production and not settings.PUBLIC_BASE_URL:
             blockers.append("Xvond public API URL is not configured")
+    elif channel_type == "voice":
+        required = (
+            "vapi_assistant_id",
+            "vapi_phone_number_id",
+            "vapi_llm_credential_id",
+            "llm_api_key",
+        )
+        if str(channel_config.get("provisioning_state") or "").strip().lower() != "connected":
+            blockers.append("Voice: Xvond managed provisioning is not complete")
+        elif any(not str(channel_config.get(key) or "").strip() for key in required):
+            blockers.append("Voice: Vapi provisioning evidence is incomplete")
 
     return blockers
 
