@@ -14,6 +14,7 @@ from backend.app.modules.channels.handoff import activate_human_handoff
 from backend.app.modules.channels.whatsapp_models import WhatsAppSession
 from backend.app.modules.integrations.catalog import integration_validation_ready
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.automation.event_dispatch import dispatch_automation_event
 from backend.app.modules.tools.base import AgentTool, ToolResult
 from backend.app.modules.tools.business_models import ActionRequest, HumanHandoff
 
@@ -1037,6 +1038,25 @@ class ActionRequestTool(AgentTool):
             meta = dict(request.details or {})
             meta["_xvond_destination"] = {"type": "xvond_internal"}
             request.details = meta
+            db.commit()
+            event_name = (
+                "booking.created"
+                if str(availability.get("mode") or "none") != "none"
+                else f"{request.action_type}.created"
+            )
+            event_result = dispatch_automation_event(
+                company_id=context["company_id"],
+                event_name=event_name,
+                event_id=f"action-request:{request.id}:{request.status}",
+                payload={
+                    "request_id": request.id,
+                    "agent_id": context["agent_id"],
+                    "action_type": request.action_type,
+                    "status": request.status,
+                    "summary": request.summary,
+                    "details": _customer_details(request.details or {}),
+                },
+            )
             return ToolResult(
                 success=True,
                 data={
@@ -1044,6 +1064,7 @@ class ActionRequestTool(AgentTool):
                     "request_id": request.id,
                     "status": request.status,
                     "summary": request.summary,
+                    "event": event_result,
                 },
             )
         if destination_type == "human_handoff":
