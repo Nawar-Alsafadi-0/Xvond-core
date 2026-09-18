@@ -241,7 +241,7 @@ Use this shape:
     "nodes": [
       {
         "id": "stable_node_id",
-        "type": "ai|media|action|http_get_json|web_fetch|transform|condition|notify|foreach|select|filter|aggregate|state_read|state_write|state_delete",
+        "type": "ai|media|action|http_get_json|web_fetch|browser|transform|condition|notify|foreach|select|filter|aggregate|state_read|state_write|state_delete",
         "depends_on": [],
         "params": {}
       }
@@ -267,7 +267,8 @@ Rules:
 - action nodes must reference a requirement key in params.action_type. Do not encode provider-specific logic in the graph.
 - condition nodes use params.left, params.operator and params.right. Supported operators are eq, neq, gt, gte, lt, lte and contains. Any later node may use "when":"$nodes.<condition_id>.matched" to run only when that condition is true.
 - foreach nodes iterate over params.items, which may reference $input.* or a previous node output. Put the reusable per-item work in params.graph. Inside that nested graph, $item refers to the current item and $index to its zero-based index. Keep loops bounded to practical customer work; the runtime enforces a hard maximum.
-- web_fetch nodes read a public web page with params.url and return bounded page content. Use this for read-only public web research/monitoring. Do not use it for login, clicks, forms or other browser interaction; those require a future browser primitive.
+- web_fetch nodes read a public web page with params.url and return bounded page content. Use this for simple read-only public web research/monitoring when browser rendering is not needed.
+- browser nodes use params.url plus a bounded params.actions list. Supported actions are goto, wait_for, extract_text, extract_attribute, extract_html, click, fill, press and select. Use browser for rendered/public-site workflows that cannot be handled by web_fetch. Click/fill/press/select are consequential interactive actions and Xvond will pause at a durable approval checkpoint before running them. Never place credentials, passwords, access tokens or other secrets directly in browser params.
 - state_read/state_write/state_delete provide durable per-employee state across graph runs. Use params.namespace and params.key; state_write also uses params.value. Use state for compact operational memory such as last_processed_id, cursor, preferences or workflow checkpoints. Do not store credentials, large documents or arbitrary conversation transcripts in state.
 - select nodes project a list into requested fields using params.items and params.fields.
 - filter nodes keep matching list items using params.items, params.path, params.operator and params.value. Supported operators match condition nodes plus in.
