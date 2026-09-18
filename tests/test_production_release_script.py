@@ -137,8 +137,11 @@ def test_workflow_sync_publishes_and_sets_active_before_restart():
     channel_sync = WORKFLOW_SYNC.index(
         'sync_one_workflow "$CHANNEL_WORKFLOW_FILE" "$CHANNEL_WORKFLOW_ID"'
     )
+    telegram_sync = WORKFLOW_SYNC.index(
+        'sync_one_workflow "$TELEGRAM_WORKFLOW_FILE" "$TELEGRAM_WORKFLOW_ID"'
+    )
     restart = WORKFLOW_SYNC.index("up -d --no-deps workflow-engine")
-    assert helper < publish < activate < action_sync < channel_sync < restart
+    assert helper < publish < activate < action_sync < channel_sync < telegram_sync < restart
 
 
 def test_workflow_sync_retries_transient_runtime_startup_failures():
@@ -147,6 +150,8 @@ def test_workflow_sync_retries_transient_runtime_startup_failures():
     assert 'sleep 1' in WORKFLOW_SYNC
     assert 'invalid_action_gateway_response' in WORKFLOW_SYNC
     assert 'invalid_channel_gateway_response' in WORKFLOW_SYNC
+    assert 'invalid_telegram_gateway_response' in WORKFLOW_SYNC
+    assert "probe_telegram_gateway" in WORKFLOW_SYNC
     assert 'Last runtime probe error:' in WORKFLOW_SYNC
 
 
@@ -204,3 +209,9 @@ def test_release_requires_public_https_origin_after_local_health():
 def test_public_origin_probe_uses_host_network_not_app_container():
     assert 'python3 scripts/public_origin_probe.py --base-url "$public_base_url"' in SOURCE
     assert 'compose exec -T app python scripts/public_origin_probe.py' not in SOURCE
+
+
+def test_telegram_provider_workflow_is_source_controlled_and_synced():
+    assert 'TELEGRAM_WORKFLOW_FILE="${TELEGRAM_WORKFLOW_FILE:-ops/n8n/xvond-telegram-provider.workflow.json}"' in WORKFLOW_SYNC
+    assert 'TELEGRAM_WORKFLOW_ID="${TELEGRAM_WORKFLOW_ID:-xvond-telegram-provider-v1}"' in WORKFLOW_SYNC
+    assert "XVOND_TELEGRAM_ROUTES_JSON" in COMPOSE
