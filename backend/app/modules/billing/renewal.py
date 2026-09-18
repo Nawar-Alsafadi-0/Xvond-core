@@ -176,16 +176,18 @@ def _process_subscription(
         return "unknown"
 
     attempt = db.get(ServiceRenewalAttempt, attempt.id)
-    attempt.provider_transaction_id = transaction_id
+    if not attempt.provider_transaction_id:
+        attempt.provider_transaction_id = transaction_id
     provider_status = str(result.get("status") or "").strip().lower()
-    attempt.status = "submitted"
-    attempt.last_error_code = (
-        None
-        if provider_status in {"captured", "initiated", "in_progress", "pending"}
-        else f"tap_sync_{provider_status}"[:160]
-        if provider_status
-        else None
-    )
+    if attempt.status != "captured":
+        attempt.status = "submitted"
+        attempt.last_error_code = (
+            None
+            if provider_status in {"captured", "initiated", "in_progress", "pending"}
+            else f"tap_sync_{provider_status}"[:160]
+            if provider_status
+            else None
+        )
 
     checkout = _checkout_for_transaction(db, transaction_id)
     if checkout is None:
