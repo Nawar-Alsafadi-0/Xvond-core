@@ -261,3 +261,70 @@ def test_production_self_service_requires_real_provider_even_without_channel(mon
         company_id=1,
         agent=agent,
     ) is True
+
+
+
+def test_managed_readiness_remains_strict_for_profile_knowledge_and_channel(
+    self_service_database,
+):
+    factory = self_service_database
+    now = datetime.utcnow()
+
+    with factory() as db:
+        db.add(
+            Company(
+                id=2,
+                name="Managed",
+                active=False,
+                lifecycle_status="onboarding",
+                onboarding_source="managed",
+            )
+        )
+        db.flush()
+        db.add_all(
+            [
+                CompanyModule(company_id=2, module_name="ai_agent", enabled=True),
+                CompanyModule(company_id=2, module_name="knowledge", enabled=True),
+                CompanyModule(company_id=2, module_name="tools", enabled=True),
+                ServiceSubscription(
+                    company_id=2,
+                    service_code="ai_agents",
+                    plan_id=1,
+                    status="active",
+                    current_period_start=now - timedelta(days=1),
+                    current_period_end=now + timedelta(days=30),
+                ),
+                AIAgent(
+                    id=2,
+                    company_id=2,
+                    name="Managed employee",
+                    description="Managed employee",
+                    system_prompt="Managed prompt",
+                    provider="mock",
+                    model="mock",
+                    enabled=False,
+                ),
+            ]
+        )
+        db.flush()
+        db.add(
+            AIAgentProfile(
+                company_id=2,
+                agent_id=2,
+                business_name="Managed",
+                business_type="business",
+                reply_language="auto",
+                conversation_style="professional_friendly",
+            )
+        )
+        db.commit()
+
+    with factory() as db:
+        result = readiness.company_readiness(db, 2)
+
+    assert result["delivery_mode"] == "managed"
+    assert result["setup_ready"] is False
+    assert any("Company profile is incomplete" in item for item in result["issues"])
+    employee = result["agents"][0]
+    assert "No enabled knowledge connected" in employee["issues"]
+    assert "No channel configured" in employee["issues"]
