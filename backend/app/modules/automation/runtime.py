@@ -557,7 +557,6 @@ class AutomationRuntime:
                     "status": "approved_execution_failed",
                 },
             }
-            run.finished_at = _utcnow_naive()
             db.commit()
             raise
 
