@@ -4,6 +4,10 @@ let companiesCache=[];
 let agentTestConversationId=null;
 let currentAdminUser=null;
 const XVOND_ADMIN_UI_ROLES=new Set(["super_admin","xvond_admin","support"]);
+const XVOND_ADMIN_WORKSPACE_TABS=new Set([
+  "overview","company","capabilities","agents","knowledge","channels",
+  "operations","integrations","conversations","usage","users","billing","logs"
+]);
 
 // Remove browser-readable bearer tokens left by older Xvond builds.
 localStorage.removeItem("xvond_admin_token");
@@ -18,6 +22,7 @@ function adminMoney(value){const n=Number(value||0);return Number.isFinite(n)?n.
 function adminLifecycleLabel(value){const status=String(value||"onboarding").toLowerCase();const labels={onboarding:"Onboarding",testing:"Testing",live:"Live",paused:"Paused",suspended:"Suspended",cancelled:"Cancelled",archived:"Archived"};return labels[status]||status}
 function adminLifecycleClass(value){const status=String(value||"onboarding").toLowerCase();return status==="live"?"status-active":["suspended","cancelled","archived"].includes(status)?"status-inactive":"status-pending"}
 function xvondSupportMode(){return currentAdminUser?.role==="support"}
+function adminWorkspaceTab(value){const tab=String(value||"overview").trim().toLowerCase();return XVOND_ADMIN_WORKSPACE_TABS.has(tab)?tab:"overview"}
 
 async function api(url,options={}){
   const response=await fetch(API+url,{...options,credentials:"same-origin",headers:{...(options.headers||{}),"Content-Type":"application/json"}});
@@ -68,7 +73,20 @@ function renderAdminAttention(data){
   const target=document.getElementById("dashboard-attention");if(!target)return;
   const items=data.attention_items||[];
   if(!items.length){target.innerHTML='<div class="status status-active" style="display:inline-block">No operational incidents require review</div>';return}
-  target.innerHTML=`<div class="operation-list">${items.map(item=>`<div class="request-card"><div class="request-card-head"><div><strong>${escapeAdmin(item.company_name||`Company #${item.company_id}`)}</strong><div class="meta">${escapeAdmin(item.title||item.type)} · ${adminNumber(item.count)} event${Number(item.count)===1?'':'s'}</div></div><span class="status ${item.severity==='critical'?'status-inactive':'status-active'}">${escapeAdmin(item.severity||'review')}</span></div><button class="table-button" onclick="${xvondSupportMode()?`openSupportCompany(${Number(item.company_id)})`:`loadCompanyControlCenter(${Number(item.company_id)},'${escapeAdmin(item.tab||'overview')}')`}">${xvondSupportMode()?'Inspect':'Open Workspace'}</button></div>`).join('')}</div>`;
+  target.innerHTML=`<div class="operation-list">${items.map(item=>{
+    const companyId=Number(item.company_id);
+    const safeCompanyId=Number.isInteger(companyId)&&companyId>0?companyId:0;
+    const tab=adminWorkspaceTab(item.tab);
+    return `<div class="request-card"><div class="request-card-head"><div><strong>${escapeAdmin(item.company_name||`Company #${item.company_id}`)}</strong><div class="meta">${escapeAdmin(item.title||item.type)} · ${adminNumber(item.count)} event${Number(item.count)===1?'':'s'}</div></div><span class="status ${item.severity==='critical'?'status-inactive':'status-active'}">${escapeAdmin(item.severity||'review')}</span></div><button class="table-button admin-attention-open" data-company-id="${safeCompanyId}" data-workspace-tab="${escapeAdmin(tab)}">${xvondSupportMode()?'Inspect':'Open Workspace'}</button></div>`;
+  }).join('')}</div>`;
+  target.querySelectorAll(".admin-attention-open").forEach(button=>{
+    button.addEventListener("click",()=>{
+      const companyId=Number(button.dataset.companyId);
+      if(!Number.isInteger(companyId)||companyId<=0)return;
+      if(xvondSupportMode())openSupportCompany(companyId);
+      else loadCompanyControlCenter(companyId,adminWorkspaceTab(button.dataset.workspaceTab));
+    });
+  });
 }
 
 async function loadDashboard(){
