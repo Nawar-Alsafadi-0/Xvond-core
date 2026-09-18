@@ -257,5 +257,5 @@ def test_employee_builder_exposes_plan_selection_and_pending_payment_state():
     assert "Payment pending" in builder_api
     assert "Activate free plan" in js
     assert "Online payment is not enabled yet" in js
-    assert "A company Owner or Admin must choose the subscription plan." in js
+    assert "A company Owner or Admin must choose the plan." in js
     assert '["owner", "admin"]' in js
