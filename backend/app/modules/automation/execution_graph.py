@@ -78,3 +78,36 @@ def graph_node_ids(graph: dict) -> list[str]:
         for node in (graph or {}).get("nodes") or []
         if isinstance(node, dict) and node.get("id")
     ]
+
+
+
+def resolve_graph_value(value: Any, *, state: dict, node_outputs: dict) -> Any:
+    if isinstance(value, str) and value.startswith("$"):
+        path = value[1:].split(".")
+        if not path:
+            return value
+        if path[0] == "input":
+            current: Any = state
+            path = path[1:]
+        elif path[0] == "nodes" and len(path) >= 2:
+            current = node_outputs.get(path[1])
+            path = path[2:]
+        else:
+            return value
+        for key in path:
+            if isinstance(current, dict):
+                current = current.get(key)
+            else:
+                return None
+        return current
+    if isinstance(value, dict):
+        return {
+            key: resolve_graph_value(item, state=state, node_outputs=node_outputs)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            resolve_graph_value(item, state=state, node_outputs=node_outputs)
+            for item in value
+        ]
+    return value
