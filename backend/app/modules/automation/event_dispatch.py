@@ -15,7 +15,7 @@ def dispatch_automation_event(
     event_id: str,
     payload: dict | None = None,
 ) -> dict:
-    clean_event = str(event_name or "").strip()
+    clean_event = str(event_name or "").strip().lower()
     clean_event_id = str(event_id or "").strip()
     if not clean_event:
         raise ValueError("Automation event name is required")
@@ -42,7 +42,7 @@ def dispatch_automation_event(
         runs = []
         for workflow in workflows:
             config = workflow.trigger_config if isinstance(workflow.trigger_config, dict) else {}
-            if str(config.get("event_name") or "").strip() != clean_event:
+            if str(config.get("event_name") or "").strip().lower() != clean_event:
                 continue
             generated_agent_id = int(config.get("_xvond_agent_id") or 0)
             if generated_agent_id:
