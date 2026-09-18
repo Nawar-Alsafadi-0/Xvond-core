@@ -35,6 +35,7 @@ INTERNAL_CHANNEL_CATALOG = {
         "runtime_adapter": "xvond_workspace",
         "customer_selectable": True,
         "channel_slot": False,
+        "packaged_provider": True,
     },
 }
 
@@ -48,6 +49,7 @@ CHANNEL_CATALOG = {
         "runtime_adapter": "meta_whatsapp_cloud",
         "customer_selectable": True,
         "channel_slot": True,
+        "packaged_provider": True,
         "config_fields": [
             {"name": "phone_number_id", "label": "Phone Number ID", "required": True, "secret": False},
             {"name": "access_token", "label": "Access Token", "required": True, "secret": True},
@@ -69,6 +71,7 @@ CHANNEL_CATALOG = {
         "runtime_adapter": "xvond_website_widget",
         "customer_selectable": True,
         "channel_slot": True,
+        "packaged_provider": True,
         "config_fields": [
             {"name": "allowed_domain", "label": "Allowed Domain", "required": True, "secret": False},
             {"name": "widget_name", "label": "Widget Name", "required": False, "secret": False},
@@ -87,6 +90,7 @@ CHANNEL_CATALOG = {
         "runtime_adapter": "vapi",
         "customer_selectable": True,
         "channel_slot": True,
+        "packaged_provider": True,
         "config_fields": [
             {"name": "provider", "label": "Voice Provider", "required": True, "secret": False},
             {"name": "phone_number", "label": "Phone Number", "required": True, "secret": False},
@@ -102,6 +106,7 @@ CHANNEL_CATALOG = {
         "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
+        "packaged_provider": True,
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "instagram": {
@@ -112,6 +117,7 @@ CHANNEL_CATALOG = {
         "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
+        "packaged_provider": False,
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "messenger": {
@@ -122,6 +128,7 @@ CHANNEL_CATALOG = {
         "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
+        "packaged_provider": False,
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "email": {
@@ -132,6 +139,7 @@ CHANNEL_CATALOG = {
         "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
+        "packaged_provider": False,
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "sms": {
@@ -142,6 +150,7 @@ CHANNEL_CATALOG = {
         "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
+        "packaged_provider": False,
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "slack": {
@@ -152,6 +161,7 @@ CHANNEL_CATALOG = {
         "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
+        "packaged_provider": False,
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "teams": {
@@ -162,6 +172,7 @@ CHANNEL_CATALOG = {
         "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
+        "packaged_provider": False,
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "custom": {
@@ -172,6 +183,7 @@ CHANNEL_CATALOG = {
         "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
+        "packaged_provider": False,
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
 }
@@ -228,6 +240,18 @@ def live_managed_channel_types() -> frozenset[str]:
         for item in list_customer_channel_capabilities()
         if item.get("runtime_state") == CHANNEL_RUNTIME_LIVE
         and item.get("setup_mode") == CHANNEL_SETUP_MANAGED
+    )
+
+
+def packaged_managed_channel_types() -> frozenset[str]:
+    """Managed channels with a source-controlled Xvond provider binding."""
+
+    return frozenset(
+        item["type"]
+        for item in list_customer_channel_capabilities()
+        if item.get("runtime_state") == CHANNEL_RUNTIME_LIVE
+        and item.get("setup_mode") == CHANNEL_SETUP_MANAGED
+        and item.get("packaged_provider") is True
     )
 
 
