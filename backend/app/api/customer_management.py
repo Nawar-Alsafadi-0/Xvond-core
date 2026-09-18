@@ -378,6 +378,7 @@ def _invalidate_bound_integration_previews(
 
 
 def _serialize_integration(item: CompanyIntegration) -> dict:
+    definition = get_integration_definition(item.integration_type) or {}
     try:
         configured = validate_integration_config(
             item.integration_type,
@@ -390,6 +391,10 @@ def _serialize_integration(item: CompanyIntegration) -> dict:
         "id": item.id,
         "integration_type": item.integration_type,
         "name": item.name,
+        "execution_adapter": definition.get("execution_adapter"),
+        "requirement_keys": list(definition.get("requirement_keys") or []),
+        "generic_requirements": bool(definition.get("generic_requirements") is True),
+        "operation_endpoints": bool(definition.get("operation_endpoints") is True),
         "config": public_config(item.config),
         "configured_secret_fields": configured_secret_fields(item.config),
         "configured": configured,
