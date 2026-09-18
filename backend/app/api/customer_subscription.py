@@ -96,6 +96,8 @@ def _create_online_checkout(
     company: Company,
     subscription: ServiceSubscription,
     plan: ServicePlan,
+    customer_email: str | None,
+    customer_name: str | None,
 ) -> ServiceCheckout:
     existing = _pending_checkout(db, subscription.id, plan.id)
     if existing is not None and str(existing.checkout_url or "").strip():
@@ -107,6 +109,10 @@ def _create_online_checkout(
         plan_id=plan.id,
         plan_tier=plan.tier,
         service_code=subscription.service_code,
+        amount=Decimal(str(plan.monthly_price or 0)),
+        currency=plan.currency,
+        customer_email=customer_email,
+        customer_name=customer_name,
     )
     checkout = ServiceCheckout(
         company_id=company.id,
@@ -223,6 +229,8 @@ def request_self_service_ai_agent_subscription(
                         company=company,
                         subscription=item,
                         plan=plan,
+                        customer_email=current_user.email,
+                        customer_name=current_user.full_name,
                     )
                     db.commit()
                     db.refresh(checkout)
@@ -283,6 +291,8 @@ def request_self_service_ai_agent_subscription(
                     company=company,
                     subscription=item,
                     plan=plan,
+                    customer_email=current_user.email,
+                    customer_name=current_user.full_name,
                 )
             except PaymentGatewayError as exc:
                 db.rollback()
