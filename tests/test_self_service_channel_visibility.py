@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -189,15 +190,15 @@ def test_self_service_channel_setup_api_guard_follows_job_contract(agent_list_da
             channel_type="whatsapp",
         )
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(HTTPException) as exc_info:
             assert_self_service_channel_selected(
                 db,
                 company=company,
                 agent=background_agent,
                 channel_type="website",
             )
-        assert getattr(exc_info.value, "status_code", None) == 409
-        assert "current Job Brief" in str(getattr(exc_info.value, "detail", ""))
+        assert exc_info.value.status_code == 409
+        assert "current Job Brief" in str(exc_info.value.detail)
 
 
 def test_customer_channel_ui_filters_self_service_cards_by_job_brief():
