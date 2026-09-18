@@ -266,7 +266,7 @@ fi
 
 compose up -d postgres-backup
 compose exec -T app python -c "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)); assert data.get('status') == 'healthy', data"
-compose exec -T app python scripts/public_origin_probe.py --base-url "$public_base_url"
+python3 scripts/public_origin_probe.py --base-url "$public_base_url"
 
 if [ -n "$ACCEPTANCE_COMPANY_ID" ]; then
     set -- python scripts/production_acceptance.py --company-id "$ACCEPTANCE_COMPANY_ID"
