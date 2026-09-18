@@ -17,26 +17,36 @@ class EmailConnectorError(ValueError):
     pass
 
 
-def _public_smtp_host(value: str) -> str:
+def _public_smtp_target(value: str, port: int) -> tuple[str, list[str]]:
     host = str(value or "").strip().lower().rstrip(".")
     if not host or len(host) > 253:
         raise EmailConnectorError("SMTP host is invalid")
     if host in {"localhost", "localhost.localdomain"}:
         raise EmailConnectorError("SMTP host cannot be local")
     try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise EmailConnectorError("SMTP host could not be resolved") from exc
     if not infos:
         raise EmailConnectorError("SMTP host could not be resolved")
+
+    addresses: list[str] = []
     for info in infos:
-        raw_ip = info[4][0]
+        raw_ip = str(info[4][0])
         try:
             ip = ipaddress.ip_address(raw_ip)
         except ValueError as exc:
             raise EmailConnectorError("SMTP host resolved to an invalid address") from exc
         if not ip.is_global:
             raise EmailConnectorError("SMTP host cannot resolve to private or reserved addresses")
+        normalized = str(ip)
+        if normalized not in addresses:
+            addresses.append(normalized)
+    return host, addresses
+
+
+def _public_smtp_host(value: str) -> str:
+    host, _ = _public_smtp_target(value, 465)
     return host
 
 
@@ -65,18 +75,52 @@ def _port(value) -> int:
 
 
 def _connection(config: dict, *, timeout: float):
-    host = _public_smtp_host(config.get("smtp_host"))
     port = _port(config.get("smtp_port"))
+    host, addresses = _public_smtp_target(config.get("smtp_host"), port)
     context = ssl.create_default_context()
-    if port == 465:
-        client = smtplib.SMTP_SSL(host=host, port=port, timeout=timeout, context=context)
-        client.ehlo()
-        return client
-    client = smtplib.SMTP(host=host, port=port, timeout=timeout)
-    client.ehlo()
-    client.starttls(context=context)
-    client.ehlo()
-    return client
+    last_error: Exception | None = None
+
+    for address in addresses:
+        raw_socket = None
+        client = None
+        try:
+            raw_socket = socket.create_connection((address, port), timeout=timeout)
+            if port == 465:
+                client = smtplib.SMTP_SSL(timeout=timeout, context=context)
+                client._host = host
+                client.sock = context.wrap_socket(raw_socket, server_hostname=host)
+                raw_socket = None
+                code, message = client.getreply()
+                if code != 220:
+                    raise smtplib.SMTPConnectError(code, message)
+            else:
+                client = smtplib.SMTP(timeout=timeout)
+                client._host = host
+                client.sock = raw_socket
+                client.file = None
+                raw_socket = None
+                code, message = client.getreply()
+                if code != 220:
+                    raise smtplib.SMTPConnectError(code, message)
+            client.ehlo()
+            if port == 587:
+                client.starttls(context=context)
+                client.ehlo()
+            return client
+        except Exception as exc:
+            last_error = exc
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            if raw_socket is not None:
+                try:
+                    raw_socket.close()
+                except Exception:
+                    pass
+
+    raise EmailConnectorError("SMTP public endpoints could not be reached") from last_error
 
 
 def validate_smtp_connection(config: dict, *, timeout: float = 10.0) -> dict:
