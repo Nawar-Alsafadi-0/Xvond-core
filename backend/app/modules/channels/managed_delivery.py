@@ -220,9 +220,16 @@ def attempt_delivery(db, *, delivery_id: int) -> dict:
     row = _locked(db, delivery_id)
     if result.get("success") is True:
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
-        row.provider_message_id = (
-            str((data or {}).get("provider_message_id") or "").strip() or None
-        )
+        provider_message_id = str((data or {}).get("provider_message_id") or "").strip()
+        if not provider_message_id:
+            row.status = "unknown"
+            row.retryable = False
+            row.last_error_code = "provider_message_id_missing"
+            row.updated_at = _now()
+            db.commit()
+            return {"success": False, "unknown": True, **delivery_payload(row)}
+
+        row.provider_message_id = provider_message_id
         row.status = "accepted"
         row.retryable = False
         row.last_error_code = None
