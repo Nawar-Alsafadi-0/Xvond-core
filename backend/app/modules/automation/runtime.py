@@ -10,6 +10,10 @@ from backend.app.modules.automation.agent_state import (
     read_agent_state,
     write_agent_state,
 )
+from backend.app.modules.automation.browser_runtime import (
+    BrowserExecutionError,
+    run_browser_task,
+)
 from backend.app.modules.automation.execution_graph import (
     compare_values,
     extract_data_path,
@@ -546,6 +550,87 @@ class AutomationRuntime:
                         "status_code": status,
                         "truncated": bool(result.get("truncated")),
                     }
+                    continue
+                elif node_type == "browser":
+                    start_url = str(params.get("url") or "").strip()
+                    actions = params.get("actions") or []
+                    if not isinstance(actions, list):
+                        raise ValueError(
+                            f"Execution graph browser node {node_id} actions must be a list"
+                        )
+                    mutating_ops = {"click", "fill", "press", "select"}
+                    requires_approval = any(
+                        isinstance(item, dict)
+                        and str(item.get("op") or "").strip().lower() in mutating_ops
+                        for item in actions
+                    )
+                    allow_interactions = False
+                    if requires_approval:
+                        browser_agent_id = int(
+                            params.get("agent_id") or graph_agent_id or 0
+                        )
+                        if not browser_agent_id:
+                            raise ValueError(
+                                f"Execution graph browser node {node_id} requires agent_id for interactive actions"
+                            )
+                        approval_request_id = int(
+                            state.get("_xvond_approved_request_id") or 0
+                        )
+                        approval = None
+                        if approval_request_id:
+                            approval = (
+                                db.query(ActionRequest)
+                                .filter(
+                                    ActionRequest.id == approval_request_id,
+                                    ActionRequest.company_id == company_id,
+                                    ActionRequest.agent_id == browser_agent_id,
+                                    ActionRequest.action_type == "browser_interaction",
+                                    ActionRequest.status == "approved",
+                                )
+                                .first()
+                            )
+                            if approval is not None:
+                                meta = (
+                                    (approval.details or {}).get("_xvond_automation")
+                                    if isinstance(approval.details, dict)
+                                    else None
+                                )
+                                if (
+                                    not isinstance(meta, dict)
+                                    or str(meta.get("node_id") or "").strip() != node_id
+                                ):
+                                    approval = None
+                        if approval is None:
+                            raise AutomationApprovalRequired(
+                                agent_id=browser_agent_id,
+                                action_type="browser_interaction",
+                                arguments={
+                                    "url": start_url,
+                                    "actions": actions,
+                                },
+                                summary=str(
+                                    params.get("summary")
+                                    or node.get("label")
+                                    or "Approve browser interaction"
+                                ),
+                                workflow_step_index=step_index,
+                                node_id=node_id,
+                                node_outputs=node_outputs,
+                            )
+                        allow_interactions = True
+
+                    try:
+                        browser_result = run_browser_task(
+                            start_url=start_url,
+                            actions=actions,
+                            timeout_seconds=int(params.get("timeout_seconds") or 30),
+                            allow_interactions=allow_interactions,
+                        )
+                    except BrowserExecutionError as exc:
+                        raise ValueError(
+                            f"Execution graph browser node {node_id} failed: {exc}"
+                        ) from exc
+                    node_outputs[node_id] = browser_result
                     continue
                 elif node_type == "state_read":
                     agent_id = int(params.get("agent_id") or graph_agent_id or 0)
