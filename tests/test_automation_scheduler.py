@@ -783,6 +783,16 @@ def test_internal_event_dispatch_runs_matching_graph_once(monkeypatch):
     assert captured[0]["customer_name"] == "Nawar"
     assert captured[0]["_xvond_event_name"] == "booking.created"
     assert captured[0]["_xvond_execution_key"].endswith(":evt-123")
+
+    second = event_dispatch_module.dispatch_automation_event(
+        company_id=1,
+        event_name="booking.created",
+        event_id="evt-123",
+        payload={"customer_name": "Nawar"},
+    )
+    assert second["matched"] == 1
+    assert second["runs"][0]["status"] == "already_recorded"
+    assert len(captured) == 1
     engine.dispose()
 
 
