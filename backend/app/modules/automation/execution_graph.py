@@ -28,7 +28,22 @@ def _bounded(value: Any, limit: int = 2000) -> str:
 
 def normalize_execution_graph(value: Any) -> dict:
     if not isinstance(value, dict):
-        return {"version": GRAPH_VERSION, "nodes": []}
+        return {"version": GRAPH_VERSION, "trigger": {"type": "manual"}, "nodes": []}
+
+    raw_trigger = value.get("trigger")
+    if isinstance(raw_trigger, dict):
+        trigger_type = str(raw_trigger.get("type") or "manual").strip().lower()
+        if trigger_type not in {"manual", "schedule", "webhook", "event"}:
+            trigger_type = "manual"
+        trigger = {"type": trigger_type}
+        if trigger_type == "event":
+            event_name = _bounded(raw_trigger.get("event"), 120)
+            if event_name:
+                trigger["event"] = event_name
+        if trigger_type == "schedule" and isinstance(raw_trigger.get("schedule"), dict):
+            trigger["schedule"] = deepcopy(raw_trigger.get("schedule"))
+    else:
+        trigger = {"type": "manual"}
 
     nodes: list[dict] = []
     seen: set[str] = set()
@@ -65,7 +80,7 @@ def normalize_execution_graph(value: Any) -> dict:
         if len(nodes) >= 50:
             break
 
-    return {"version": GRAPH_VERSION, "nodes": nodes}
+    return {"version": GRAPH_VERSION, "trigger": trigger, "nodes": nodes}
 
 
 def graph_has_side_effect(graph: dict) -> bool:
