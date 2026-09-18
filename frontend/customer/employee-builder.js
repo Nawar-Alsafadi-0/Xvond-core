@@ -96,6 +96,89 @@
         }).join("")}</div>`;
     }
 
+    function journeyStatusLabel(status) {
+        const labels = {
+            complete: "Ready",
+            action_required: "Your action",
+            waiting: "Xvond / provider",
+            blocked: "Locked",
+        };
+        return labels[String(status || "")] || String(status || "Pending");
+    }
+
+    function journeyTone(status) {
+        if (status === "complete") return "ready";
+        if (status === "action_required") return "setup";
+        if (status === "waiting") return "planned";
+        return "neutral";
+    }
+
+    function journeyActionMarkup(action) {
+        const type = String(action?.type || "");
+        const runnable = new Set([
+            "choose_plan",
+            "build_employee",
+            "manage_knowledge",
+            "setup_website",
+            "setup_whatsapp",
+            "provide_input",
+            "launch_employee",
+        ]).has(type);
+        if (!runnable) return "";
+        return `
+            <button
+                type="button"
+                class="employee-builder-journey-action"
+                data-builder-action="${escapeHtml(type)}"
+            >${escapeHtml(action?.label || "Continue")}</button>
+        `;
+    }
+
+    function journeyMarkup(employee) {
+        if (employee.delivery_mode !== "self_service") return "";
+        const journey = employee.builder_journey || {};
+        const stages = Array.isArray(journey.stages) ? journey.stages : [];
+        if (!stages.length) return "";
+        const progress = Number(journey.total_count || stages.length)
+            ? Math.round((Number(journey.complete_count || 0) / Number(journey.total_count || stages.length)) * 100)
+            : 0;
+
+        return `
+            <div class="panel employee-builder-journey">
+                <div class="employee-builder-current-head">
+                    <div>
+                        <div class="employee-builder-kicker">BUILD PROGRESS</div>
+                        <h2>From Job Brief to a live employee</h2>
+                        <p class="muted">Xvond builds the employee. You only complete the plan, data or connections the job actually requires.</p>
+                    </div>
+                    ${badge(`${Number(journey.complete_count || 0)}/${Number(journey.total_count || stages.length)} ready`, progress === 100 ? "ready" : "neutral")}
+                </div>
+                <div class="employee-builder-progress" aria-label="Employee build progress">
+                    <span style="width:${Math.max(0, Math.min(100, progress))}%"></span>
+                </div>
+                <div class="employee-builder-journey-list">
+                    ${stages.map((stage, index) => `
+                        <div class="employee-builder-journey-step employee-builder-journey-${escapeHtml(stage.status || "blocked")}">
+                            <div class="employee-builder-journey-index">${index + 1}</div>
+                            <div class="employee-builder-journey-copy">
+                                <div class="employee-builder-current-head">
+                                    <strong>${escapeHtml(stage.label || stage.id || "Step")}</strong>
+                                    ${badge(journeyStatusLabel(stage.status), journeyTone(stage.status))}
+                                </div>
+                                <p class="muted">${escapeHtml(stage.detail || "")}</p>
+                                ${(stage.actions || []).length ? `
+                                    <div class="employee-builder-actions employee-builder-journey-actions">
+                                        ${(stage.actions || []).map(journeyActionMarkup).join("")}
+                                    </div>
+                                ` : ""}
+                            </div>
+                        </div>
+                    `).join("")}
+                </div>
+            </div>
+        `;
+    }
+
     function selfServiceMarkup(employee) {
         if (employee.delivery_mode !== "self_service") return "";
         const state = employee.self_service_readiness || {};
@@ -185,7 +268,7 @@
                 </div>
 
                 ${questions ? `
-                    <div class="employee-builder-section">
+                    <div class="employee-builder-section" id="employee-builder-setup-questions">
                         <h3>Needed from you</h3>
                         <ul>${questions}</ul>
                     </div>
@@ -281,6 +364,7 @@
                     </div>
                 </div>
 
+                ${journeyMarkup(employee)}
                 ${compiledMarkup(employee.compiled_spec)}
                 ${selfServiceMarkup(employee)}
 
@@ -299,6 +383,74 @@
                 `}
             </div>
         `;
+
+        async function openJourneyPage(pageId) {
+            const navButton = [...document.querySelectorAll("#portal-nav .nav-item")]
+                .find(item => item.dataset.page === pageId);
+            if (typeof window.openPage === "function") {
+                await window.openPage(pageId, navButton || null);
+            }
+        }
+
+        async function runJourneyAction(actionType) {
+            if (actionType === "choose_plan") {
+                await loadSubscriptionPlans();
+                document.getElementById("subscription-plans")?.scrollIntoView({behavior: "smooth", block: "center"});
+                return;
+            }
+            if (actionType === "build_employee") {
+                await prepareEmployee(employee.agent_id);
+                return;
+            }
+            if (actionType === "launch_employee") {
+                await launchEmployee(employee.agent_id);
+                return;
+            }
+            if (actionType === "provide_input") {
+                document.getElementById("employee-builder-setup-questions")?.scrollIntoView({behavior: "smooth", block: "center"});
+                return;
+            }
+            if (actionType === "manage_knowledge") {
+                await openJourneyPage("agents");
+                if (typeof window.openCustomerAgentSettings === "function") {
+                    await window.openCustomerAgentSettings(employee.agent_id);
+                }
+                if (typeof window.openCustomerManagerTab === "function") {
+                    await window.openCustomerManagerTab("knowledge");
+                }
+                document.getElementById("customer-manager-tab")?.scrollIntoView({behavior: "smooth", block: "start"});
+                return;
+            }
+            if (actionType === "setup_website" || actionType === "setup_whatsapp") {
+                await openJourneyPage("agents");
+                const index = (agents || []).findIndex(item => Number(item.id) === Number(employee.agent_id));
+                const card = index >= 0
+                    ? Array.from(document.querySelectorAll("#agents-list .agent"))[index]
+                    : null;
+                const selector = actionType === "setup_website"
+                    ? ".xvond-website-connect"
+                    : ".xvond-whatsapp-connect";
+                const setup = card?.querySelector(selector);
+                setup?.scrollIntoView({behavior: "smooth", block: "center"});
+                if (actionType === "setup_website") {
+                    const toggle = setup?.querySelector(".xvond-website-toggle");
+                    const form = setup?.querySelector(".xvond-website-form");
+                    if (toggle && form?.classList.contains("hidden")) toggle.click();
+                }
+            }
+        }
+
+        document.querySelectorAll("[data-builder-action]").forEach(button => {
+            button.addEventListener("click", async () => {
+                if (button.disabled) return;
+                button.disabled = true;
+                try {
+                    await runJourneyAction(String(button.dataset.builderAction || ""));
+                } finally {
+                    if (document.body.contains(button)) button.disabled = false;
+                }
+            });
+        });
 
         const reviseButton = document.getElementById("revise-job-brief-btn");
         const revisionEditor = document.getElementById("job-brief-editor");
