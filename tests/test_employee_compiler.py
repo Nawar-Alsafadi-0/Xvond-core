@@ -277,3 +277,41 @@ def test_compiler_rejects_schedule_not_grounded_in_job_brief():
     }"""
     spec = parse_compiler_response(response, job_brief="راقب البيانات وأخبرني عند التغيير")
     assert spec["requirements"][0]["schedule"] is None
+
+
+
+def test_compiler_never_persists_secret_runtime_inputs_even_if_grounded():
+    job_brief = "Check https://example.com every 30 minutes using api_key secret123."
+    response = """{
+      "role":"Monitor",
+      "scope":"personal",
+      "summary":"Monitor data.",
+      "tasks":[],
+      "requirements":[{
+        "key":"monitor",
+        "kind":"custom",
+        "purpose":"Monitor data",
+        "primitives":["http_api","scheduler","workflow_engine"],
+        "schedule":{"kind":"interval","every_minutes":30,"source_text":"every 30 minutes"},
+        "runtime_inputs":{
+          "url":"https://example.com",
+          "api_key":"secret123"
+        },
+        "execution_plan":[{"id":"fetch","op":"http_get_json","url_field":"url"}]
+      }],
+      "permissions":[{"action":"Monitor data","mode":"automatic"}],
+      "setup_questions":[]
+    }"""
+    spec = parse_compiler_response(response, job_brief=job_brief)
+    assert spec["requirements"][0]["runtime_inputs"] == {
+        "url": "https://example.com"
+    }
+
+
+def test_customer_portal_labels_ready_scheduled_work_truthfully():
+    source = (ROOT / "frontend" / "customer" / "employee-builder.js").read_text(
+        encoding="utf-8"
+    )
+    assert "scheduled & ready" in source
+    assert "automatic permission required" in source
+    assert "schedule setup required" in source
