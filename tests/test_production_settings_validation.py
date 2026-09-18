@@ -77,3 +77,20 @@ def test_workflow_secret_placeholder_is_rejected_when_workflow_enabled():
 
     with pytest.raises(RuntimeError, match="N8N_SHARED_SECRET is using a placeholder value"):
         item.validate()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.xvond.com/v1",
+        "https://api.xvond.com?source=bad",
+        "https://api.xvond.com#fragment",
+        "https://user:password@api.xvond.com",
+    ],
+)
+def test_production_public_base_url_must_be_clean_origin(url):
+    item = _valid_production_settings()
+    item.PUBLIC_BASE_URL = url
+
+    with pytest.raises(RuntimeError, match="PUBLIC_BASE_URL must be an HTTPS origin"):
+        item.validate()
