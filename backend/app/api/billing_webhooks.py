@@ -237,8 +237,40 @@ async def paddle_billing_webhook(
         else:
             result = {"ignored": True, "event_type": event_type}
 
+        evidence_checkout = None
+        result_company_id = (
+            result.get("company_id")
+            if isinstance(result, dict)
+            else None
+        )
+        if event_type == "transaction.completed":
+            transaction_id = str(data.get("id") or "").strip()
+            if transaction_id:
+                evidence_checkout = _checkout_for_transaction(db, transaction_id)
+        elif event_type.startswith("subscription."):
+            provider_subscription_id = str(data.get("id") or "").strip()
+            if provider_subscription_id:
+                evidence_checkout = _checkout_for_subscription(
+                    db,
+                    provider_subscription_id,
+                )
+
         db.add(
             ServicePaymentEvent(
+                company_id=(
+                    int(result_company_id)
+                    if result_company_id is not None
+                    else (
+                        evidence_checkout.company_id
+                        if evidence_checkout is not None
+                        else None
+                    )
+                ),
+                service_checkout_id=(
+                    evidence_checkout.id
+                    if evidence_checkout is not None
+                    else None
+                ),
                 provider="paddle",
                 provider_event_id=event_id,
                 event_type=event_type,
