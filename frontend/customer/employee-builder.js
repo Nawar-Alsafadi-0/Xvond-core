@@ -200,6 +200,7 @@
         const lifecycleTone = employee.enabled ? "ready" : "setup";
         const provisioned = employee.compiled_spec?.delivery?.provisioning_version === 1;
         const subscriptionStatus = String(employee.self_service_readiness?.subscription?.status || "");
+        const canManageSubscription = ["owner", "admin"].includes(String(currentUser?.role || ""));
         const channels = (employee.requested_channels || []).map(item => badge(labelFor(CHANNELS, item))).join("") || '<span class="muted">No channel selected yet.</span>';
 
         target.innerHTML = `
@@ -263,11 +264,13 @@
                                 <div class="employee-builder-missing">${badge("Payment pending", "setup")}</div>
                             ` : `
                                 <p class="muted">Choose an AI Employee plan to build, test and launch this employee. Saving the Job Brief itself used no paid AI.</p>
-                                <div class="employee-builder-actions">
-                                    <button type="button" id="choose-subscription-btn">Choose plan</button>
-                                </div>
-                                <div id="subscription-plans" class="employee-builder-section hidden"></div>
-                                <div id="subscription-error" class="error"></div>
+                                ${canManageSubscription ? `
+                                    <div class="employee-builder-actions">
+                                        <button type="button" id="choose-subscription-btn">Choose plan</button>
+                                    </div>
+                                    <div id="subscription-plans" class="employee-builder-section hidden"></div>
+                                    <div id="subscription-error" class="error"></div>
+                                ` : `<p class="muted">A company Owner or Admin must choose the subscription plan.</p>`}
                             `}
                         </div>
                     `}
