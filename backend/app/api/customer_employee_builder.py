@@ -704,6 +704,7 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
         has_entitlement = _has_ai_agents_entitlement(db, current_user.company_id)
         company = _company_or_404(db, current_user.company_id)
         self_service_state = None
+        builder_journey = None
         if is_self_service_company(company):
             compiled_spec = self_service_spec_view(compiled_spec)
             self_service_state = self_service_readiness(
@@ -711,6 +712,12 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
                 company=company,
                 agent=agent,
                 config=config,
+            )
+            builder_journey = _self_service_builder_journey(
+                agent=agent,
+                has_entitlement=has_entitlement,
+                compiled_spec=compiled_spec if isinstance(compiled_spec, dict) else None,
+                state=self_service_state,
             )
         display_channels = list(builder.get("requested_channels", []))
         if is_self_service_company(company):
@@ -735,6 +742,7 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
                     else "managed"
                 ),
                 "self_service_readiness": self_service_state,
+                "builder_journey": builder_journey,
                 "can_launch": bool(
                     self_service_state
                     and self_service_state.get("ready")
