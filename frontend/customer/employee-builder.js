@@ -140,20 +140,22 @@
                             <option value="">Loading connections…</option>
                         </select>
                     </label>
-                    <label>
-                        <span>${isBooking ? "Create booking endpoint" : "Execute endpoint"}</span>
-                        <input type="text" data-integration-execute="${encodedKey}" placeholder="/api/bookings">
-                    </label>
-                    ${isBooking ? `
+                    <div data-integration-endpoint-fields="${encodedKey}">
                         <label>
-                            <span>Availability endpoint</span>
-                            <input type="text" data-integration-availability="${encodedKey}" placeholder="/api/availability">
+                            <span>${isBooking ? "Create booking endpoint" : "Execute endpoint"}</span>
+                            <input type="text" data-integration-execute="${encodedKey}" placeholder="/api/bookings">
                         </label>
-                    ` : ""}
-                    <label>
-                        <span>Cancel endpoint (optional)</span>
-                        <input type="text" data-integration-cancel="${encodedKey}" placeholder="/api/bookings/{id}/cancel">
-                    </label>
+                        ${isBooking ? `
+                            <label>
+                                <span>Availability endpoint</span>
+                                <input type="text" data-integration-availability="${encodedKey}" placeholder="/api/availability">
+                            </label>
+                        ` : ""}
+                        <label>
+                            <span>Cancel endpoint (optional)</span>
+                            <input type="text" data-integration-cancel="${encodedKey}" placeholder="/api/bookings/{id}/cancel">
+                        </label>
+                    </div>
                     <div class="employee-builder-actions">
                         <button type="button" data-bind-integration="${encodedKey}">Use this connection</button>
                         <button type="button" data-open-integrations>Manage connections</button>
@@ -582,9 +584,19 @@
                 const result = await api("/manage/integrations");
                 const integrations = (result.integrations || []).filter(item => item.enabled && item.configured && item.validated);
                 const options = '<option value="">Choose a connected system</option>' + integrations.map(item =>
-                    `<option value="${Number(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(item.integration_type)}</option>`
+                    `<option value="${Number(item.id)}" data-integration-type="${escapeHtml(item.integration_type)}">${escapeHtml(item.name)} · ${escapeHtml(item.integration_type)}</option>`
                 ).join("");
-                for (const select of selects) select.innerHTML = options;
+                for (const select of selects) {
+                    select.innerHTML = options;
+                    const syncEndpointFields = () => {
+                        const encodedKey = String(select.dataset.integrationSelect || "");
+                        const wrapper = document.querySelector(`[data-integration-endpoint-fields="${encodedKey}"]`);
+                        const selectedType = String(select.selectedOptions?.[0]?.dataset?.integrationType || "");
+                        if (wrapper) wrapper.classList.toggle("hidden", selectedType === "instagram_publish");
+                    };
+                    select.addEventListener("change", syncEndpointFields);
+                    syncEndpointFields();
+                }
             } catch (err) {
                 for (const select of selects) {
                     select.innerHTML = '<option value="">Could not load connections</option>';
