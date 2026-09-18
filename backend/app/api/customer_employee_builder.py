@@ -8,6 +8,7 @@ from backend.app.core.ai.engine import ProviderExecutionError, ai_engine
 from backend.app.core.ai.provider_policy import runtime_selections
 from backend.app.core.company_lifecycle import portal_access_allowed
 from backend.app.core.config_secrets import reveal_config
+from backend.app.core.config.settings import settings
 from backend.app.core.database.connection import SessionLocal
 from backend.app.core.dependencies import require_customer_manager
 from backend.app.models.company import Company
@@ -47,6 +48,7 @@ from backend.app.modules.ai_agent.self_service_policy import (
     self_service_spec_view,
 )
 from backend.app.modules.automation.models import AutomationWorkflow
+from backend.app.modules.automation.webhook_auth import automation_webhook_key
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.channels.catalog import (
@@ -2407,5 +2409,69 @@ def test_draft_employee(
     except Exception:
         db.rollback()
         raise
+    finally:
+        db.close()
+
+
+@router.get("/{agent_id}/webhook")
+def customer_employee_webhook(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        company = _company_or_404(db, company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Webhook setup is available for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+        config = _employee_config_or_404(db, agent)
+        builder = (config.settings or {}).get("employee_builder") or {}
+        spec = builder.get("compiled_spec") if isinstance(builder, dict) else None
+        delivery = spec.get("delivery") if isinstance(spec, dict) else None
+        graph_trigger = delivery.get("graph_trigger") if isinstance(delivery, dict) else None
+        if not isinstance(graph_trigger, dict) or graph_trigger.get("trigger_type") != "webhook":
+            raise HTTPException(404, "This employee does not use a webhook trigger")
+        if graph_trigger.get("status") != "ready":
+            raise HTTPException(409, "Webhook trigger is not ready yet")
+
+        workflow_id = int(graph_trigger.get("workflow_id") or 0)
+        workflow = (
+            db.query(AutomationWorkflow)
+            .filter(
+                AutomationWorkflow.id == workflow_id,
+                AutomationWorkflow.company_id == company_id,
+                AutomationWorkflow.trigger_type == "webhook",
+                AutomationWorkflow.enabled.is_(True),
+            )
+            .first()
+        )
+        if workflow is None:
+            raise HTTPException(409, "Webhook workflow is not active")
+        if not settings.PUBLIC_BASE_URL:
+            raise HTTPException(409, "PUBLIC_BASE_URL is not configured")
+
+        return {
+            "workflow_id": workflow.id,
+            "url": f"{settings.PUBLIC_BASE_URL}/webhooks/automation/{workflow.id}",
+            "header": "X-Xvond-Webhook-Key",
+            "key": automation_webhook_key(
+                workflow_id=workflow.id,
+                company_id=company_id,
+            ),
+            "idempotency_header": "Idempotency-Key",
+        }
     finally:
         db.close()
