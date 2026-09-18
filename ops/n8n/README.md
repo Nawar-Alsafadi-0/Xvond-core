@@ -53,6 +53,7 @@ Import and activate the Xvond-owned gateway/provider workflows:
 - `ops/n8n/xvond-actions.workflow.json` for outbound actions and managed-channel sends.
 - `ops/n8n/xvond-channel-inbound.workflow.json` for normalized inbound communication-channel messages.
 - `ops/n8n/xvond-telegram-provider.workflow.json` for Telegram Bot API inbound/outbound transport.
+- `ops/n8n/xvond-meta-messaging-provider.workflow.json` for Instagram DM and Facebook Messenger transport.
 
 The first supported action is intentionally non-destructive: `health_check`.
 
@@ -155,6 +156,33 @@ sh scripts/provision_telegram_channel.sh <company_id> <connection_key>
 The provisioning command validates both route registries, calls Telegram `setWebhook` with the route's secret token, then verifies the installed URL with `getWebhookInfo`. Only after that succeeds should the Xvond channel config be marked `provisioning_state=connected`.
 
 Telegram inbound `update_id` is used as the stable external message identity. Telegram `sendMessage` must return a provider `message_id`; Xvond will not mark delivery accepted without it.
+
+
+### Meta Messaging provider — Instagram DM and Messenger
+
+Instagram DM and Facebook Messenger share the Xvond Meta Messaging provider workflow while remaining separate employee channels.
+
+Configure:
+
+- `XVOND_META_MESSAGING_VERIFY_TOKEN` as the Meta webhook verification token.
+- `XVOND_META_MESSAGING_ROUTES_JSON` with tenant-scoped keys `company_id:connection_key`.
+- `XVOND_CHANNEL_ROUTES_JSON` with the same keys pointing to `https://<workflow-host>/webhook/xvond-meta-messaging-provider`.
+
+Each Meta route contains the Xvond company/agent/channel ids, `channel_type` (`instagram` or `messenger`), the provider sender/account id, Graph version, provider access token, Meta app secret and the matching Xvond provider-route secret. These credentials remain in the workflow plane.
+
+The POST webhook keeps the provider raw request body and validates `X-Hub-Signature-256` with HMAC SHA-256 before parsing customer messages. Invalid signatures fail closed with HTTP 403. Message echoes and unsupported/non-text events are acknowledged without entering Xvond.
+
+Inbound provider `message.mid` becomes Xvond's stable external message identity. Outbound delivery uses the appropriate Graph endpoint for the channel and Xvond accepts success only when Meta returns `message_id`.
+
+Validate a configured route before marking its Xvond channel connected:
+
+```sh
+sh scripts/validate_meta_messaging_route.sh <company_id> <connection_key>
+```
+
+The validation command checks both route registries and confirms that the configured sender/account id is reachable with the stored provider token. It never prints the provider credentials.
+
+Provider-side setup remains an external acceptance gate. For Messenger, the Meta app/Page must have the messaging permissions needed for the intended Page. For Instagram, the professional account/app must have the messaging permission required by the Instagram Messages API. Meta webhook subscription, app review/access level where required, customer message eligibility and one real inbound/outbound round trip must all pass before that customer channel is called service-ready.
 
 ## Booking adapter
 
