@@ -10,7 +10,10 @@ from backend.app.core.database.base import Base
 from backend.app.models.company import Company
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
-from backend.app.modules.ai_agent.self_service_policy import self_service_channel_slots
+from backend.app.modules.ai_agent.self_service_policy import (
+    assert_self_service_channel_selected,
+    self_service_channel_slots,
+)
 
 
 def test_self_service_channel_slots_follow_current_job_contract():
@@ -166,6 +169,37 @@ def test_agent_list_exposes_only_self_service_channel_slots(agent_list_database)
     assert managed["agents"][0]["self_service_channel_slots"] is None
 
 
+def test_self_service_channel_setup_api_guard_follows_job_contract(agent_list_database):
+    factory = agent_list_database
+    with factory() as db:
+        company = db.get(Company, 1)
+        web_agent = db.get(AIAgent, 1)
+        background_agent = db.get(AIAgent, 2)
+
+        assert_self_service_channel_selected(
+            db,
+            company=company,
+            agent=web_agent,
+            channel_type="website",
+        )
+        assert_self_service_channel_selected(
+            db,
+            company=company,
+            agent=web_agent,
+            channel_type="whatsapp",
+        )
+
+        with pytest.raises(Exception) as exc_info:
+            assert_self_service_channel_selected(
+                db,
+                company=company,
+                agent=background_agent,
+                channel_type="website",
+            )
+        assert getattr(exc_info.value, "status_code", None) == 409
+        assert "current Job Brief" in str(getattr(exc_info.value, "detail", ""))
+
+
 def test_customer_channel_ui_filters_self_service_cards_by_job_brief():
     website = Path("frontend/customer/website-channel.js").read_text(
         encoding="utf-8"
@@ -178,3 +212,12 @@ def test_customer_channel_ui_filters_self_service_cards_by_job_brief():
     assert 'self_service_channel_slots' in website
     assert 'selfService && !slots.includes("whatsapp")' in whatsapp
     assert 'self_service_channel_slots' in whatsapp
+
+    website_api = Path("backend/app/api/website_widget.py").read_text(
+        encoding="utf-8"
+    )
+    whatsapp_api = Path("backend/app/api/customer_meta_whatsapp.py").read_text(
+        encoding="utf-8"
+    )
+    assert "assert_self_service_channel_selected" in website_api
+    assert "_assert_whatsapp_selected_for_self_service" in whatsapp_api
