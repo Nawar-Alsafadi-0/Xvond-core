@@ -1385,3 +1385,147 @@ def test_tested_pending_revision_applies_atomically_without_deactivation(databas
         retired = db.query(AutomationWorkflow).filter_by(name="Old generated event").one()
         assert retired.enabled is False
         assert retired.trigger_config["_xvond_source"] == "self_service_employee_retired"
+
+
+
+def test_live_pending_revision_can_be_built_after_entitlement(database, monkeypatch):
+    factory, calls = database
+    monkeypatch.setattr(api, "_has_ai_agents_entitlement", lambda *args, **kwargs: True)
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live"
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+        live_description = agent.description
+        live_prompt = agent.system_prompt
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings = deepcopy(config.settings)
+        builder = deepcopy(settings["employee_builder"])
+        builder["compiled_at"] = "live-build"
+        builder["pending_revision"] = {
+            "version": 1,
+            "status": "draft",
+            "source_description": "Draft a concise weekly market summary.",
+            "job_brief": "Draft a concise weekly market summary.",
+            "requested_channels": [],
+            "setup_answers": {},
+            "base_compiled_at": "live-build",
+            "created_at": "2026-09-19T00:00:00Z",
+            "compiled_spec": None,
+        }
+        settings["employee_builder"] = builder
+        config.settings = settings
+        db.commit()
+
+    result = api.build_pending_live_revision(1, USER)
+    assert result["status"] == "pending_revision_built"
+    assert result["live_employee_unchanged"] is True
+
+    with factory() as db:
+        agent = db.get(AIAgent, 1)
+        pending = _builder(db)["pending_revision"]
+        assert agent.enabled is True
+        assert agent.description == live_description
+        assert agent.system_prompt == live_prompt
+        assert pending["status"] == "built"
+        assert isinstance(pending["compiled_spec"], dict)
+        assert pending["compiled_at"]
+        assert "last_tested_compiled_at" not in pending
+
+    assert len(calls) == 1
+
+
+def test_live_rollback_stages_previous_version_without_touching_live_runtime(database):
+    factory, calls = database
+    previous_spec = normalize_compiled_spec(
+        {
+            "role": "Previous employee",
+            "summary": "Previous behavior",
+            "requirements": [],
+            "permissions": [],
+            "execution_graph": {
+                "version": 1,
+                "trigger": {"type": "manual"},
+                "nodes": [],
+            },
+        },
+        job_brief="Previous behavior",
+    )
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live"
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+        agent.description = "Current behavior"
+        agent.system_prompt = "current live prompt"
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings = deepcopy(config.settings)
+        settings["employee_builder"] = {
+            "source_description": "Current behavior",
+            "job_brief": "Current behavior",
+            "compiled_at": "current-build",
+            "compiled_spec": normalize_compiled_spec(
+                {
+                    "role": "Current employee",
+                    "summary": "Current behavior",
+                    "requirements": [],
+                    "permissions": [],
+                    "execution_graph": {
+                        "version": 1,
+                        "trigger": {"type": "manual"},
+                        "nodes": [],
+                    },
+                },
+                job_brief="Current behavior",
+            ),
+            "requested_channels": [],
+            "permissions": {},
+            "setup_answers": {},
+            "versions": [
+                {
+                    "id": "previous-v1",
+                    "created_at": "2026-09-18T00:00:00Z",
+                    "reason": "previous",
+                    "source_description": "Previous behavior",
+                    "compiled_spec": previous_spec,
+                    "compiled_at": "previous-build",
+                    "setup_answers": {},
+                    "requested_channels": [],
+                    "audience": "business",
+                    "permissions": {},
+                    "capabilities": {},
+                }
+            ],
+        }
+        config.settings = settings
+        db.commit()
+
+    result = api.rollback_self_service_employee(
+        1,
+        api.EmployeeBuilderRollbackRequest(version_id="previous-v1"),
+        USER,
+    )
+    assert result["status"] == "rollback_staged"
+    assert result["live_employee_unchanged"] is True
+    assert result["compiled"] is True
+
+    with factory() as db:
+        agent = db.get(AIAgent, 1)
+        builder = _builder(db)
+        pending = builder["pending_revision"]
+        assert agent.enabled is True
+        assert agent.description == "Current behavior"
+        assert agent.system_prompt == "current live prompt"
+        assert builder["source_description"] == "Current behavior"
+        assert builder["compiled_at"] == "current-build"
+        assert pending["source_description"] == "Previous behavior"
+        assert pending["source_version_id"] == "previous-v1"
+        assert pending["base_compiled_at"] == "current-build"
+        assert pending["status"] == "built"
+        assert pending["last_tested_compiled_at"] if "last_tested_compiled_at" in pending else True
+
+    assert calls == []
