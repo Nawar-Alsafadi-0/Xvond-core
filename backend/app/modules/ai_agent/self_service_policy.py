@@ -11,6 +11,10 @@ from backend.app.core.config.settings import settings
 from backend.app.core.config_secrets import reveal_config
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
+from backend.app.modules.ai_agent.employee_compiler import (
+    is_sensitive_requirement_key,
+    normalize_requirement_key,
+)
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.billing.service_limits import service_limits
@@ -344,6 +348,28 @@ def self_service_channel_activation_blockers(
     return blockers
 
 
+def _setup_answer_complete(requirement: dict, answer: Any) -> bool:
+    key = normalize_requirement_key(requirement.get("key"))
+    if not key or is_sensitive_requirement_key(key):
+        return False
+
+    required_fields: list[str] = []
+    for raw in requirement.get("customer_inputs") or []:
+        field = normalize_requirement_key(raw)
+        if not field or field in required_fields:
+            continue
+        if is_sensitive_requirement_key(field):
+            return False
+        required_fields.append(field)
+
+    if required_fields:
+        if not isinstance(answer, dict):
+            return False
+        return all(str(answer.get(field) or "").strip() for field in required_fields)
+
+    return isinstance(answer, str) and bool(answer.strip())
+
+
 def _resolved_customer_requirement_keys(
     db,
     *,
@@ -351,19 +377,20 @@ def _resolved_customer_requirement_keys(
     agent_id: int,
 ) -> set[str]:
     resolved: set[str] = set()
-    knowledge_count = (
-        db.query(AgentKnowledge)
-        .join(KnowledgeDocument, KnowledgeDocument.id == AgentKnowledge.document_id)
+    knowledge_query = (
+        db.query(KnowledgeDocument)
+        .join(AgentKnowledge, AgentKnowledge.document_id == KnowledgeDocument.id)
         .filter(
             AgentKnowledge.agent_id == agent_id,
             AgentKnowledge.enabled.is_(True),
             KnowledgeDocument.company_id == company_id,
             KnowledgeDocument.enabled.is_(True),
         )
-        .count()
     )
-    if knowledge_count > 0:
+    if knowledge_query.count() > 0:
         resolved.add("knowledge")
+    if knowledge_query.filter(KnowledgeDocument.source_type == "pdf").count() > 0:
+        resolved.add("files")
 
     config = (
         db.query(AgentConfig)
@@ -373,13 +400,18 @@ def _resolved_customer_requirement_keys(
     if config is not None:
         builder = dict((config.settings or {}).get("employee_builder") or {})
         answers = builder.get("setup_answers") or {}
-        if isinstance(answers, dict):
-            for key, value in answers.items():
-                normalized = str(key or "").strip().lower()
-                if not normalized:
+        spec = builder.get("compiled_spec")
+        if isinstance(answers, dict) and isinstance(spec, dict):
+            for requirement in spec.get("requirements") or []:
+                if not isinstance(requirement, dict):
                     continue
-                if isinstance(value, str) and value.strip():
-                    resolved.add(normalized)
+                key = normalize_requirement_key(requirement.get("key"))
+                if not key:
+                    continue
+                if str(requirement.get("status") or "").strip().lower() != "customer_input_required":
+                    continue
+                if _setup_answer_complete(requirement, answers.get(key)):
+                    resolved.add(key)
     return resolved
 
 
