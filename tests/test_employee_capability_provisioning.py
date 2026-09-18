@@ -1204,3 +1204,184 @@ def test_job_brief_revision_keeps_still_requested_channel_active(database):
         assert whatsapp.enabled is True
         assert reveal_config(whatsapp.config)["phone_number_id"] == "keep-phone"
     assert calls == []
+
+
+
+def test_live_refinement_stages_and_tests_without_mutating_live_employee(database, monkeypatch):
+    factory, calls = database
+    monkeypatch.setattr(api, "_has_ai_agents_entitlement", lambda *args, **kwargs: True)
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live"
+        agent = db.get(AIAgent, 1)
+        agent.enabled = False
+        db.commit()
+
+    api.compile_employee(1, USER)
+
+    with factory() as db:
+        agent = db.get(AIAgent, 1)
+        live_prompt = agent.system_prompt
+        live_description = agent.description
+        builder = _builder(db)
+        live_compiled_at = builder["compiled_at"]
+        live_spec = deepcopy(builder["compiled_spec"])
+        agent.enabled = True
+        db.commit()
+
+    result = api.refine_self_service_employee(
+        1,
+        api.EmployeeBuilderRefineRequest(
+            instruction="Make the employee more concise and keep the live version running."
+        ),
+        USER,
+    )
+
+    assert result["status"] == "revision_staged_and_built"
+    assert result["live_employee_unchanged"] is True
+    with factory() as db:
+        agent = db.get(AIAgent, 1)
+        builder = _builder(db)
+        pending = builder["pending_revision"]
+        assert agent.enabled is True
+        assert agent.description == live_description
+        assert agent.system_prompt == live_prompt
+        assert builder["compiled_at"] == live_compiled_at
+        assert builder["compiled_spec"] == live_spec
+        assert pending["base_compiled_at"] == live_compiled_at
+        assert pending["status"] == "built"
+        assert "OWNER REFINEMENT" in pending["source_description"]
+        assert "more concise" in pending["source_description"]
+        assert isinstance(pending["compiled_spec"], dict)
+
+    tested = api.test_draft_employee(
+        1,
+        api.EmployeeBuilderTestRequest(message="How would you answer a customer?"),
+        USER,
+    )
+    assert tested["test_target"] == "pending_revision"
+    assert tested["lifecycle"] == "live"
+
+    with factory() as db:
+        agent = db.get(AIAgent, 1)
+        builder = _builder(db)
+        pending = builder["pending_revision"]
+        assert agent.description == live_description
+        assert agent.system_prompt == live_prompt
+        assert builder["compiled_at"] == live_compiled_at
+        assert pending["status"] == "tested"
+        assert pending["last_tested_compiled_at"] == pending["compiled_at"]
+
+    assert len(calls) == 3
+
+
+def test_tested_pending_revision_applies_atomically_without_deactivation(database, monkeypatch):
+    factory, _ = database
+    monkeypatch.setattr(
+        api,
+        "self_service_readiness",
+        lambda *args, **kwargs: {
+            "ready": True,
+            "blockers": [],
+            "slot_channels": [],
+            "missing_channels": [],
+        },
+    )
+
+    old_spec = normalize_compiled_spec(
+        {
+            "role": "Old employee",
+            "summary": "Old behavior",
+            "requirements": [],
+            "permissions": [],
+            "execution_graph": {"version": 1, "trigger": {"type": "manual"}, "nodes": []},
+        },
+        job_brief="Old behavior",
+    )
+    new_spec = normalize_compiled_spec(
+        {
+            "role": "New employee",
+            "summary": "New behavior",
+            "requirements": [],
+            "permissions": [],
+            "execution_graph": {"version": 1, "trigger": {"type": "manual"}, "nodes": []},
+        },
+        job_brief="New behavior",
+    )
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live"
+        company.active = True
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+        agent.description = "Old behavior"
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings = deepcopy(config.settings)
+        settings["employee_builder"] = {
+            "source_description": "Old behavior",
+            "job_brief": "Old behavior",
+            "requested_channels": [],
+            "permissions": {},
+            "setup_answers": {},
+            "compiled_spec": old_spec,
+            "compiled_at": "old-build",
+            "last_tested_at": "old-test",
+            "last_tested_compiled_at": "old-build",
+            "pending_revision": {
+                "version": 1,
+                "status": "tested",
+                "source_description": "New behavior",
+                "job_brief": "New behavior",
+                "audience": "business",
+                "requested_channels": [],
+                "permissions": {},
+                "capabilities": {},
+                "setup_answers": {},
+                "base_compiled_at": "old-build",
+                "compiled_spec": new_spec,
+                "compiled_at": "new-build",
+                "compiler_provider": "mock",
+                "compiler_model": "mock",
+                "last_tested_at": "new-test",
+                "last_tested_compiled_at": "new-build",
+            },
+        }
+        config.settings = settings
+        db.add(
+            AutomationWorkflow(
+                company_id=1,
+                name="Old generated event",
+                trigger_type="event",
+                trigger_config={
+                    "_xvond_source": "self_service_employee",
+                    "_xvond_agent_id": 1,
+                    "_xvond_graph_trigger": True,
+                    "event_name": "old.event",
+                },
+                steps=[],
+                enabled=True,
+            )
+        )
+        db.commit()
+
+    applied = api.apply_pending_live_revision(1, USER)
+    assert applied["status"] == "revision_applied"
+    assert applied["live_employee_replaced_atomically"] is True
+
+    with factory() as db:
+        agent = db.get(AIAgent, 1)
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        builder = config.settings["employee_builder"]
+        assert agent.enabled is True
+        assert agent.description == "New behavior"
+        assert builder["source_description"] == "New behavior"
+        assert builder["compiled_at"] == "new-build"
+        assert "pending_revision" not in builder
+        assert builder["versions"][-1]["source_description"] == "Old behavior"
+        retired = db.query(AutomationWorkflow).filter_by(name="Old generated event").one()
+        assert retired.enabled is False
+        assert retired.trigger_config["_xvond_source"] == "self_service_employee_retired"
