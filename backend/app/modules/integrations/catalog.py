@@ -1,5 +1,43 @@
 INTEGRATION_CATALOG = {
 
+    "email_smtp": {
+        "name": "Email (SMTP)",
+        "description": "Send email securely through the customer's SMTP provider",
+        "config_fields": [
+            {
+                "name": "smtp_host",
+                "label": "SMTP Host",
+                "required": True,
+                "secret": False,
+            },
+            {
+                "name": "smtp_port",
+                "label": "SMTP Port",
+                "required": True,
+                "secret": False,
+                "default": 465,
+            },
+            {
+                "name": "username",
+                "label": "SMTP Username",
+                "required": True,
+                "secret": False,
+            },
+            {
+                "name": "password",
+                "label": "SMTP Password / App Password",
+                "required": True,
+                "secret": True,
+            },
+            {
+                "name": "from_address",
+                "label": "From Email",
+                "required": True,
+                "secret": False,
+            },
+        ],
+    },
+
     "instagram_publish": {
         "name": "Instagram Publishing",
         "description": "Publish media and captions to an Instagram professional account",
