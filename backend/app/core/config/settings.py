@@ -68,7 +68,7 @@ class Settings:
     TAP_SOURCE_ID = os.getenv("TAP_SOURCE_ID", "src_all").strip() or "src_all"
     TAP_SAVE_CARD_FOR_RECURRING = os.getenv(
         "TAP_SAVE_CARD_FOR_RECURRING",
-        "true",
+        "false",
     ).strip().lower() in {"1", "true", "yes", "on"}
     TAP_REDIRECT_URL = os.getenv("TAP_REDIRECT_URL", "").strip()
     KNOWLEDGE_SEMANTIC_ENABLED = os.getenv("KNOWLEDGE_SEMANTIC_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
