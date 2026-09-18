@@ -1721,7 +1721,7 @@ def bind_self_service_integration(
         if str(requirement.get("kind") or "").strip().lower() == "channel":
             raise HTTPException(409, "Communication channels use their dedicated connection flow")
 
-        executable_types = {"custom_api", "pos", "crm", "erp", "webhook"}
+        executable_types = {"custom_api", "pos", "crm", "erp", "webhook", "instagram_publish"}
         if integration.integration_type not in executable_types:
             raise HTTPException(
                 409,
