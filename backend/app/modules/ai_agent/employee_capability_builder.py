@@ -19,6 +19,104 @@ BUILD_STATUS = "xvond_build"
 CUSTOMER_STATUSES = {"connection_required", "customer_input_required"}
 
 
+_WEEKDAY_ALIASES = {
+    "monday": 0, "mon": 0, "الاثنين": 0, "الإثنين": 0,
+    "tuesday": 1, "tue": 1, "الثلاثاء": 1,
+    "wednesday": 2, "wed": 2, "الأربعاء": 2, "الاربعاء": 2,
+    "thursday": 3, "thu": 3, "الخميس": 3,
+    "friday": 4, "fri": 4, "الجمعة": 4,
+    "saturday": 5, "sat": 5, "السبت": 5,
+    "sunday": 6, "sun": 6, "الأحد": 6, "الاحد": 6,
+}
+
+
+def _requirement_inputs(spec: dict, requirement: dict) -> dict:
+    values = dict(requirement.get("runtime_inputs") or {})
+    answers = spec.get("customer_inputs") or {}
+    if isinstance(answers, dict):
+        item = answers.get(str(requirement.get("key") or "").strip())
+        if isinstance(item, dict):
+            for key, value in item.items():
+                if str(value or "").strip():
+                    values[str(key).strip()] = str(value).strip()
+    return values
+
+
+def _parse_weekdays(value) -> list[int]:
+    if isinstance(value, list):
+        raw = value
+    else:
+        raw = re.split(r"[,،;/|]+|\band\b|و", str(value or ""), flags=re.IGNORECASE)
+    result: list[int] = []
+    for item in raw:
+        token = str(item or "").strip().lower()
+        if not token:
+            continue
+        if token.isdigit() and 0 <= int(token) <= 6:
+            day = int(token)
+        else:
+            day = _WEEKDAY_ALIASES.get(token)
+        if day is not None and day not in result:
+            result.append(day)
+    return sorted(result)
+
+
+def _valid_hhmm(value) -> str | None:
+    raw = str(value or "").strip()
+    match = re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", raw)
+    return raw if match else None
+
+
+def build_internal_booking_action_config(*, requirement: dict, spec: dict) -> dict:
+    values = _requirement_inputs(spec, requirement)
+    weekdays = _parse_weekdays(values.get("working_days"))
+    start = _valid_hhmm(values.get("opening_time"))
+    end = _valid_hhmm(values.get("closing_time"))
+    try:
+        slot_minutes = int(str(values.get("slot_minutes") or "").strip())
+    except ValueError:
+        slot_minutes = 0
+    slot_minutes = slot_minutes if 5 <= slot_minutes <= 720 else 0
+
+    schedule_ready = bool(weekdays and start and end and slot_minutes)
+    fields = [
+        {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
+        {"key": "phone", "label": "Phone", "required": True, "type": "phone"},
+        {"key": "service", "label": "Service", "required": True, "type": "text"},
+        {"key": "date", "label": "Date", "required": True, "type": "date", "role": "date"},
+        {"key": "time", "label": "Time", "required": True, "type": "time", "role": "time"},
+        {"key": "notes", "label": "Notes", "required": False, "type": "text"},
+    ]
+    action = {
+        "enabled": _permission_mode(spec, requirement) != "never",
+        "label": str(requirement.get("purpose") or "Booking").strip()[:200] or "Booking",
+        "description": str(requirement.get("purpose") or "Create and manage bookings").strip()[:1000],
+        "module": "booking",
+        "fields": fields,
+        "confirmation_required": _permission_mode(spec, requirement) != "automatic",
+        "destination": {
+            "type": "xvond_internal",
+            "adapter": "booking",
+            "delivery_mode": "native",
+        },
+        "availability": {
+            "mode": "xvond_schedule" if schedule_ready else "none",
+            "date_field": "date",
+            "time_field": "time",
+            "schedule": {
+                "weekdays": weekdays,
+                "start": start,
+                "end": end,
+                "slot_minutes": slot_minutes or None,
+                "capacity": 1,
+            },
+        },
+        "xvond_generated": True,
+    }
+    action["_xvond_booking_setup_ready"] = schedule_ready
+    return action
+
+
 def _permission_mode(spec: dict, requirement: dict) -> str:
     """Only an exact capability/purpose rule can grant automatic execution."""
     targets = {
@@ -67,6 +165,9 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
         for item in (requirement.get("primitives") or ["workflow_engine"])
         if str(item).strip()
     ]
+    if key == "booking" and str(requirement.get("fulfillment_mode") or "") == "xvond_internal":
+        return build_internal_booking_action_config(requirement=requirement, spec=spec)
+
     return {
         "enabled": _permission_mode(spec, requirement) != "never",
         "label": purpose[:200] or key,
@@ -291,6 +392,12 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
         destination = action.get("destination") or {}
         if not action.get("enabled", True) or (assignment is not None and not assignment.enabled):
             execution_status = "disabled"
+        elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "booking":
+            execution_status = (
+                "ready"
+                if action.get("_xvond_booking_setup_ready") is True
+                else "setup_required"
+            )
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "generic_capability":
             plan = destination.get("execution_plan") or []
             needs_http = any(
