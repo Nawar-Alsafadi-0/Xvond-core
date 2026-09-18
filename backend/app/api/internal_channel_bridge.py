@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 import hmac
 
 from fastapi import APIRouter, Header, HTTPException
@@ -11,6 +10,7 @@ from backend.app.core.config.settings import settings
 from backend.app.core.database.connection import SessionLocal
 from backend.app.modules.ai_agent.models import AIConversation, AIMessage
 from backend.app.modules.audit.service import audit_service
+from backend.app.modules.channels.acceptance import mark_customer_roundtrip
 from backend.app.modules.channels.catalog import (
     CHANNEL_RUNTIME_LIVE,
     canonical_channel_type,
@@ -289,9 +289,11 @@ def confirm_managed_channel_delivery(
         if response is None:
             raise HTTPException(404, "Channel response message not found")
 
-        verified_at = datetime.utcnow()
-        channel.customer_roundtrip_verified_at = verified_at
-        channel.customer_roundtrip_source = f"n8n:{canonical_channel_type(channel.channel_type)}"
+        mark_customer_roundtrip(
+            channel,
+            source=f"n8n:{canonical_channel_type(channel.channel_type)}",
+        )
+        verified_at = channel.customer_roundtrip_verified_at
         audit_service.log(
             db=db,
             company_id=channel.company_id,
