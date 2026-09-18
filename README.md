@@ -67,11 +67,14 @@ GitHub CI also builds a completely fresh PostgreSQL database through Alembic, ch
 
 ## Canonical production deployment
 
-Production releases must use the reviewed repository state and the release script rather than an improvised sequence of Docker commands. `PUBLIC_BASE_URL` is the canonical public Core origin; the Nginx Core routes must be installed in the HTTPS vhost for that exact hostname:
+Production releases must use the reviewed repository state and the release script rather than an improvised sequence of Docker commands. `PUBLIC_BASE_URL` is the canonical public Core origin; install/verify the repository-managed Core routes in the HTTPS vhost for that exact hostname before the application cutover:
 
 ```bash
+python3 scripts/install_nginx_core_routes.py
 ./scripts/deploy_production.sh
 ```
+
+The Nginx installer reads `PUBLIC_BASE_URL` from the process environment or repository `.env`, backs up the selected active vhost, validates with `nginx -t`, reloads Nginx and restores the previous vhost automatically if validation or reload fails. It must be run with root privileges.
 
 The release script validates the Git working tree and canonical release branch, production Compose and production environment, brings PostgreSQL/Redis up, takes a fresh database backup before replacing application containers, builds one application image, recreates the API, WhatsApp worker and automation scheduler from that same image, verifies the WhatsApp worker lease and scheduler heartbeat, verifies Workflow Engine health and post-cutover reachability when enabled, verifies image parity across runtime processes and checks `/health/ready`.
 
