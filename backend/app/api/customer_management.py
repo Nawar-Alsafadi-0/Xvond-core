@@ -1,3 +1,4 @@
+from datetime import datetime
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
@@ -27,6 +28,7 @@ from backend.app.core.config_secrets import (
     reveal_config,
 )
 from backend.app.core.database.connection import SessionLocal
+from backend.app.core.http_security import safe_http_request, validate_public_http_url
 from backend.app.models.user import User
 from backend.app.models.company import Company
 from backend.app.modules.billing.service_limits import service_limits
@@ -53,6 +55,75 @@ class CustomerIntegrationUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     config: dict | None = None
     enabled: bool | None = None
+
+
+def _validate_live_connection(item: CompanyIntegration) -> dict:
+    config = reveal_config(item.config) or {}
+    integration_type = str(item.integration_type or "").strip().lower()
+
+    if integration_type == "webhook":
+        url = validate_public_http_url(str(config.get("url") or "").strip())
+        return {
+            "validated": True,
+            "mode": "safe_url_validation",
+            "url": url,
+        }
+
+    if integration_type not in {"custom_api", "pos", "crm", "erp"}:
+        raise HTTPException(
+            409,
+            "This connected-system type requires a packaged Xvond connector before it can be validated for execution",
+        )
+
+    base_url = validate_public_http_url(
+        str(config.get("base_url") or "").strip().rstrip("/")
+    )
+    endpoint = str(config.get("validation_endpoint") or "").strip()
+    if not endpoint:
+        raise HTTPException(
+            409,
+            "Validation endpoint is required before this system can be used by an AI employee",
+        )
+    if endpoint.startswith("//") or endpoint.lower().startswith(("http://", "https://")):
+        raise HTTPException(400, "Validation endpoint must be a relative path")
+
+    headers = {"Accept": "application/json"}
+    api_key = str(config.get("api_key") or "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        result = safe_http_request(
+            url=base_url + "/" + endpoint.lstrip("/"),
+            method="GET",
+            headers=headers,
+            timeout=10,
+            max_response_bytes=64_000,
+        )
+    except Exception as exc:
+        raise HTTPException(502, "Connected system validation request failed") from exc
+
+    status = int(result.get("status_code") or 0)
+    if not 200 <= status < 300:
+        raise HTTPException(
+            409,
+            f"Connected system validation returned HTTP {status}",
+        )
+    return {
+        "validated": True,
+        "mode": "live_read_only_request",
+        "status_code": status,
+        "endpoint": "/" + endpoint.lstrip("/"),
+    }
+
+
+def _store_validation_evidence(item: CompanyIntegration, evidence: dict) -> None:
+    plain = reveal_config(item.config) or {}
+    plain["_xvond_validation"] = {
+        **dict(evidence or {}),
+        "validated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    item.config = plain
 
 
 def _integration_bound(db, *, company_id: int, integration_id: int) -> bool:
@@ -90,6 +161,8 @@ def _serialize_integration(item: CompanyIntegration) -> dict:
         ) is True
     except ValueError:
         configured = False
+    plain = reveal_config(item.config) or {}
+    validation = plain.get("_xvond_validation")
     return {
         "id": item.id,
         "integration_type": item.integration_type,
@@ -97,6 +170,8 @@ def _serialize_integration(item: CompanyIntegration) -> dict:
         "config": public_config(item.config),
         "configured_secret_fields": configured_secret_fields(item.config),
         "configured": configured,
+        "validated": bool(isinstance(validation, dict) and validation.get("validated") is True),
+        "validated_at": validation.get("validated_at") if isinstance(validation, dict) else None,
         "enabled": bool(item.enabled),
         "created_at": item.created_at,
     }
@@ -281,6 +356,53 @@ def customer_integrations(
         db.close()
 
 
+@router.post("/integrations/{integration_id}/validate")
+def customer_integration_validate(
+    integration_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = _self_service_company(db, current_user).id
+        item = (
+            db.query(CompanyIntegration)
+            .filter(
+                CompanyIntegration.id == integration_id,
+                CompanyIntegration.company_id == company_id,
+                CompanyIntegration.enabled.is_(True),
+            )
+            .first()
+        )
+        if item is None:
+            raise HTTPException(404, "Connected system not found or disabled")
+        evidence = _validate_live_connection(item)
+        _store_validation_evidence(item, evidence)
+        audit_service.log(
+            db=db,
+            action="customer.integration_validated",
+            resource_type="integration",
+            resource_id=item.id,
+            user_id=current_user.id,
+            company_id=company_id,
+            details={
+                "integration_type": item.integration_type,
+                "validation_mode": evidence.get("mode"),
+                "status_code": evidence.get("status_code"),
+            },
+        )
+        db.commit()
+        return {
+            "status": "validated",
+            "integration_id": item.id,
+            **evidence,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @router.post("/integrations")
 def customer_integration_create(
     payload: CustomerIntegrationCreate,
@@ -390,7 +512,9 @@ def customer_integration_update(
                 )
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
-            item.config = merged
+            merged_plain = reveal_config(merged) or {}
+            merged_plain.pop("_xvond_validation", None)
+            item.config = merged_plain
 
         if payload.enabled is not None:
             if (
