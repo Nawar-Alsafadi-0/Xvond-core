@@ -182,12 +182,16 @@ def test_handoff_model_and_migration_have_explicit_operator_ownership():
     assert '"completed_at"' in migration
 
 
-def test_managed_channel_human_reply_uses_durable_xvond_gateway_contract():
+def test_managed_channel_human_reply_is_durable_before_network_delivery():
     source = inspect.getsource(customer_inbox.send_human_reply)
     assert 'delivery == "xvond_managed_channel"' in source
-    assert 'action="channel.send"' in source
-    assert '"connection_key": connection_key' in source
-    assert '"external_contact_id": str(conversation.external_contact_id or "")' in source
+    assert "ensure_managed_delivery(" in source
+    assert "attempt_managed_delivery(" in source
     assert '"idempotency_key": source_key' in source
     assert 'action="customer_inbox.human_reply_prepared"' in source
-    assert "n8n_gateway.execute(" in source
+    ensure_position = source.index("ensure_managed_delivery(")
+    commit_position = source.index("db.commit()", ensure_position)
+    attempt_position = source.index("attempt_managed_delivery(", commit_position)
+    assert ensure_position < commit_position < attempt_position
+    assert "will not be resent blindly" in source
+    assert "n8n_gateway.execute(" not in source
