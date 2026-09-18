@@ -33,6 +33,10 @@ from backend.app.modules.ai_agent.factory import agent_factory
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
 from backend.app.modules.ai_agent.profile_models import AIAgentProfile
+from backend.app.modules.ai_agent.self_service_policy import (
+    is_self_service_company,
+    self_service_readiness,
+)
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord, CompanyAIProfile
@@ -294,6 +298,15 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
         builder = (config.settings or {}).get("employee_builder") or {}
         compiled_spec = builder.get("compiled_spec") if isinstance(builder, dict) else None
         has_entitlement = _has_ai_agents_entitlement(db, current_user.company_id)
+        company = _company_or_404(db, current_user.company_id)
+        self_service_state = None
+        if is_self_service_company(company):
+            self_service_state = self_service_readiness(
+                db,
+                company=company,
+                agent=agent,
+                config=config,
+            )
         return {
             "employee": {
                 "agent_id": agent.id,
@@ -308,6 +321,17 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
                 "compiled": isinstance(compiled_spec, dict),
                 "compiled_spec": compiled_spec if isinstance(compiled_spec, dict) else None,
                 "can_compile": has_entitlement,
+                "delivery_mode": (
+                    "self_service"
+                    if is_self_service_company(company)
+                    else "managed"
+                ),
+                "self_service_readiness": self_service_state,
+                "can_launch": bool(
+                    self_service_state
+                    and self_service_state.get("ready")
+                    and not agent.enabled
+                ),
             }
         }
     finally:
@@ -356,6 +380,11 @@ def create_employee(
                 "permissions": dict(blueprint.permissions),
                 "missing_information": list(blueprint.missing_information),
                 "onboarding_source": company.onboarding_source,
+                "delivery_mode": (
+                    "self_service"
+                    if is_self_service
+                    else "managed"
+                ),
                 "compiled_spec": None,
             },
             "dialect": "auto",
@@ -461,6 +490,137 @@ def compile_employee(
             "agent_id": agent.id,
             "compiled": True,
             "spec": compiled_spec,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.get("/{agent_id}/readiness")
+def self_service_employee_readiness(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == agent_id,
+            AIAgent.company_id == company.id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+        return self_service_readiness(
+            db,
+            company=company,
+            agent=agent,
+            config=config,
+        )
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/launch")
+def launch_self_service_employee(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Launch only a self-service employee; Managed employees keep their existing admin flow."""
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Xvond Managed employees must use the managed delivery flow",
+            )
+
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == agent_id,
+            AIAgent.company_id == company.id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+
+        state = self_service_readiness(
+            db,
+            company=company,
+            agent=agent,
+            config=config,
+        )
+        if not state["ready"]:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "Self-service employee is not ready to launch",
+                    "blockers": state["blockers"],
+                },
+            )
+
+        # Existing AI Agents plan still owns employee capacity. The self-service
+        # workspace currently owns one employee, so its active subscription is
+        # the commercial entitlement for this employee.
+        limits_service.check_agent_limit(db, company.id)
+        agent.enabled = True
+        company.active = True
+        company.lifecycle_status = "active"
+        company.lifecycle_updated_at = datetime.utcnow()
+        db.commit()
+
+        live = self_service_readiness(
+            db,
+            company=company,
+            agent=agent,
+            config=config,
+        )
+        return {
+            **live,
+            "status": "live",
+            "agent_id": agent.id,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/deactivate")
+def deactivate_self_service_employee(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Xvond Managed employees must use the managed delivery flow",
+            )
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == agent_id,
+            AIAgent.company_id == company.id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        _employee_config_or_404(db, agent)
+        agent.enabled = False
+        db.commit()
+        return {
+            "status": "draft",
+            "agent_id": agent.id,
+            "lifecycle": "draft",
         }
     except HTTPException:
         db.rollback()
