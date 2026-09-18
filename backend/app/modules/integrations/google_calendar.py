@@ -382,12 +382,13 @@ def _event_lookup(config: dict, event_id: str) -> dict | None:
 
 
 def _calendar_lock_scope(config: dict) -> str:
-    identity = (
-        str(config.get("client_id") or "").strip()
-        or _access_token(config)
-        or str(config.get("refresh_token") or "").strip()
-        or "unconfigured"
-    )
+    client_id = str(config.get("client_id") or "").strip()
+    refresh_token = str(config.get("refresh_token") or "").strip()
+    access_token = _access_token(config)
+    if refresh_token:
+        identity = f"{client_id}:{refresh_token}"
+    else:
+        identity = access_token or client_id or "unconfigured"
     source = f"{_provider(config)}:{_calendar_id(config)}:{identity}"
     return hashlib.sha256(source.encode("utf-8")).hexdigest()[:24]
 
