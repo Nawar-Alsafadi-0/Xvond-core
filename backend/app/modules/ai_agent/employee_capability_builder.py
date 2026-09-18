@@ -45,27 +45,61 @@ def _requirement_inputs(spec: dict, requirement: dict) -> dict:
 
 def _parse_weekdays(value) -> list[int]:
     if isinstance(value, list):
-        raw = value
+        source = " ".join(str(item or "") for item in value)
     else:
-        raw = re.split(r"[,،;/|]+|\band\b|و", str(value or ""), flags=re.IGNORECASE)
+        source = str(value or "")
+    normalized = " ".join(source.strip().lower().replace("،", ",").split())
     result: list[int] = []
-    for item in raw:
-        token = str(item or "").strip().lower()
-        if not token:
-            continue
-        if token.isdigit() and 0 <= int(token) <= 6:
-            day = int(token)
-        else:
-            day = _WEEKDAY_ALIASES.get(token)
-        if day is not None and day not in result:
+
+    # Support a common contiguous range such as Sunday-Thursday.
+    range_match = re.search(
+        r"([A-Za-z]+|الأحد|الاحد|الاثنين|الإثنين|الثلاثاء|الأربعاء|الاربعاء|الخميس|الجمعة|السبت)\s*[-–—]\s*"
+        r"([A-Za-z]+|الأحد|الاحد|الاثنين|الإثنين|الثلاثاء|الأربعاء|الاربعاء|الخميس|الجمعة|السبت)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if range_match:
+        start = _WEEKDAY_ALIASES.get(range_match.group(1).lower())
+        end = _WEEKDAY_ALIASES.get(range_match.group(2).lower())
+        if start is not None and end is not None:
+            cursor = start
+            for _ in range(7):
+                if cursor not in result:
+                    result.append(cursor)
+                if cursor == end:
+                    break
+                cursor = (cursor + 1) % 7
+
+    for alias, day in _WEEKDAY_ALIASES.items():
+        if re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", normalized, flags=re.IGNORECASE):
+            if day not in result:
+                result.append(day)
+
+    for token in re.findall(r"(?<!\d)([0-6])(?!\d)", normalized):
+        day = int(token)
+        if day not in result:
             result.append(day)
     return sorted(result)
 
 
 def _valid_hhmm(value) -> str | None:
-    raw = str(value or "").strip()
-    match = re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", raw)
-    return raw if match else None
+    raw = str(value or "").strip().lower().replace(".", "")
+    match = re.fullmatch(r"(\d{1,2})(?::([0-5]\d))?\s*(am|pm)?", raw)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    meridiem = match.group(3)
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        if meridiem == "pm" and hour != 12:
+            hour += 12
+        if meridiem == "am" and hour == 12:
+            hour = 0
+    elif not 0 <= hour <= 23:
+        return None
+    return f"{hour:02d}:{minute:02d}"
 
 
 def build_internal_booking_action_config(*, requirement: dict, spec: dict) -> dict:
@@ -74,7 +108,8 @@ def build_internal_booking_action_config(*, requirement: dict, spec: dict) -> di
     start = _valid_hhmm(values.get("opening_time"))
     end = _valid_hhmm(values.get("closing_time"))
     try:
-        slot_minutes = int(str(values.get("slot_minutes") or "").strip())
+        slot_match = re.search(r"\d+", str(values.get("slot_minutes") or ""))
+        slot_minutes = int(slot_match.group(0)) if slot_match else 0
     except ValueError:
         slot_minutes = 0
     slot_minutes = slot_minutes if 5 <= slot_minutes <= 720 else 0
