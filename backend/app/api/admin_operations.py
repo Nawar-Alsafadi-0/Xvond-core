@@ -15,7 +15,11 @@ from backend.app.models.company import Company
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.models import AIUsage
 from backend.app.modules.audit.service import audit_service
-from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
+from backend.app.modules.billing.service_models import (
+    ServicePlan,
+    ServiceRenewalAttempt,
+    ServiceSubscription,
+)
 from backend.app.modules.channels.acceptance import mark_customer_roundtrip
 from backend.app.modules.channels.catalog import canonical_channel_type
 from backend.app.modules.channels.managed_delivery import attempt_delivery as attempt_managed_delivery
@@ -118,6 +122,24 @@ def _delivery_metadata(item: WhatsAppOutboundDelivery) -> dict:
         "delivered_at": item.delivered_at,
         "read_at": item.read_at,
         "failed_at": item.failed_at,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    }
+
+
+def _renewal_attempt_metadata(item: ServiceRenewalAttempt) -> dict:
+    """Operator-safe billing renewal metadata; no card/provider profile values."""
+
+    return {
+        "id": item.id,
+        "company_id": item.company_id,
+        "service_subscription_id": item.service_subscription_id,
+        "provider": item.provider,
+        "period_end": item.period_end,
+        "status": item.status,
+        "attempts": int(item.attempts or 0),
+        "provider_transaction_id": item.provider_transaction_id,
+        "last_error_code": item.last_error_code,
         "created_at": item.created_at,
         "updated_at": item.updated_at,
     }
@@ -256,6 +278,34 @@ def subscriptions(current_admin: User = Depends(require_xvond_operator)):
                 }
                 for subscription, company, plan in rows
             ]
+        }
+    finally:
+        db.close()
+
+
+@router.get("/billing/renewals/unresolved")
+def unresolved_billing_renewals(
+    company_id: int | None = None,
+    limit: int = 100,
+    current_admin: User = Depends(require_xvond_operator),
+):
+    db = SessionLocal()
+    try:
+        safe_limit = max(1, min(int(limit or 100), 500))
+        query = db.query(ServiceRenewalAttempt).filter(
+            ServiceRenewalAttempt.status.in_(("sending", "submitted", "unknown", "failed"))
+        )
+        if company_id is not None:
+            get_company_or_404(db, company_id)
+            query = query.filter(ServiceRenewalAttempt.company_id == company_id)
+        rows = (
+            query.order_by(ServiceRenewalAttempt.id.desc())
+            .limit(safe_limit)
+            .all()
+        )
+        return {
+            "count": len(rows),
+            "renewals": [_renewal_attempt_metadata(row) for row in rows],
         }
     finally:
         db.close()

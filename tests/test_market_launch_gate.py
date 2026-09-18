@@ -13,7 +13,9 @@ from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.billing.service_models import (
     ServiceCheckout,
     ServicePaymentEvent,
+    ServicePaymentProfile,
     ServicePlan,
+    ServiceRenewalAttempt,
     ServiceSubscription,
 )
 from backend.app.modules.channels.models import AgentChannel
@@ -360,3 +362,108 @@ def test_tap_launch_gate_rejects_test_secret_for_production_acceptance(
 
     assert result["ok"] is False
     assert "tap_secret_key_not_live" in result["blockers"]
+
+
+def test_tap_recurring_launch_gate_requires_payment_profile_when_enabled(
+    launch_database,
+    monkeypatch,
+):
+    factory = launch_database
+    monkeypatch.setattr(
+        gate,
+        "payment_gateway",
+        lambda: SimpleNamespace(provider="tap", configured=lambda: True),
+    )
+    monkeypatch.setattr(gate.settings, "BILLING_PROVIDER", "tap")
+    monkeypatch.setattr(gate.settings, "TAP_SECRET_KEY", "sk_live_tap_test")
+    monkeypatch.setattr(gate.settings, "TAP_MERCHANT_ID", "merchant_live")
+    monkeypatch.setattr(gate.settings, "PUBLIC_BASE_URL", "https://api.xvond.example")
+    monkeypatch.setattr(gate.settings, "TAP_REDIRECT_URL", "")
+    monkeypatch.setattr(gate.settings, "TAP_RECURRING_ENABLED", True)
+    monkeypatch.setattr(gate.settings, "TAP_SAVE_CARD_FOR_RECURRING", True)
+
+    with factory() as db:
+        result = gate._billing_gate(
+            db,
+            company_id=1,
+            require_online_billing=True,
+            require_payment_evidence=False,
+        )
+    assert result["ok"] is False
+    assert "tap_recurring_payment_profile_missing" in result["blockers"]
+
+    with factory() as db:
+        db.add(
+            ServicePaymentProfile(
+                company_id=1,
+                service_subscription_id=1,
+                provider="tap",
+                status="active",
+                provider_config={"encrypted_test": "value"},
+            )
+        )
+        db.commit()
+
+    with factory() as db:
+        result = gate._billing_gate(
+            db,
+            company_id=1,
+            require_online_billing=True,
+            require_payment_evidence=False,
+        )
+    assert result["ok"] is True
+    assert result["tap_recurring_profile_ready"] is True
+
+
+def test_tap_recurring_launch_gate_blocks_unresolved_renewal_attempt(
+    launch_database,
+    monkeypatch,
+):
+    factory = launch_database
+    monkeypatch.setattr(
+        gate,
+        "payment_gateway",
+        lambda: SimpleNamespace(provider="tap", configured=lambda: True),
+    )
+    monkeypatch.setattr(gate.settings, "BILLING_PROVIDER", "tap")
+    monkeypatch.setattr(gate.settings, "TAP_SECRET_KEY", "sk_live_tap_test")
+    monkeypatch.setattr(gate.settings, "TAP_MERCHANT_ID", "merchant_live")
+    monkeypatch.setattr(gate.settings, "PUBLIC_BASE_URL", "https://api.xvond.example")
+    monkeypatch.setattr(gate.settings, "TAP_REDIRECT_URL", "")
+    monkeypatch.setattr(gate.settings, "TAP_RECURRING_ENABLED", True)
+    monkeypatch.setattr(gate.settings, "TAP_SAVE_CARD_FOR_RECURRING", True)
+
+    with factory() as db:
+        db.add(
+            ServicePaymentProfile(
+                company_id=1,
+                service_subscription_id=1,
+                provider="tap",
+                status="active",
+                provider_config={"encrypted_test": "value"},
+            )
+        )
+        subscription = db.get(ServiceSubscription, 1)
+        db.add(
+            ServiceRenewalAttempt(
+                company_id=1,
+                service_subscription_id=1,
+                provider="tap",
+                idempotency_key="renewal-unknown",
+                period_end=subscription.current_period_end,
+                status="unknown",
+                attempts=1,
+            )
+        )
+        db.commit()
+
+    with factory() as db:
+        result = gate._billing_gate(
+            db,
+            company_id=1,
+            require_online_billing=True,
+            require_payment_evidence=False,
+        )
+    assert result["ok"] is False
+    assert result["unresolved_renewal_attempts"] == 1
+    assert "tap_unresolved_renewal_attempts" in result["blockers"]

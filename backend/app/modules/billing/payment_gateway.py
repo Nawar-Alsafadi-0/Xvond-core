@@ -16,6 +16,10 @@ class PaymentGatewayError(RuntimeError):
     pass
 
 
+class PaymentGatewayOutcomeUnknown(PaymentGatewayError):
+    """The provider may have accepted a side effect but Xvond cannot prove it."""
+
+
 class PaddleGateway:
     """Provider adapter for global Self-Service checkout.
 
@@ -295,6 +299,118 @@ class TapGateway:
         quantum = Decimal("0.001") if decimals == 3 else Decimal("0.01")
         amount = Decimal(str(value or "0")).quantize(quantum, rounding=ROUND_HALF_UP)
         return f"{amount:.{decimals}f}"
+
+    def create_saved_card_token(
+        self,
+        *,
+        customer_id: str,
+        card_id: str,
+    ) -> str:
+        if not self.configured():
+            raise PaymentGatewayError("Tap billing is not configured")
+        try:
+            response = httpx.post(
+                f"{self.api_base}/tokens/",
+                headers={
+                    "Authorization": f"Bearer {settings.TAP_SECRET_KEY}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json={
+                    "saved_card": {
+                        "card_id": str(card_id),
+                        "customer_id": str(customer_id),
+                    },
+                    "client_ip": "127.0.0.1",
+                },
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise PaymentGatewayError("Tap saved-card token could not be created") from exc
+
+        token_id = str(payload.get("id") or "").strip() if isinstance(payload, dict) else ""
+        if not token_id:
+            raise PaymentGatewayError("Tap saved-card token response is missing token id")
+        return token_id
+
+    def create_recurring_charge(
+        self,
+        *,
+        company_id: int,
+        service_subscription_id: int,
+        plan_id: int,
+        plan_tier: str,
+        service_code: str,
+        amount: Decimal,
+        currency: str,
+        customer_id: str,
+        card_id: str,
+        payment_agreement_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        token_id = self.create_saved_card_token(
+            customer_id=customer_id,
+            card_id=card_id,
+        )
+        webhook_url = f"{settings.PUBLIC_BASE_URL}/webhooks/billing/tap"
+        body = {
+            "amount": float(Decimal(str(amount))),
+            "currency": str(currency or "").upper(),
+            "customer_initiated": False,
+            "threeDSecure": False,
+            "save_card": False,
+            "payment_agreement": {"id": str(payment_agreement_id)},
+            "description": f"Xvond AI Employee renewal - {plan_tier}",
+            "metadata": {
+                "xvond_company_id": str(company_id),
+                "xvond_service_subscription_id": str(service_subscription_id),
+                "xvond_plan_id": str(plan_id),
+                "xvond_service_code": str(service_code),
+                "xvond_renewal": "true",
+                "xvond_renewal_key": str(idempotency_key),
+            },
+            "reference": {
+                "transaction": f"xvond-renew-{service_subscription_id}-{plan_id}",
+                "order": f"xvond-{company_id}-{service_subscription_id}",
+                "idempotent": str(idempotency_key),
+            },
+            "customer": {"id": str(customer_id)},
+            "merchant": {"id": settings.TAP_MERCHANT_ID},
+            "source": {"id": token_id},
+            "post": {"url": webhook_url},
+        }
+
+        try:
+            response = httpx.post(
+                f"{self.api_base}/charges/",
+                headers={
+                    "Authorization": f"Bearer {settings.TAP_SECRET_KEY}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json=body,
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise PaymentGatewayOutcomeUnknown(
+                "Tap recurring charge outcome is unknown"
+            ) from exc
+
+        if not isinstance(payload, dict):
+            raise PaymentGatewayError("Tap recurring charge returned an invalid response")
+        charge_id = str(payload.get("id") or "").strip()
+        status = str(payload.get("status") or "").strip().lower()
+        if not charge_id:
+            raise PaymentGatewayError("Tap recurring charge is missing its charge id")
+        return {
+            "provider": self.provider,
+            "transaction_id": charge_id,
+            "status": status or "pending",
+        }
 
     def verify_webhook(
         self,
