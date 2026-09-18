@@ -218,8 +218,9 @@ def overview(current_user: User = Depends(require_customer_user)):
             item["service_code"] for item in services if item["status"] == "active"
         ]
 
+        is_self_service_workspace = company.onboarding_source == "self_service"
         has_self_service_employee = bool(
-            company.onboarding_source == "self_service"
+            is_self_service_workspace
             and db.query(AIAgent.id).filter(AIAgent.company_id == company_id).first()
         )
         portal_service_codes = list(active_service_codes)
@@ -233,6 +234,17 @@ def overview(current_user: User = Depends(require_customer_user)):
             portal_service_codes,
             enabled_modules,
         )
+        if is_self_service_workspace:
+            navigation.insert(
+                1,
+                {
+                    "id": "employee-builder",
+                    "label": "Build your employee",
+                    "loader": "employee-builder",
+                    "group": "AI Workforce",
+                    "service_code": "ai_agents",
+                },
+            )
         navigation.insert(
             max(len(navigation) - 1, 1),
             {

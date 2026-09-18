@@ -150,6 +150,20 @@ _SENSITIVE_RUNTIME_INPUT_KEYS = {
     "credentials",
 }
 
+def is_sensitive_requirement_key(value: Any) -> bool:
+    """Return True when generic setup data must use a protected connection path."""
+
+    key = normalize_requirement_key(value)
+    if not key:
+        return False
+    if key in _SENSITIVE_RUNTIME_INPUT_KEYS:
+        return True
+    tokens = set(key.split("_"))
+    if tokens.intersection({"password", "secret", "token", "credential", "credentials"}):
+        return True
+    return key.endswith("_api_key") or key.endswith("_access_key")
+
+
 COMPILER_SYSTEM_PROMPT = """You are Xvond's AI Employee Compiler.
 Your only task is to convert a customer's open-ended job brief into a structured employee specification and delivery plan.
 
@@ -547,6 +561,25 @@ def build_compiled_employee_system_prompt(*, owner_name: str, spec: dict) -> str
         for item in requirements
     ) or "- No additional requirements were identified."
 
+    customer_inputs = spec.get("customer_inputs") or {}
+    rendered_customer_inputs: list[str] = []
+    for key, value in customer_inputs.items():
+        if isinstance(value, dict):
+            fields = "; ".join(
+                f"{str(field).replace('_', ' ')}={field_value}"
+                for field, field_value in value.items()
+                if str(field_value or "").strip()
+            )
+            if fields:
+                rendered_customer_inputs.append(
+                    f"- {str(key).replace('_', ' ')}: {fields}"
+                )
+        elif str(value or "").strip():
+            rendered_customer_inputs.append(
+                f"- {str(key).replace('_', ' ')}: {value}"
+            )
+    customer_input_lines = "\n".join(rendered_customer_inputs) or "- No additional owner-provided setup data."
+
     return f"""You are one persistent Xvond AI employee for {owner_name}.
 
 ROLE:
@@ -569,6 +602,9 @@ PERMISSIONS:
 
 REQUIREMENTS AND DELIVERY STATUS:
 {requirement_lines}
+
+OWNER-PROVIDED SETUP DATA:
+{customer_input_lines}
 
 OPERATING RULES:
 - Treat the original job brief as authoritative. The structured specification helps you execute it; it does not narrow or replace it.

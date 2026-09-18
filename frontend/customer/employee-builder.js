@@ -96,13 +96,139 @@
         }).join("")}</div>`;
     }
 
+    function journeyStatusLabel(status) {
+        const labels = {
+            complete: "Ready",
+            action_required: "Your action",
+            waiting: "Xvond / provider",
+            blocked: "Locked",
+        };
+        return labels[String(status || "")] || String(status || "Pending");
+    }
+
+    function journeyTone(status) {
+        if (status === "complete") return "ready";
+        if (status === "action_required") return "setup";
+        if (status === "waiting") return "planned";
+        return "neutral";
+    }
+
+    function journeyActionMarkup(action) {
+        const type = String(action?.type || "");
+        if (type === "choose_plan" && !["owner", "admin"].includes(String(currentUser?.role || ""))) {
+            return '<span class="muted">A company Owner or Admin must choose the plan.</span>';
+        }
+
+        if (type === "provide_input") {
+            const encodedKey = encodeURIComponent(String(action?.key || ""));
+            const fields = Array.isArray(action?.fields) ? action.fields : [];
+            return `
+                <div class="employee-builder-setup-answer">
+                    <strong>${escapeHtml(action?.label || "Provide required information")}</strong>
+                    ${action?.detail ? `<p class="muted">${escapeHtml(action.detail)}</p>` : ""}
+                    ${fields.length ? fields.map(field => {
+                        const fieldKey = encodeURIComponent(String(field?.key || ""));
+                        return `
+                            <label>
+                                <span>${escapeHtml(field?.label || field?.key || "Required field")}</span>
+                                <input
+                                    type="text"
+                                    data-setup-field="${fieldKey}"
+                                    autocomplete="off"
+                                    placeholder="Enter ${escapeHtml(field?.label || field?.key || "required value")}"
+                                >
+                            </label>
+                        `;
+                    }).join("") : `
+                        <textarea
+                            rows="3"
+                            data-setup-answer-input="${encodedKey}"
+                            placeholder="Enter the information this employee needs"
+                        ></textarea>
+                    `}
+                    <button
+                        type="button"
+                        class="employee-builder-journey-action"
+                        data-save-setup-answer="${encodedKey}"
+                    >Save setup data</button>
+                    <div class="error" data-setup-answer-error="${encodedKey}"></div>
+                </div>
+            `;
+        }
+
+        const runnable = new Set([
+            "choose_plan",
+            "build_employee",
+            "manage_knowledge",
+            "setup_website",
+            "setup_whatsapp",
+            "launch_employee",
+        ]).has(type);
+        if (!runnable) return "";
+        return `
+            <button
+                type="button"
+                class="employee-builder-journey-action"
+                data-builder-action="${escapeHtml(type)}"
+            >${escapeHtml(action?.label || "Continue")}</button>
+        `;
+    }
+
+    function journeyMarkup(employee) {
+        if (employee.delivery_mode !== "self_service") return "";
+        const journey = employee.builder_journey || {};
+        const stages = Array.isArray(journey.stages) ? journey.stages : [];
+        if (!stages.length) return "";
+        const progress = Number(journey.total_count || stages.length)
+            ? Math.round((Number(journey.complete_count || 0) / Number(journey.total_count || stages.length)) * 100)
+            : 0;
+
+        return `
+            <div class="panel employee-builder-journey">
+                <div class="employee-builder-current-head">
+                    <div>
+                        <div class="employee-builder-kicker">BUILD PROGRESS</div>
+                        <h2>From Job Brief to a live employee</h2>
+                        <p class="muted">Xvond builds the employee. You only complete the plan, data or connections the job actually requires.</p>
+                    </div>
+                    ${badge(`${Number(journey.complete_count || 0)}/${Number(journey.total_count || stages.length)} ready`, progress === 100 ? "ready" : "neutral")}
+                </div>
+                <div class="employee-builder-progress" aria-label="Employee build progress">
+                    <span style="width:${Math.max(0, Math.min(100, progress))}%"></span>
+                </div>
+                <div class="employee-builder-journey-list">
+                    ${stages.map((stage, index) => `
+                        <div class="employee-builder-journey-step employee-builder-journey-${escapeHtml(stage.status || "blocked")}">
+                            <div class="employee-builder-journey-index">${index + 1}</div>
+                            <div class="employee-builder-journey-copy">
+                                <div class="employee-builder-current-head">
+                                    <strong>${escapeHtml(stage.label || stage.id || "Step")}</strong>
+                                    ${badge(journeyStatusLabel(stage.status), journeyTone(stage.status))}
+                                </div>
+                                <p class="muted">${escapeHtml(stage.detail || "")}</p>
+                                ${(stage.actions || []).length ? `
+                                    <div class="employee-builder-actions employee-builder-journey-actions">
+                                        ${(stage.actions || []).map(journeyActionMarkup).join("")}
+                                    </div>
+                                ` : ""}
+                            </div>
+                        </div>
+                    `).join("")}
+                </div>
+                <div id="subscription-plans" class="employee-builder-section hidden"></div>
+                <div id="subscription-error" class="error"></div>
+                <div id="prepare-employee-error" class="error"></div>
+                <div id="launch-employee-error" class="error"></div>
+            </div>
+        `;
+    }
+
     function selfServiceMarkup(employee) {
         if (employee.delivery_mode !== "self_service") return "";
         const state = employee.self_service_readiness || {};
         const subscription = state.subscription || {};
         const limit = state.channel_limit == null ? "—" : String(state.channel_limit);
         const used = Number(state.channel_slots_used || 0);
-        const blockers = (state.blockers || []).map(item => `<li>${escapeHtml(item)}</li>`).join("");
         const modeLabels = {
             personal: "Personal agent",
             background: "Background worker",
@@ -129,22 +255,18 @@
                         <div class="employee-builder-missing">${badge(subscription.active ? (subscription.plan_name || "Active") : "Subscription required", subscription.active ? "ready" : "setup")}</div>
                     </div>
                 </div>
-                ${blockers ? `
-                    <div class="employee-builder-section">
-                        <h3>Before launch</h3>
-                        <ul>${blockers}</ul>
+                <div class="employee-builder-section">
+                    <h3>Runtime readiness</h3>
+                    <div class="employee-builder-missing">
+                        ${badge(
+                            employee.enabled ? "Live" : (state.ready ? "Ready to launch" : "Follow build progress"),
+                            employee.enabled || state.ready ? "ready" : "setup"
+                        )}
                     </div>
-                ` : `
-                    <div class="employee-builder-section">
-                        <p class="muted">Everything required for this self-service employee is ready.</p>
-                    </div>
-                `}
-                ${employee.can_launch ? `
-                    <div class="employee-builder-actions">
-                        <button type="button" id="launch-employee-btn">Launch employee</button>
-                    </div>
-                    <div id="launch-employee-error" class="error"></div>
-                ` : ""}
+                    <p class="muted">${state.ready || employee.enabled
+                        ? "The runtime readiness gate is satisfied."
+                        : "The Build Progress above is the customer-facing source for the next required step."}</p>
+                </div>
             </div>
         `;
     }
@@ -185,7 +307,7 @@
                 </div>
 
                 ${questions ? `
-                    <div class="employee-builder-section">
+                    <div class="employee-builder-section" id="employee-builder-setup-questions">
                         <h3>Needed from you</h3>
                         <ul>${questions}</ul>
                     </div>
@@ -199,8 +321,6 @@
         if (!target) return;
         const lifecycleTone = employee.enabled ? "ready" : "setup";
         const provisioned = employee.compiled_spec?.delivery?.provisioning_version === 1;
-        const subscriptionStatus = String(employee.self_service_readiness?.subscription?.status || "");
-        const canManageSubscription = ["owner", "admin"].includes(String(currentUser?.role || ""));
         const channels = (employee.requested_channels || []).map(item => badge(labelFor(CHANNELS, item))).join("") || '<span class="muted">No channel selected yet.</span>';
 
         target.innerHTML = `
@@ -247,10 +367,10 @@
                         </div>
                     </div>
 
-                    ${provisioned ? "" : employee.can_compile ? `
+                    ${employee.delivery_mode === "self_service" ? "" : (provisioned ? "" : employee.can_compile ? `
                         <div class="employee-builder-section">
                             <h3>Build this employee</h3>
-                            <p class="muted">Xvond will understand the complete job, break it into tasks, compose any missing digital capabilities and identify only the external accounts, permissions or data it needs from you.</p>
+                            <p class="muted">Xvond will understand the complete job, break it into tasks and identify the setup it needs.</p>
                             <div class="employee-builder-actions">
                                 <button type="button" id="prepare-employee-btn">Build employee</button>
                             </div>
@@ -259,28 +379,19 @@
                     ` : `
                         <div class="employee-builder-section">
                             <h3>Next step</h3>
-                            ${subscriptionStatus === "pending_payment" ? `
-                                <p class="muted">Your selected plan is pending payment or Xvond approval. AI-backed build, test and launch stay locked until the subscription becomes active.</p>
-                                <div class="employee-builder-missing">${badge("Payment pending", "setup")}</div>
-                            ` : `
-                                <p class="muted">Choose an AI Employee plan to build, test and launch this employee. Saving the Job Brief itself used no paid AI.</p>
-                                ${canManageSubscription ? `
-                                    <div class="employee-builder-actions">
-                                        <button type="button" id="choose-subscription-btn">Choose plan</button>
-                                    </div>
-                                    <div id="subscription-plans" class="employee-builder-section hidden"></div>
-                                    <div id="subscription-error" class="error"></div>
-                                ` : `<p class="muted">A company Owner or Admin must choose the subscription plan.</p>`}
-                            `}
+                            <p class="muted">Activate the required AI Employee service before building.</p>
+                        </div>
+                    `)}
+
+                    ${employee.delivery_mode === "self_service" ? "" : `
+                        <div class="employee-builder-section">
+                            <h3>Needed from you</h3>
+                            ${missingMarkup(employee.missing_information)}
                         </div>
                     `}
-
-                    <div class="employee-builder-section">
-                        <h3>Needed from you</h3>
-                        ${missingMarkup(employee.missing_information)}
-                    </div>
                 </div>
 
+                ${journeyMarkup(employee)}
                 ${compiledMarkup(employee.compiled_spec)}
                 ${selfServiceMarkup(employee)}
 
@@ -299,6 +410,114 @@
                 `}
             </div>
         `;
+
+        async function openJourneyPage(pageId) {
+            const navButton = [...document.querySelectorAll("#portal-nav .nav-item")]
+                .find(item => item.dataset.page === pageId);
+            if (typeof window.openPage === "function") {
+                await window.openPage(pageId, navButton || null);
+            }
+        }
+
+        async function runJourneyAction(actionType) {
+            if (actionType === "choose_plan") {
+                await loadSubscriptionPlans();
+                document.getElementById("subscription-plans")?.scrollIntoView({behavior: "smooth", block: "center"});
+                return;
+            }
+            if (actionType === "build_employee") {
+                await prepareEmployee(employee.agent_id);
+                return;
+            }
+            if (actionType === "launch_employee") {
+                await launchEmployee(employee.agent_id);
+                return;
+            }
+            if (actionType === "manage_knowledge") {
+                await openJourneyPage("agents");
+                if (typeof window.openCustomerAgentSettings === "function") {
+                    await window.openCustomerAgentSettings(employee.agent_id);
+                }
+                if (typeof window.openCustomerManagerTab === "function") {
+                    await window.openCustomerManagerTab("knowledge");
+                }
+                document.getElementById("customer-manager-tab")?.scrollIntoView({behavior: "smooth", block: "start"});
+                return;
+            }
+            if (actionType === "setup_website" || actionType === "setup_whatsapp") {
+                await openJourneyPage("agents");
+                const index = (agents || []).findIndex(item => Number(item.id) === Number(employee.agent_id));
+                const card = index >= 0
+                    ? Array.from(document.querySelectorAll("#agents-list .agent"))[index]
+                    : null;
+                const selector = actionType === "setup_website"
+                    ? ".xvond-website-connect"
+                    : ".xvond-whatsapp-connect";
+                const setup = card?.querySelector(selector);
+                setup?.scrollIntoView({behavior: "smooth", block: "center"});
+                if (actionType === "setup_website") {
+                    const toggle = setup?.querySelector(".xvond-website-toggle");
+                    const form = setup?.querySelector(".xvond-website-form");
+                    if (toggle && form?.classList.contains("hidden")) toggle.click();
+                }
+            }
+        }
+
+        document.querySelectorAll("[data-builder-action]").forEach(button => {
+            button.addEventListener("click", async () => {
+                if (button.disabled) return;
+                button.disabled = true;
+                try {
+                    await runJourneyAction(String(button.dataset.builderAction || ""));
+                } finally {
+                    if (document.body.contains(button)) button.disabled = false;
+                }
+            });
+        });
+
+        document.querySelectorAll("[data-save-setup-answer]").forEach(button => {
+            button.addEventListener("click", async () => {
+                if (button.disabled) return;
+                const encodedKey = String(button.dataset.saveSetupAnswer || "");
+                const key = decodeURIComponent(encodedKey);
+                const wrapper = button.closest(".employee-builder-setup-answer");
+                const input = wrapper?.querySelector(`[data-setup-answer-input="${encodedKey}"]`);
+                const fieldInputs = Array.from(wrapper?.querySelectorAll("[data-setup-field]") || []);
+                const error = wrapper?.querySelector(`[data-setup-answer-error="${encodedKey}"]`);
+                if (error) error.textContent = "";
+
+                const values = {};
+                for (const fieldInput of fieldInputs) {
+                    const fieldKey = decodeURIComponent(String(fieldInput.dataset.setupField || ""));
+                    values[fieldKey] = String(fieldInput.value || "").trim();
+                }
+                const value = String(input?.value || "").trim();
+                if (fieldInputs.length && Object.values(values).some(item => !item)) {
+                    if (error) error.textContent = "Complete every required setup field.";
+                    return;
+                }
+                if (!fieldInputs.length && !value) {
+                    if (error) error.textContent = "Enter the required setup information.";
+                    return;
+                }
+
+                button.disabled = true;
+                try {
+                    await api(
+                        `/customer/employee-builder/${Number(employee.agent_id)}/setup/${encodeURIComponent(key)}`,
+                        {
+                            method: "PUT",
+                            body: JSON.stringify(fieldInputs.length ? {values} : {value})
+                        }
+                    );
+                    await loadEmployeeBuilder();
+                } catch (err) {
+                    if (error) error.textContent = err?.message || "Could not save setup information.";
+                } finally {
+                    if (document.body.contains(button)) button.disabled = false;
+                }
+            });
+        });
 
         const reviseButton = document.getElementById("revise-job-brief-btn");
         const revisionEditor = document.getElementById("job-brief-editor");
