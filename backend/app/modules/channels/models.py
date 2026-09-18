@@ -99,13 +99,18 @@ class ManagedChannelOutboundDelivery(Base):
     __table_args__ = (
         UniqueConstraint(
             "idempotency_key",
-            name="uq_managed_channel_outbound_idempotency",
+            name="uq_mco_delivery_idempotency",
         ),
-        Index(
-            "ix_managed_channel_delivery_company_status",
-            "company_id",
-            "status",
-        ),
+        Index("ix_mco_delivery_company_status", "company_id", "status"),
+        Index("ix_mco_delivery_idempotency", "idempotency_key"),
+        Index("ix_mco_delivery_agent", "agent_id"),
+        Index("ix_mco_delivery_conversation", "conversation_id"),
+        Index("ix_mco_delivery_channel", "channel_id"),
+        Index("ix_mco_delivery_message", "message_id"),
+        Index("ix_mco_delivery_contact", "external_contact_id"),
+        Index("ix_mco_delivery_inbound", "inbound_external_message_id"),
+        Index("ix_mco_delivery_status", "status"),
+        Index("ix_mco_delivery_provider_message", "provider_message_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -113,46 +118,38 @@ class ManagedChannelOutboundDelivery(Base):
     company_id: Mapped[int] = mapped_column(
         ForeignKey("companies.id"),
         nullable=False,
-        index=True,
     )
     agent_id: Mapped[int] = mapped_column(
         ForeignKey("ai_agents.id"),
         nullable=False,
-        index=True,
     )
     conversation_id: Mapped[int] = mapped_column(
         ForeignKey("ai_conversations.id"),
         nullable=False,
-        index=True,
     )
     channel_id: Mapped[int] = mapped_column(
         ForeignKey("agent_channels.id"),
         nullable=False,
-        index=True,
     )
     message_id: Mapped[int] = mapped_column(
         ForeignKey("ai_messages.id"),
         nullable=False,
-        index=True,
     )
     external_contact_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     inbound_external_message_id: Mapped[str | None] = mapped_column(
         String(180),
         nullable=True,
-        index=True,
     )
     status: Mapped[str] = mapped_column(
         String(30),
         default="pending",
         nullable=False,
-        index=True,
     )
     retryable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     provider_message_id: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
-        index=True,
     )
     last_error_code: Mapped[str | None] = mapped_column(String(160), nullable=True)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
