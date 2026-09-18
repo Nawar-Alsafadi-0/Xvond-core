@@ -38,43 +38,43 @@ def upgrade():
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.UniqueConstraint(
             "idempotency_key",
-            name="uq_managed_channel_outbound_idempotency",
+            name="uq_mco_delivery_idempotency",
         ),
     )
     op.create_index(
-        "ix_managed_channel_delivery_company_status",
+        "ix_mco_delivery_company_status",
         "managed_channel_outbound_deliveries",
         ["company_id", "status"],
         unique=False,
     )
     for name, columns in (
-        ("ix_managed_channel_outbound_deliveries_idempotency_key", ["idempotency_key"]),
-        ("ix_managed_channel_outbound_deliveries_company_id", ["company_id"]),
-        ("ix_managed_channel_outbound_deliveries_agent_id", ["agent_id"]),
-        ("ix_managed_channel_outbound_deliveries_conversation_id", ["conversation_id"]),
-        ("ix_managed_channel_outbound_deliveries_channel_id", ["channel_id"]),
-        ("ix_managed_channel_outbound_deliveries_message_id", ["message_id"]),
-        ("ix_managed_channel_outbound_deliveries_external_contact_id", ["external_contact_id"]),
-        ("ix_managed_channel_outbound_deliveries_inbound_external_message_id", ["inbound_external_message_id"]),
-        ("ix_managed_channel_outbound_deliveries_status", ["status"]),
-        ("ix_managed_channel_outbound_deliveries_provider_message_id", ["provider_message_id"]),
+        ("ix_mco_delivery_idempotency", ["idempotency_key"]),
+        ("ix_mco_delivery_company", ["company_id"]),
+        ("ix_mco_delivery_agent", ["agent_id"]),
+        ("ix_mco_delivery_conversation", ["conversation_id"]),
+        ("ix_mco_delivery_channel", ["channel_id"]),
+        ("ix_mco_delivery_message", ["message_id"]),
+        ("ix_mco_delivery_contact", ["external_contact_id"]),
+        ("ix_mco_delivery_inbound", ["inbound_external_message_id"]),
+        ("ix_mco_delivery_status", ["status"]),
+        ("ix_mco_delivery_provider_message", ["provider_message_id"]),
     ):
         op.create_index(name, "managed_channel_outbound_deliveries", columns, unique=False)
 
 
 def downgrade():
     for name in (
-        "ix_managed_channel_outbound_deliveries_provider_message_id",
-        "ix_managed_channel_outbound_deliveries_status",
-        "ix_managed_channel_outbound_deliveries_inbound_external_message_id",
-        "ix_managed_channel_outbound_deliveries_external_contact_id",
-        "ix_managed_channel_outbound_deliveries_message_id",
-        "ix_managed_channel_outbound_deliveries_channel_id",
-        "ix_managed_channel_outbound_deliveries_conversation_id",
-        "ix_managed_channel_outbound_deliveries_agent_id",
-        "ix_managed_channel_outbound_deliveries_company_id",
-        "ix_managed_channel_outbound_deliveries_idempotency_key",
-        "ix_managed_channel_delivery_company_status",
+        "ix_mco_delivery_provider_message",
+        "ix_mco_delivery_status",
+        "ix_mco_delivery_inbound",
+        "ix_mco_delivery_contact",
+        "ix_mco_delivery_message",
+        "ix_mco_delivery_channel",
+        "ix_mco_delivery_conversation",
+        "ix_mco_delivery_agent",
+        "ix_mco_delivery_company",
+        "ix_mco_delivery_idempotency",
+        "ix_mco_delivery_company_status",
     ):
         op.drop_index(name, table_name="managed_channel_outbound_deliveries")
     op.drop_table("managed_channel_outbound_deliveries")
