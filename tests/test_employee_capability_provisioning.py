@@ -607,6 +607,66 @@ def test_self_service_media_generation_schedule_builds_ai_media_then_action(data
         assert nodes[2]["params"]["arguments"]["media_url"] == "$nodes.generate_media.media_url"
 
 
+def test_self_service_webhook_graph_is_provisioned_when_actions_are_ready(database):
+    factory, _ = database
+    brief = "When my external system sends an event, notify me automatically."
+    purpose = "Notify me from the external event"
+    payload = {
+        "role": "Event worker",
+        "scope": "business",
+        "requirements": [
+            {
+                "key": KEY,
+                "kind": "custom",
+                "purpose": purpose,
+                "primitives": ["workflow_engine"],
+                "execution_plan": [
+                    {
+                        "id": "notify",
+                        "op": "notify",
+                        "title": "External event",
+                        "message": "The external event arrived.",
+                    }
+                ],
+            }
+        ],
+        "permissions": [{"action": purpose, "mode": "automatic"}],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "webhook"},
+            "nodes": [
+                {
+                    "id": "act",
+                    "type": "action",
+                    "depends_on": [],
+                    "params": {"action_type": KEY, "arguments": {}},
+                }
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "ready"
+    assert trigger["trigger_type"] == "webhook"
+    assert trigger["workflow_id"]
+
+    with factory() as db:
+        workflow = db.get(AutomationWorkflow, trigger["workflow_id"])
+        assert workflow.trigger_type == "webhook"
+        assert workflow.enabled is True
+        assert workflow.trigger_config["_xvond_graph_trigger"] is True
+        assert workflow.steps[0]["type"] == "graph"
+        assert workflow.steps[0]["graph"]["nodes"][0]["params"]["action_type"] == KEY
+
+
 def test_self_service_schedule_requires_explicit_automatic_permission(database):
     factory, _ = database
     brief, payload = _scheduled_payload(permission_mode="ask_before")
