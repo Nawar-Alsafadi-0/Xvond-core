@@ -30,12 +30,15 @@ def test_website_conversations_require_visitor_token_not_only_id():
 def test_external_actions_have_durable_idempotency_and_reconciliation():
     runtime = source("backend/app/modules/tools/action_request.py")
     operations = source("backend/app/api/admin_operations.py")
+    reconciliation = source("backend/app/modules/tools/external_reconciliation.py")
     assert "Idempotency-Key" in runtime
     assert 'state="executing"' in runtime
     assert 'state="external_failed"' in runtime
     assert "will not be retried automatically" in runtime
     assert "/requests/{request_id}/reconcile" in operations
-    assert '"not_executed"' in operations
+    assert "reconcile_external_action_request" in operations
+    assert '"not_executed"' in reconciliation
+    assert "UNRESOLVED_EXTERNAL_STATUSES" in reconciliation
 
 
 def test_automation_uses_safe_http_and_no_internal_chat_commit():

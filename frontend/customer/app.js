@@ -720,6 +720,20 @@ function operationButtons(item) {
     if (item.status === "awaiting_confirmation") {
         return `<p><em>Waiting for customer confirmation in the conversation.</em></p>`;
     }
+    if (item.external_execution?.reconciliation_required) {
+        return `
+            <div class="note">
+                <strong>External result needs reconciliation</strong>
+                <p class="muted">Xvond will not retry this action automatically because the external system outcome is not certain. Check the connected system, then confirm what actually happened.</p>
+                ${item.external_execution?.error ? `<p class="error">${safe(item.external_execution.error)}</p>` : ""}
+                <div class="chat-input">
+                    <button onclick="reconcileCustomerOperation(${Number(item.id)},'executed')">Confirm executed</button>
+                    <button onclick="reconcileCustomerOperation(${Number(item.id)},'not_executed')">Confirm not executed</button>
+                    <button onclick="reconcileCustomerOperation(${Number(item.id)},'cancelled')">Confirm cancelled</button>
+                </div>
+            </div>
+        `;
+    }
     const buttons = [];
     if (!["in_progress", "processing", "completed", "cancelled"].includes(item.status)) {
         buttons.push(`<button onclick="setCustomerOperationStatus(${item.id},'in_progress')">Start</button>`);
@@ -736,6 +750,26 @@ async function setCustomerOperationStatus(id, status) {
         await api(`/customer/action-requests/${id}`, {
             method: "PATCH",
             body: JSON.stringify({status})
+        });
+        await loadCustomerBusiness();
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+async function reconcileCustomerOperation(id, outcome) {
+    const labels = {
+        executed: "executed successfully",
+        not_executed: "not executed",
+        cancelled: "cancelled",
+    };
+    const label = labels[outcome] || outcome;
+    if (!confirm(`Confirm that this external operation was ${label}?`)) return;
+    const note = prompt("Optional reconciliation note:", "") || "";
+    try {
+        await api(`/customer/action-requests/${id}/reconcile`, {
+            method: "PATCH",
+            body: JSON.stringify({outcome, note})
         });
         await loadCustomerBusiness();
     } catch (err) {
