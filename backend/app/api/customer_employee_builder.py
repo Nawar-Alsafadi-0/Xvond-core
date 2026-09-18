@@ -64,6 +64,7 @@ from backend.app.modules.channels.delivery import reconcile_managed_channel_requ
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord, CompanyAIProfile
 from backend.app.modules.tools.models import AgentToolAssignment
+from backend.app.modules.tools.business_models import ActionRequest
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.integrations.catalog import integration_validation_ready
 
@@ -2647,6 +2648,229 @@ def customer_employee_run_graph(
             "error_message": run.error_message,
             "created_at": run.created_at,
             "finished_at": run.finished_at,
+        }
+    finally:
+        db.close()
+
+
+def _automation_request_details(request: ActionRequest) -> dict:
+    details = request.details if isinstance(request.details, dict) else {}
+    return {
+        key: value
+        for key, value in details.items()
+        if not str(key).startswith("_xvond_")
+    }
+
+
+@router.get("/{agent_id}/automation-approvals")
+def customer_employee_automation_approvals(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        _company_or_404(db, company_id)
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+
+        rows = (
+            db.query(ActionRequest)
+            .filter(
+                ActionRequest.company_id == company_id,
+                ActionRequest.agent_id == int(agent_id),
+                ActionRequest.status == "awaiting_confirmation",
+            )
+            .order_by(ActionRequest.id.desc())
+            .limit(100)
+            .all()
+        )
+        approvals = []
+        for request in rows:
+            details = request.details if isinstance(request.details, dict) else {}
+            meta = details.get("_xvond_automation")
+            if not isinstance(meta, dict):
+                continue
+            approvals.append(
+                {
+                    "id": request.id,
+                    "run_id": meta.get("run_id"),
+                    "workflow_id": meta.get("workflow_id"),
+                    "node_id": meta.get("node_id"),
+                    "action_type": request.action_type,
+                    "summary": request.summary,
+                    "details": _automation_request_details(request),
+                    "status": request.status,
+                    "created_at": request.created_at,
+                }
+            )
+        return {"agent_id": agent.id, "approvals": approvals}
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/automation-approvals/{request_id}/approve")
+def customer_employee_approve_automation(
+    agent_id: int,
+    request_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        _company_or_404(db, company_id)
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+
+        request = (
+            db.query(ActionRequest)
+            .filter(
+                ActionRequest.id == int(request_id),
+                ActionRequest.company_id == company_id,
+                ActionRequest.agent_id == int(agent_id),
+                ActionRequest.status == "awaiting_confirmation",
+            )
+            .with_for_update()
+            .first()
+        )
+        if request is None:
+            raise HTTPException(404, "Pending automation approval not found")
+        details = request.details if isinstance(request.details, dict) else {}
+        meta = details.get("_xvond_automation")
+        if not isinstance(meta, dict):
+            raise HTTPException(409, "Request is not an automation approval")
+
+        run = (
+            db.query(AutomationRun)
+            .filter(
+                AutomationRun.id == int(meta.get("run_id") or 0),
+                AutomationRun.company_id == company_id,
+                AutomationRun.status == "waiting_approval",
+            )
+            .with_for_update()
+            .first()
+        )
+        workflow = (
+            db.query(AutomationWorkflow)
+            .filter(
+                AutomationWorkflow.id == int(meta.get("workflow_id") or 0),
+                AutomationWorkflow.company_id == company_id,
+                AutomationWorkflow.enabled.is_(True),
+            )
+            .first()
+        )
+        if run is None or workflow is None:
+            raise HTTPException(409, "Automation approval checkpoint is no longer runnable")
+
+        request.status = "approved"
+        db.flush()
+        try:
+            resumed = automation_runtime.resume_approval(
+                db,
+                company_id=company_id,
+                workflow=workflow,
+                run=run,
+                request=request,
+            )
+        except Exception as exc:
+            request = db.query(ActionRequest).filter(ActionRequest.id == int(request_id)).first()
+            if request is not None:
+                request.status = "approval_execution_failed"
+                db.commit()
+            raise HTTPException(409, str(exc)) from exc
+
+        request = db.query(ActionRequest).filter(ActionRequest.id == int(request_id)).first()
+        if request is not None:
+            request.status = "confirmed"
+            db.commit()
+
+        return {
+            "request_id": int(request_id),
+            "run_id": resumed.id,
+            "status": resumed.status,
+            "output_data": resumed.output_data,
+        }
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/automation-approvals/{request_id}/reject")
+def customer_employee_reject_automation(
+    agent_id: int,
+    request_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        _company_or_404(db, company_id)
+
+        request = (
+            db.query(ActionRequest)
+            .filter(
+                ActionRequest.id == int(request_id),
+                ActionRequest.company_id == company_id,
+                ActionRequest.agent_id == int(agent_id),
+                ActionRequest.status == "awaiting_confirmation",
+            )
+            .with_for_update()
+            .first()
+        )
+        if request is None:
+            raise HTTPException(404, "Pending automation approval not found")
+        details = request.details if isinstance(request.details, dict) else {}
+        meta = details.get("_xvond_automation")
+        if not isinstance(meta, dict):
+            raise HTTPException(409, "Request is not an automation approval")
+
+        run = (
+            db.query(AutomationRun)
+            .filter(
+                AutomationRun.id == int(meta.get("run_id") or 0),
+                AutomationRun.company_id == company_id,
+                AutomationRun.status == "waiting_approval",
+            )
+            .with_for_update()
+            .first()
+        )
+        request.status = "rejected"
+        if run is not None:
+            output = dict(run.output_data or {})
+            approval = output.get("approval")
+            if isinstance(approval, dict):
+                output["approval"] = {**approval, "status": "rejected"}
+            run.status = "rejected"
+            run.output_data = output
+            run.error_message = None
+            run.finished_at = datetime.utcnow()
+        db.commit()
+        return {
+            "request_id": request.id,
+            "run_id": run.id if run is not None else None,
+            "status": "rejected",
         }
     finally:
         db.close()
