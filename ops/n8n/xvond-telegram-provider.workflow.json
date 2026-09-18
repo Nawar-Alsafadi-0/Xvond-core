@@ -1,0 +1,362 @@
+{
+  "id": "xvond-telegram-provider-v1",
+  "name": "Xvond Telegram Provider",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "xvond-telegram-inbound",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "telegram-inbound-webhook",
+      "name": "Telegram Inbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        220,
+        180
+      ],
+      "webhookId": "xvond-telegram-inbound"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst query = item.query || {};\nconst companyId = Number(query.company_id || 0);\nconst connectionKey = String(query.connection_key || '').trim();\nlet registry = {};\ntry { registry = JSON.parse($env.XVOND_TELEGRAM_ROUTES_JSON || '{}'); }\ncatch (_e) { return [{json:{success:false,_dispatch:'reject',code:'registry_invalid'}}]; }\nconst routeKey = `${companyId}:${connectionKey}`;\nconst route = registry[routeKey];\nif (!companyId || !connectionKey || !route) return [{json:{success:false,_dispatch:'reject',code:'route_not_found'}}];\nconst supplied = String(headers['x-telegram-bot-api-secret-token'] || headers['X-Telegram-Bot-Api-Secret-Token'] || '');\nconst expected = String(route.webhook_secret || '');\nif (!expected || supplied !== expected) return [{json:{success:false,_dispatch:'reject',code:'unauthorized'}}];\nconst message = body.message || body.edited_message || null;\nconst text = String(message?.text || message?.caption || '').trim();\nconst chatId = String(message?.chat?.id || '');\nconst updateId = String(body.update_id ?? '');\nif (!message || !text || !chatId || !updateId) return [{json:{success:true,_dispatch:'ignore',ignored:true}}];\nreturn [{json:{\n  success:true,\n  _dispatch:'xvond',\n  payload:{\n    company_id:Number(route.company_id || companyId),\n    agent_id:Number(route.agent_id || 0),\n    channel_id:Number(route.channel_id || 0),\n    channel_type:'telegram',\n    external_contact_id:chatId,\n    external_message_id:updateId,\n    message:text\n  }\n}}];"
+      },
+      "id": "normalize-telegram",
+      "name": "Normalize Telegram",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "telegram-xvond",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "xvond",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-telegram-inbound",
+      "name": "Forward Telegram?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.XVOND_CHANNEL_INBOUND_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Xvond-N8N-Secret",
+              "value": "={{ $env.N8N_SHARED_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "forward-telegram-xvond",
+      "name": "Forward to Xvond Channel Gateway",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        940,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
+      "id": "return-telegram-inbound",
+      "name": "Return Telegram Inbound",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1190,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "xvond-telegram-provider",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "telegram-outbound-webhook",
+      "name": "Telegram Provider",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        220,
+        540
+      ],
+      "webhookId": "xvond-telegram-provider"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst supplied = String(headers['x-xvond-channel-secret'] || headers['X-Xvond-Channel-Secret'] || '');\nconst requestId = String(body.request_id || headers['x-xvond-request-id'] || '').trim();\nconst action = String(body.action || '').trim();\nconst data = body.data && typeof body.data === 'object' ? body.data : {};\nconst companyId = Number(body.company_id || 0);\nconst connectionKey = String(data.connection_key || '').trim();\nlet registry = {};\ntry { registry = JSON.parse($env.XVOND_TELEGRAM_ROUTES_JSON || '{}'); }\ncatch (_e) { return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Telegram route registry is invalid',error_code:'provider_not_configured',data:null}}]; }\nconst routeKey = `${companyId}:${connectionKey}`;\nconst route = registry[routeKey];\nif (!route || !route.bot_token || !route.provider_secret) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Telegram route is not configured',error_code:'provider_not_configured',data:null}}];\nif (!supplied || supplied !== String(route.provider_secret)) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unauthorized Telegram provider request',error_code:'unauthorized',data:null}}];\nif (action !== 'channel.send') return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unsupported Telegram provider action',error_code:'unsupported_action',data:null}}];\nconst chatId = String(data.external_contact_id || '').trim();\nconst message = String(data.message || '').trim();\nif (!requestId || !chatId || !message) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Invalid Telegram send contract',error_code:'invalid_contract',data:null}}];\nreturn [{json:{\n  success:true,\n  _dispatch:'telegram_send',\n  request_id:requestId,\n  action,\n  bot_token:String(route.bot_token),\n  chat_id:chatId,\n  message,\n  idempotency_key:String(data.idempotency_key || '').trim()\n}}];"
+      },
+      "id": "validate-telegram-send",
+      "name": "Validate Telegram Send",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        470,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "telegram-send",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "telegram_send",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-telegram-send",
+      "name": "Send Telegram?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $json.bot_token }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ chat_id: $json.chat_id, text: $json.message }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "send-telegram-message",
+      "name": "Telegram sendMessage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        940,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst request = $('Validate Telegram Send').first().json;\nif (!response || response.ok !== true || !response.result || response.result.message_id === undefined) {\n  return [{json:{success:false,request_id:request.request_id,action:request.action,error:'Telegram provider rejected the send',error_code:'provider_rejected',data:null}}];\n}\nreturn [{json:{\n  success:true,\n  request_id:request.request_id,\n  action:request.action,\n  data:{provider_message_id:String(response.result.message_id)},\n  error:null\n}}];"
+      },
+      "id": "normalize-telegram-send-result",
+      "name": "Normalize Telegram Send Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1190,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
+      "id": "return-telegram-provider",
+      "name": "Return Telegram Provider",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1430,
+        540
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Inbound": {
+      "main": [
+        [
+          {
+            "node": "Normalize Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Telegram": {
+      "main": [
+        [
+          {
+            "node": "Forward Telegram?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Forward Telegram?": {
+      "main": [
+        [
+          {
+            "node": "Forward to Xvond Channel Gateway",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Telegram Inbound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Forward to Xvond Channel Gateway": {
+      "main": [
+        [
+          {
+            "node": "Return Telegram Inbound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Provider": {
+      "main": [
+        [
+          {
+            "node": "Validate Telegram Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Telegram Send": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Telegram?": {
+      "main": [
+        [
+          {
+            "node": "Telegram sendMessage",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Telegram Provider",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram sendMessage": {
+      "main": [
+        [
+          {
+            "node": "Normalize Telegram Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Telegram Send Result": {
+      "main": [
+        [
+          {
+            "node": "Return Telegram Provider",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "55555555-5555-4555-8555-555555555555",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
