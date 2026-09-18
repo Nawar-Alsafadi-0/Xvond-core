@@ -293,7 +293,7 @@ def unresolved_billing_renewals(
     try:
         safe_limit = max(1, min(int(limit or 100), 500))
         query = db.query(ServiceRenewalAttempt).filter(
-            ServiceRenewalAttempt.status.in_(("sending", "unknown", "failed"))
+            ServiceRenewalAttempt.status.in_(("sending", "submitted", "unknown", "failed"))
         )
         if company_id is not None:
             get_company_or_404(db, company_id)
