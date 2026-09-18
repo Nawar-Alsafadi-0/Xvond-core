@@ -172,6 +172,13 @@ case "$(git status --porcelain 2>/dev/null || true)" in
     *) echo "Refusing production deploy from a dirty Git working tree" >&2; exit 1 ;;
 esac
 
+required_release_branch="${DEPLOY_RELEASE_BRANCH:-main}"
+current_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+if [ "$current_branch" != "$required_release_branch" ]; then
+    echo "Refusing production deploy: current branch '${current_branch:-detached}' is not required release branch '$required_release_branch'" >&2
+    exit 1
+fi
+
 if [ ! -f .env ]; then
     echo "Refusing production deploy: .env is missing" >&2
     exit 1
