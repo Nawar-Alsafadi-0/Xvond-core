@@ -301,6 +301,8 @@ def _integration_call(
         )
     config = reveal_config(integration.config) or {}
     operations = destination.get("operations") or {}
+    if not operations and isinstance(config.get("operations"), dict):
+        operations = config.get("operations") or {}
     op_config = operations.get(operation) if isinstance(operations, dict) else None
     if not isinstance(op_config, dict):
         op_config = destination
