@@ -83,6 +83,14 @@ class EmployeeBuilderReviseRequest(BaseModel):
     description: str = Field(min_length=8, max_length=4000)
 
 
+class EmployeeBuilderRefineRequest(BaseModel):
+    instruction: str = Field(min_length=2, max_length=2000)
+
+
+class EmployeeBuilderRollbackRequest(BaseModel):
+    version_id: str = Field(min_length=1, max_length=80)
+
+
 class EmployeeBuilderSetupAnswerRequest(BaseModel):
     value: str | None = Field(default=None, max_length=8000)
     values: dict[str, str] = Field(default_factory=dict)
@@ -96,6 +104,71 @@ DEFAULT_CUSTOMER_CONTROLS = {
     "can_change_provider": False,
     "can_change_model": False,
 }
+
+
+BUILDER_HISTORY_LIMIT = 20
+
+
+def _snapshot_builder_version(
+    builder: dict,
+    *,
+    reason: str,
+) -> dict:
+    history = list(builder.get("versions") or [])
+    snapshot_source = str(builder.get("source_description") or "").strip()
+    snapshot_spec = builder.get("compiled_spec")
+    if not snapshot_source and not isinstance(snapshot_spec, dict):
+        return builder
+
+    version_id = (
+        datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
+        + f"-{len(history) + 1}"
+    )
+    history.append(
+        {
+            "id": version_id,
+            "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "reason": str(reason or "change")[:120],
+            "source_description": snapshot_source[:12000],
+            "compiled_spec": snapshot_spec if isinstance(snapshot_spec, dict) else None,
+            "compiled_at": builder.get("compiled_at"),
+            "setup_answers": dict(builder.get("setup_answers") or {}),
+            "requested_channels": list(builder.get("requested_channels") or []),
+        }
+    )
+    builder["versions"] = history[-BUILDER_HISTORY_LIMIT:]
+    return builder
+
+
+def _clear_current_build_evidence(builder: dict) -> None:
+    for key in (
+        "compiled_spec",
+        "delivery",
+        "compiled_at",
+        "compiler_provider",
+        "compiler_model",
+        "last_tested_at",
+        "last_tested_compiled_at",
+    ):
+        builder.pop(key, None)
+
+
+def _builder_versions_view(builder: dict) -> list[dict]:
+    result = []
+    for item in reversed(list(builder.get("versions") or [])):
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            {
+                "id": item.get("id"),
+                "created_at": item.get("created_at"),
+                "reason": item.get("reason"),
+                "job_brief": item.get("source_description"),
+                "compiled": isinstance(item.get("compiled_spec"), dict),
+                "compiled_at": item.get("compiled_at"),
+            }
+        )
+    return result
 
 
 def _ensure_module(db, company_id: int, name: str):
@@ -925,6 +998,7 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
                 "self_service_readiness": self_service_state,
                 "builder_journey": builder_journey,
                 "last_tested_at": builder.get("last_tested_at"),
+                "versions": _builder_versions_view(builder),
                 "current_build_tested": bool(
                     builder.get("compiled_at")
                     and builder.get("last_tested_compiled_at") == builder.get("compiled_at")
