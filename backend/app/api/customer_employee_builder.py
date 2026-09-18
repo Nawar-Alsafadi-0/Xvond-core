@@ -393,10 +393,7 @@ def _clear_generated_self_service_build(db, *, company_id: int, agent_id: int) -
 
     workflows = (
         db.query(AutomationWorkflow)
-        .filter(
-            AutomationWorkflow.company_id == company_id,
-            AutomationWorkflow.trigger_type == "schedule",
-        )
+        .filter(AutomationWorkflow.company_id == company_id)
         .all()
     )
     for workflow in workflows:
@@ -545,6 +542,119 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
         response=response,
     )
     return compiled_spec
+
+
+def _carry_forward_requirement_bindings(previous_spec: dict | None, next_spec: dict) -> dict:
+    previous = {
+        normalize_requirement_key(item.get("key")): item
+        for item in ((previous_spec or {}).get("requirements") or [])
+        if isinstance(item, dict) and normalize_requirement_key(item.get("key"))
+    }
+    updated = deepcopy(next_spec)
+    requirements = []
+    carry_fields = {
+        "integration_id",
+        "integration_type",
+        "integration_operations",
+        "fulfillment_mode",
+        "validation_required",
+        "requires_connection",
+    }
+    previous_inputs = (
+        dict((previous_spec or {}).get("customer_inputs") or {})
+        if isinstance(previous_spec, dict)
+        else {}
+    )
+    carried_inputs: dict = {}
+    for raw in updated.get("requirements") or []:
+        if not isinstance(raw, dict):
+            requirements.append(raw)
+            continue
+        item = dict(raw)
+        key = normalize_requirement_key(item.get("key"))
+        prior = previous.get(key)
+        if isinstance(prior, dict):
+            for field in carry_fields:
+                if field in prior and field not in item:
+                    item[field] = deepcopy(prior[field])
+            if (
+                prior.get("integration_id")
+                and str(item.get("status") or "").strip().lower()
+                == "connection_required"
+            ):
+                item["status"] = "xvond_build"
+                item["delivery_mode"] = "compose"
+        if key and key in previous_inputs:
+            carried_inputs[key] = deepcopy(previous_inputs[key])
+            if (
+                str(item.get("status") or "").strip().lower()
+                == "customer_input_required"
+            ):
+                next_status = str(
+                    item.get("after_input_status") or "xvond_build"
+                ).strip().lower()
+                item["status"] = next_status
+                if next_status == "xvond_build":
+                    item["delivery_mode"] = "compose"
+        requirements.append(item)
+    updated["requirements"] = requirements
+    if carried_inputs:
+        updated["customer_inputs"] = {
+            **dict(updated.get("customer_inputs") or {}),
+            **carried_inputs,
+        }
+    return updated
+
+
+def _compile_staged_employee_spec(
+    db,
+    *,
+    company_id: int,
+    agent: AIAgent,
+    job_brief: str,
+    requested_channels: list[str],
+    previous_spec: dict | None,
+) -> dict:
+    selections = runtime_selections(
+        db,
+        company_id,
+        agent.provider,
+        agent.model,
+        message=job_brief,
+    )
+    if not selections:
+        raise HTTPException(503, "No eligible AI provider/model is available")
+
+    for candidate in selections:
+        try:
+            response = ai_engine.generate(
+                provider_name=candidate.provider,
+                system_prompt=COMPILER_SYSTEM_PROMPT,
+                user_message=build_compiler_user_message(
+                    job_brief=job_brief,
+                    requested_channels=requested_channels,
+                ),
+                model=candidate.model,
+                tools=None,
+            )
+            spec = parse_compiler_response(response.text, job_brief=job_brief)
+            spec = _carry_forward_requirement_bindings(previous_spec, spec)
+            _record_ai_usage(
+                db,
+                company_id=company_id,
+                agent_id=agent.id,
+                selected=candidate,
+                response=response,
+            )
+            return {
+                "compiled_spec": spec,
+                "compiled_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "compiler_provider": candidate.provider,
+                "compiler_model": candidate.model,
+            }
+        except (ProviderExecutionError, ValueError):
+            continue
+    raise HTTPException(502, "AI employee compiler could not produce a valid staged specification")
 
 
 
@@ -1081,6 +1191,39 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
         display_channels = list(builder.get("requested_channels", []))
         if is_self_service_company(company):
             display_channels = communication_channels(display_channels)
+
+        pending_view = None
+        pending = (
+            builder.get("pending_revision")
+            if isinstance(builder, dict)
+            and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        if pending is not None:
+            pending_spec = pending.get("compiled_spec")
+            if is_self_service_company(company) and isinstance(pending_spec, dict):
+                pending_spec = self_service_spec_view(pending_spec)
+            pending_compiled_at = str(pending.get("compiled_at") or "").strip()
+            pending_tested = bool(
+                pending_compiled_at
+                and str(pending.get("last_tested_compiled_at") or "").strip()
+                == pending_compiled_at
+            )
+            pending_view = {
+                "status": pending.get("status") or "draft",
+                "job_brief": pending.get("source_description"),
+                "requested_channels": communication_channels(
+                    pending.get("requested_channels") or []
+                ),
+                "compiled": isinstance(pending_spec, dict),
+                "compiled_spec": pending_spec if isinstance(pending_spec, dict) else None,
+                "compiled_at": pending.get("compiled_at"),
+                "created_at": pending.get("created_at"),
+                "updated_at": pending.get("updated_at"),
+                "last_tested_at": pending.get("last_tested_at"),
+                "current_build_tested": pending_tested,
+                "can_apply": bool(agent.enabled and pending_tested),
+            }
         return {
             "employee": {
                 "agent_id": agent.id,
@@ -1108,6 +1251,7 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
                     builder.get("compiled_at")
                     and builder.get("last_tested_compiled_at") == builder.get("compiled_at")
                 ),
+                "pending_revision": pending_view,
                 "can_launch": bool(
                     self_service_state
                     and self_service_state.get("ready")
@@ -1435,11 +1579,21 @@ def refine_self_service_employee(
         )
         if agent is None:
             raise HTTPException(404, "AI employee not found")
-        if agent.enabled:
-            raise HTTPException(409, "Deactivate this employee before refining it")
         config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
         builder = dict((config.settings or {}).get("employee_builder") or {})
-        current_brief = str(builder.get("source_description") or agent.description or "").strip()
+        existing_pending = (
+            builder.get("pending_revision")
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        current_brief = str(
+            (existing_pending or {}).get("source_description")
+            or builder.get("source_description")
+            or agent.description
+            or ""
+        ).strip()
         if not current_brief:
             raise HTTPException(409, "Current Job Brief is unavailable")
         instruction = " ".join(str(data.instruction or "").strip().split())
@@ -1457,6 +1611,89 @@ def refine_self_service_employee(
                 409,
                 "This employee has accumulated too many refinements. Consolidate the Job Brief before continuing.",
             )
+
+        if agent.enabled:
+            try:
+                blueprint = _build_final_blueprint(
+                    EmployeeBuilderCreateRequest(
+                        description=revised,
+                        name=agent.name,
+                    )
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+
+            now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            pending = {
+                "version": 1,
+                "status": "draft",
+                "source_description": blueprint.description,
+                "job_brief": blueprint.description,
+                "audience": blueprint.audience,
+                "requested_channels": list(
+                    communication_channels(blueprint.channels)
+                ),
+                "permissions": dict(blueprint.permissions),
+                "capabilities": {
+                    item: True for item in blueprint.capabilities
+                },
+                "setup_answers": deepcopy(
+                    (existing_pending or {}).get("setup_answers")
+                    or builder.get("setup_answers")
+                    or {}
+                ),
+                "base_compiled_at": (
+                    (existing_pending or {}).get("base_compiled_at")
+                    or builder.get("compiled_at")
+                ),
+                "created_at": (
+                    (existing_pending or {}).get("created_at") or now_iso
+                ),
+                "updated_at": now_iso,
+                "compiled_spec": None,
+            }
+            if _has_ai_agents_entitlement(db, company.id):
+                staged = _compile_staged_employee_spec(
+                    db,
+                    company_id=company.id,
+                    agent=agent,
+                    job_brief=blueprint.description,
+                    requested_channels=pending["requested_channels"],
+                    previous_spec=(
+                        (existing_pending or {}).get("compiled_spec")
+                        if isinstance((existing_pending or {}).get("compiled_spec"), dict)
+                        else (
+                            builder.get("compiled_spec")
+                            if isinstance(builder.get("compiled_spec"), dict)
+                            else None
+                        )
+                    ),
+                )
+                pending.update(staged)
+                pending["status"] = "built"
+
+            settings_value = dict(config.settings or {})
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": (
+                    "revision_staged_and_built"
+                    if pending.get("compiled_spec")
+                    else "revision_staged"
+                ),
+                "agent_id": agent.id,
+                "live_employee_unchanged": True,
+                "pending_revision": {
+                    "status": pending.get("status"),
+                    "compiled": isinstance(pending.get("compiled_spec"), dict),
+                    "compiled_at": pending.get("compiled_at"),
+                    "created_at": pending.get("created_at"),
+                    "job_brief": pending.get("source_description"),
+                    "requested_channels": pending.get("requested_channels") or [],
+                },
+            }
     finally:
         db.close()
 
@@ -1531,8 +1768,6 @@ def rollback_self_service_employee(
         config = _employee_config_or_404(db, agent)
         db.refresh(config, with_for_update=True)
         db.refresh(agent, with_for_update=True)
-        if agent.enabled:
-            raise HTTPException(409, "Deactivate this employee before rolling it back")
 
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
@@ -1548,25 +1783,80 @@ def rollback_self_service_employee(
         if selected is None:
             raise HTTPException(404, "Employee version not found")
 
+        restored_brief = str(selected.get("source_description") or "").strip()
+        if not restored_brief:
+            raise HTTPException(409, "Selected version has no Job Brief")
+        restored_spec = selected.get("compiled_spec")
+        restored_channels = communication_channels(
+            selected.get("requested_channels") or []
+        )
+        restored_capabilities = dict(selected.get("capabilities") or {})
+
+        if agent.enabled:
+            now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            pending = {
+                "version": 1,
+                "status": "built" if isinstance(restored_spec, dict) else "draft",
+                "source_description": restored_brief,
+                "job_brief": restored_brief,
+                "audience": selected.get("audience"),
+                "requested_channels": restored_channels,
+                "permissions": deepcopy(dict(selected.get("permissions") or {})),
+                "capabilities": restored_capabilities,
+                "setup_answers": deepcopy(dict(selected.get("setup_answers") or {})),
+                "base_compiled_at": builder.get("compiled_at"),
+                "created_at": now_iso,
+                "updated_at": now_iso,
+                "source_version_id": selected.get("id"),
+                "compiled_spec": (
+                    deepcopy(restored_spec)
+                    if isinstance(restored_spec, dict)
+                    else None
+                ),
+                "compiled_at": now_iso if isinstance(restored_spec, dict) else None,
+            }
+            if not isinstance(restored_spec, dict) and _has_ai_agents_entitlement(
+                db, company.id
+            ):
+                staged = _compile_staged_employee_spec(
+                    db,
+                    company_id=company.id,
+                    agent=agent,
+                    job_brief=restored_brief,
+                    requested_channels=restored_channels,
+                    previous_spec=(
+                        builder.get("compiled_spec")
+                        if isinstance(builder.get("compiled_spec"), dict)
+                        else None
+                    ),
+                )
+                pending.update(staged)
+                pending["status"] = "built"
+
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": "rollback_staged",
+                "agent_id": agent.id,
+                "source_version_id": selected.get("id"),
+                "compiled": isinstance(pending.get("compiled_spec"), dict),
+                "live_employee_unchanged": True,
+            }
+
         previous_capabilities = dict(config.capabilities or {})
         builder = _snapshot_builder_version(
             builder,
             reason="before_rollback",
             capabilities=previous_capabilities,
         )
-        restored_brief = str(selected.get("source_description") or "").strip()
-        if not restored_brief:
-            raise HTTPException(409, "Selected version has no Job Brief")
-
         _clear_generated_self_service_build(
             db,
             company_id=company.id,
             agent_id=agent.id,
         )
 
-        restored_spec = selected.get("compiled_spec")
-        restored_channels = communication_channels(selected.get("requested_channels") or [])
-        restored_capabilities = dict(selected.get("capabilities") or {})
         builder["source_description"] = restored_brief
         builder["job_brief"] = restored_brief
         builder["requested_channels"] = restored_channels
@@ -1723,8 +2013,6 @@ def bind_self_service_integration(
         config = _employee_config_or_404(db, agent)
         db.refresh(config, with_for_update=True)
         db.refresh(agent, with_for_update=True)
-        if agent.enabled:
-            raise HTTPException(409, "Deactivate this employee before changing connected systems")
 
         integration = db.query(CompanyIntegration).filter(
             CompanyIntegration.id == data.integration_id,
@@ -1742,9 +2030,23 @@ def bind_self_service_integration(
 
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
-        compiled_spec = builder.get("compiled_spec")
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        if agent.enabled and pending is None:
+            raise HTTPException(
+                409,
+                "Stage a live revision before changing connected systems",
+            )
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
         if not isinstance(compiled_spec, dict):
-            raise HTTPException(409, "Build the employee before connecting a system")
+            raise HTTPException(409, "Build the employee revision before connecting a system")
 
         requirements = [
             dict(item) if isinstance(item, dict) else item
@@ -1830,6 +2132,34 @@ def bind_self_service_integration(
 
         compiled_value = dict(compiled_spec)
         compiled_value["requirements"] = requirements
+
+        if isinstance(pending, dict):
+            compiled_value["setup_required"] = [
+                item
+                for item in (compiled_value.get("setup_required") or [])
+                if normalize_requirement_key(item) != key
+            ]
+            pending["compiled_spec"] = compiled_value
+            pending.pop("last_tested_at", None)
+            pending.pop("last_tested_compiled_at", None)
+            pending["status"] = "built"
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": "connected_to_pending_revision",
+                "agent_id": agent.id,
+                "requirement_key": key,
+                "integration": {
+                    "id": integration.id,
+                    "name": integration.name,
+                    "type": integration.integration_type,
+                },
+                "compiled_spec": self_service_spec_view(compiled_value),
+                "live_employee_unchanged": True,
+            }
+
         compiled_value, delivery = provision_compiled_capabilities(
             db,
             agent_id=agent.id,
@@ -1920,14 +2250,26 @@ def save_self_service_setup_answer(
         config = _employee_config_or_404(db, agent)
         db.refresh(config, with_for_update=True)
         db.refresh(agent, with_for_update=True)
-        if agent.enabled:
-            raise HTTPException(409, "Deactivate this employee before changing setup data")
 
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
-        compiled_spec = builder.get("compiled_spec")
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        if agent.enabled and pending is None:
+            raise HTTPException(
+                409,
+                "Stage a live revision before changing setup data",
+            )
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
         if not isinstance(compiled_spec, dict):
-            raise HTTPException(409, "Build the employee before providing setup data")
+            raise HTTPException(409, "Build the employee revision before providing setup data")
 
         requirement = next(
             (
@@ -1986,9 +2328,16 @@ def save_self_service_setup_answer(
                 raise HTTPException(400, "Setup value is required")
             answer_value = value
 
-        answers = dict(builder.get("setup_answers") or {})
+        answers = dict(
+            (pending.get("setup_answers") or {})
+            if isinstance(pending, dict)
+            else (builder.get("setup_answers") or {})
+        )
         answers[key] = answer_value
-        builder["setup_answers"] = answers
+        if isinstance(pending, dict):
+            pending["setup_answers"] = answers
+        else:
+            builder["setup_answers"] = answers
 
         compiled_value = dict(compiled_spec)
         customer_inputs = dict(compiled_value.get("customer_inputs") or {})
@@ -2015,6 +2364,28 @@ def save_self_service_setup_answer(
                 )
             break
         compiled_value["requirements"] = requirements
+
+        if isinstance(pending, dict):
+            compiled_value["setup_required"] = [
+                item
+                for item in (compiled_value.get("setup_required") or [])
+                if normalize_requirement_key(item) != key
+            ]
+            pending["compiled_spec"] = compiled_value
+            pending.pop("last_tested_at", None)
+            pending.pop("last_tested_compiled_at", None)
+            pending["status"] = "built"
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": "saved_to_pending_revision",
+                "agent_id": agent.id,
+                "requirement_key": key,
+                "compiled_spec": self_service_spec_view(compiled_value),
+                "live_employee_unchanged": True,
+            }
 
         compiled_value, delivery = provision_compiled_capabilities(
             db,
@@ -2357,6 +2728,95 @@ def test_draft_employee(
             raise HTTPException(404, "AI employee not found")
 
         config = _employee_config_or_404(db, agent)
+        if agent.enabled:
+            db.refresh(config, with_for_update=True)
+            db.refresh(agent, with_for_update=True)
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        pending_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            and isinstance(pending.get("compiled_spec"), dict)
+            else None
+        )
+        if pending_spec is not None:
+            if not _has_ai_agents_entitlement(db, current_user.company_id):
+                raise HTTPException(
+                    403,
+                    detail={
+                        "message": "Subscribe to test a staged live revision",
+                        "subscription_required": True,
+                    },
+                )
+            limits_service.check_token_limit(db, current_user.company_id)
+            selections = runtime_selections(
+                db,
+                current_user.company_id,
+                agent.provider,
+                agent.model,
+                message=data.message,
+            )
+            if not selections:
+                raise HTTPException(503, "No eligible AI provider/model is available")
+
+            response = None
+            selected = None
+            staged_prompt = build_compiled_employee_system_prompt(
+                owner_name=company.name,
+                spec=pending_spec,
+            )
+            for candidate in selections:
+                try:
+                    response = ai_engine.generate(
+                        provider_name=candidate.provider,
+                        system_prompt=staged_prompt,
+                        user_message=data.message,
+                        model=candidate.model,
+                        tools=None,
+                    )
+                    selected = candidate
+                    break
+                except ProviderExecutionError:
+                    continue
+            if response is None or selected is None:
+                raise HTTPException(503, "AI provider is temporarily unavailable")
+
+            _record_ai_usage(
+                db,
+                company_id=current_user.company_id,
+                agent_id=agent.id,
+                selected=selected,
+                response=response,
+            )
+            now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            pending["last_tested_at"] = now_iso
+            pending["last_tested_compiled_at"] = pending.get("compiled_at")
+            pending["test_count"] = int(pending.get("test_count") or 0) + 1
+            pending["status"] = "tested"
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "agent_id": agent.id,
+                "lifecycle": "live",
+                "test_target": "pending_revision",
+                "message": response.text,
+                "usage": {
+                    "input_tokens": response.input_tokens,
+                    "output_tokens": response.output_tokens,
+                    "total_tokens": response.total_tokens,
+                },
+                "free_tests_remaining": None,
+                "tools_used": False,
+                "channels_used": False,
+            }
 
         has_entitlement = _has_ai_agents_entitlement(db, current_user.company_id)
         is_self_service = str(company.onboarding_source or "managed") == "self_service"
@@ -2444,6 +2904,354 @@ def test_draft_employee(
             "free_tests_remaining": free_tests_remaining,
             "tools_used": False,
             "channels_used": False,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/build-pending-revision")
+def build_pending_live_revision(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Build a staged live revision without changing the live employee runtime."""
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Live revisions are available only for Self-Service employees")
+        if not _has_ai_agents_entitlement(db, company.id):
+            raise HTTPException(
+                403,
+                detail={
+                    "message": "Subscribe to build this staged revision",
+                    "subscription_required": True,
+                },
+            )
+        limits_service.check_token_limit(db, company.id)
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == int(agent_id),
+            AIAgent.company_id == company.id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        if not agent.enabled:
+            raise HTTPException(409, "This employee is not live")
+
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = deepcopy(builder.get("pending_revision"))
+        if not isinstance(pending, dict):
+            raise HTTPException(404, "No staged revision is available")
+        job_brief = str(pending.get("source_description") or "").strip()
+        if not job_brief:
+            raise HTTPException(409, "Pending revision Job Brief is missing")
+
+        previous_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending.get("compiled_spec"), dict)
+            else (
+                builder.get("compiled_spec")
+                if isinstance(builder.get("compiled_spec"), dict)
+                else None
+            )
+        )
+        staged = _compile_staged_employee_spec(
+            db,
+            company_id=company.id,
+            agent=agent,
+            job_brief=job_brief,
+            requested_channels=list(pending.get("requested_channels") or []),
+            previous_spec=previous_spec,
+        )
+        pending.update(staged)
+        pending["status"] = "built"
+        pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        pending.pop("last_tested_at", None)
+        pending.pop("last_tested_compiled_at", None)
+        builder["pending_revision"] = pending
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.commit()
+        return {
+            "status": "pending_revision_built",
+            "agent_id": agent.id,
+            "compiled_at": pending.get("compiled_at"),
+            "live_employee_unchanged": True,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/discard-pending-revision")
+def discard_pending_live_revision(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Live revisions are available only for Self-Service employees",
+            )
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == int(agent_id),
+            AIAgent.company_id == company.id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        if not isinstance(builder.get("pending_revision"), dict):
+            raise HTTPException(404, "No staged revision is available")
+        builder.pop("pending_revision", None)
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.commit()
+        return {
+            "status": "pending_revision_discarded",
+            "agent_id": agent.id,
+            "live_employee_unchanged": True,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/apply-pending-revision")
+def apply_pending_live_revision(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Atomically replace a live Self-Service employee with its tested staged revision."""
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Live revisions are available only for Self-Service employees",
+            )
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        if not agent.enabled:
+            raise HTTPException(409, "This employee is not live")
+
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = deepcopy(builder.get("pending_revision"))
+        if not isinstance(pending, dict):
+            raise HTTPException(404, "No staged revision is available")
+        pending_spec = pending.get("compiled_spec")
+        if not isinstance(pending_spec, dict):
+            raise HTTPException(409, "Build the staged revision before applying it")
+        compiled_at = str(pending.get("compiled_at") or "").strip()
+        if (
+            not compiled_at
+            or str(pending.get("last_tested_compiled_at") or "").strip()
+            != compiled_at
+        ):
+            raise HTTPException(409, "Test the staged revision before applying it")
+        if str(pending.get("base_compiled_at") or "") != str(
+            builder.get("compiled_at") or ""
+        ):
+            raise HTTPException(
+                409,
+                "The live employee changed after this revision was staged. Rebuild the revision from the current live version.",
+            )
+
+        previous_capabilities = dict(config.capabilities or {})
+        next_capabilities = {
+            str(key): bool(value)
+            for key, value in dict(pending.get("capabilities") or {}).items()
+            if str(key).strip() and bool(value)
+        }
+        desired_channels = set(
+            communication_channels(pending.get("requested_channels") or [])
+        )
+
+        builder = _snapshot_builder_version(
+            builder,
+            reason="before_live_revision",
+            capabilities=previous_capabilities,
+        )
+        _clear_generated_self_service_build(
+            db,
+            company_id=company.id,
+            agent_id=agent.id,
+        )
+
+        for key in (
+            "source_description",
+            "job_brief",
+            "audience",
+            "requested_channels",
+            "permissions",
+            "setup_answers",
+            "compiled_at",
+            "compiler_provider",
+            "compiler_model",
+            "last_tested_at",
+            "last_tested_compiled_at",
+        ):
+            if key in pending:
+                builder[key] = deepcopy(pending[key])
+        builder["compiled_spec"] = deepcopy(pending_spec)
+        builder.pop("pending_revision", None)
+
+        _reconcile_builder_runtime_tools(
+            db,
+            agent_id=agent.id,
+            previous_capabilities=previous_capabilities,
+            next_capabilities=tuple(next_capabilities.keys()),
+        )
+        config.capabilities = next_capabilities
+        agent.description = str(builder.get("source_description") or "").strip()
+
+        settings_value["employee_builder"] = builder
+        compiled_spec = _store_provisioned_spec(
+            db,
+            company_id=company.id,
+            agent=agent,
+            config=config,
+            settings=settings_value,
+            builder=builder,
+            spec=deepcopy(pending_spec),
+        )
+
+        profile = (
+            db.query(AIAgentProfile)
+            .filter(
+                AIAgentProfile.company_id == company.id,
+                AIAgentProfile.agent_id == agent.id,
+            )
+            .first()
+        )
+        if profile is not None:
+            profile.instructions = agent.description
+            profile.business_type = (
+                "personal" if builder.get("audience") == "personal" else None
+            )
+
+        channel_rows = (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.company_id == company.id,
+                AgentChannel.agent_id == agent.id,
+            )
+            .with_for_update()
+            .all()
+        )
+        channels_by_type = {
+            str(row.channel_type or "").strip().lower(): row
+            for row in channel_rows
+        }
+        desired_external = {item for item in desired_channels if item != "xvond"}
+
+        for channel_type, channel in channels_by_type.items():
+            if (
+                channel.enabled
+                and communication_channels([channel_type])
+                and channel_type not in desired_external
+            ):
+                channel.enabled = False
+
+        missing_rows = [
+            item for item in sorted(desired_external)
+            if item not in channels_by_type
+        ]
+        if missing_rows:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "The staged revision needs channel setup before it can replace the live employee",
+                    "blockers": [
+                        f"Configure {item} before applying this revision"
+                        for item in missing_rows
+                    ],
+                },
+            )
+
+        for channel_type in sorted(desired_external):
+            channel = channels_by_type[channel_type]
+            blockers = self_service_channel_activation_blockers(
+                db,
+                company=company,
+                agent=agent,
+                channel=channel,
+            )
+            if blockers:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "message": f"{channel_type} is not ready for the staged revision",
+                        "blockers": blockers,
+                    },
+                )
+            if not channel.enabled:
+                limits_service.check_channel_limit(db, company.id)
+                channel.enabled = True
+                db.flush()
+
+        live = self_service_readiness(
+            db,
+            company=company,
+            agent=agent,
+            config=config,
+        )
+        if not live["ready"]:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "The staged revision is not ready to replace the live employee",
+                    "blockers": live["blockers"],
+                },
+            )
+
+        db.commit()
+        return {
+            **live,
+            "status": "revision_applied",
+            "agent_id": agent.id,
+            "compiled_spec": self_service_spec_view(compiled_spec),
+            "live_employee_replaced_atomically": True,
         }
     except HTTPException:
         db.rollback()
