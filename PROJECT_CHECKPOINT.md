@@ -1,78 +1,120 @@
 # Xvond Project Checkpoint
 
-Last refreshed: 2026-09-15 (Asia/Muscat)
+Last refreshed: 2026-09-18 (Asia/Muscat)
 
-## Canonical architecture
+## Product identity and canonical architecture
 
-Xvond is a modular managed AI operations platform built on Python, FastAPI, PostgreSQL and Redis.
+Xvond is an AI Employee platform. The customer-facing product idea is:
 
-Canonical customer runtime:
+**Build your employee.**
 
-`Customer Channel -> Xvond Core -> AI Employee + Knowledge + Rules -> authorized Action -> Workflow Engine -> execution target -> Xvond result -> Customer`
+The same AI Employee can serve multiple communication surfaces and execute authorized operational work. Channels do not own separate persona or business truth.
+
+Canonical runtime:
+
+`Customer / Trigger -> Xvond Core -> AI Employee + Knowledge + Rules -> authorized Action -> Workflow Engine -> execution target -> Xvond result -> Customer`
 
 Responsibilities are deliberately separated:
 
-- Xvond Core is the product/control plane and AI decision layer.
-- Channels such as Website, WhatsApp and Voice are communication surfaces.
-- One AI Employee may serve multiple channels; channels do not own independent persona or business truth.
-- Xvond validates scope, required fields, customer confirmation, permissions and execution state.
-- The Workflow Engine (self-hosted n8n) is the authoritative side-effect execution plane for operational actions.
+- **Xvond Core** is the product/control plane and AI decision layer.
+- **AI Employee** owns identity, instructions, knowledge access, permissions and behavior.
+- **Channels** such as Website and WhatsApp are communication surfaces attached to the same employee.
+- **Workflow Engine** (self-hosted n8n) is the side-effect execution plane for operational actions.
+- Xvond Core validates scope, permissions, required fields, confirmation, entitlement and execution state.
 - AI providers never call the Workflow Engine directly.
-- The Workflow Engine does not access the Xvond application database directly.
-- Workflow execution uses stable request identity, idempotency and fail-closed results.
+- Workflow Engine does not access the Xvond application database directly.
+- Third-party execution credentials belong to the workflow/integration plane, not to prompts or action payloads.
+- External actions use stable request identity, idempotency and fail-closed results.
+
+## Two intentional delivery models
+
+Xvond has two different delivery models. They must not be collapsed into one lifecycle.
+
+### Xvond Managed
+
+Managed delivery is operator-led and keeps the strict Company Workspace / Delivery Readiness flow.
+
+Typical sequence:
+
+1. Create Company.
+2. Complete Company Profile / Business Information.
+3. Configure commercial entitlement.
+4. Create AI Employee in Draft.
+5. Configure identity/behavior.
+6. Attach real business Knowledge.
+7. Configure Actions only when operational side effects are needed.
+8. Configure the intended customer Channels.
+9. Complete non-customer-facing validation.
+10. Activate Company and move the intended employee through Go Live.
+11. Activate only the intended live channel.
+12. Run controlled real external acceptance before commercial handover.
+
+Managed readiness intentionally remains strict.
+
+### Self-Service — Build your employee
+
+Self-Service is Job-Brief-driven. The Job Brief is the source of truth for what the employee needs.
+
+Canonical sequence:
+
+1. Customer signs up into a Self-Service workspace.
+2. Customer describes the job in an open-ended Job Brief.
+3. Customer chooses an AI Employee service plan.
+4. Xvond builds/compiles the employee specification.
+5. Xvond provisions generated capabilities/actions/automation contracts.
+6. Customer supplies only the inputs and communication channels actually required by the current employee contract.
+7. Readiness evaluates subscription, provider route, compiled requirements, provisioned execution and required channel setup.
+8. Customer launches the employee atomically.
+9. Customer may deactivate, revise the Job Brief, rebuild and relaunch.
+10. Recurring/background work runs through the production automation scheduler when the employee specification requires it.
+
+Important Self-Service rules:
+
+- A personal/background employee may legitimately require **zero communication channels**.
+- Customer-facing channel slots are derived from the current Job Brief plus compiled channel requirements.
+- Stale configured channels from an older Job Brief do not override the current employee contract.
+- Revising a Job Brief while Draft deactivates no-longer-requested communication channels but preserves reusable connection configuration/credentials.
+- Customer Website/WhatsApp setup is rejected at the API layer if that channel is outside the current Self-Service employee contract.
+- A live employee must be deactivated before changing its Website/WhatsApp connection.
+- Real non-Mock AI routing is required in production even for a channel-less employee.
+- Knowledge requirements resolve only from enabled, tenant-owned knowledge actually attached to the employee.
+- Managed delivery rules are not reused as blanket Self-Service blockers.
 
 ## Readiness model
 
 Xvond distinguishes three different facts:
 
-1. **Code ready**: repository CI passes.
-2. **Production ready**: the deployed API, worker, database, Redis, Workflow Engine where required, migrations, backups and routing pass production acceptance.
-3. **Service ready**: the exact sold customer path has passed real end-to-end acceptance with its external providers and channels.
+1. **Code ready** — repository CI passes.
+2. **Production ready** — the reviewed release is actually deployed and API, background workers, database, Redis, routing, Workflow Engine where required, migrations and backup checks pass.
+3. **Service ready** — the exact sold customer path has passed real end-to-end acceptance with its external providers and channels.
 
-Passing CI never proves Meta, Vapi, a customer CRM/POS/calendar, DNS/reverse proxy or off-site storage is live.
+These states are intentionally different. Passing CI never proves Meta, DNS, Nginx, an AI-provider key, a customer CRM/POS/calendar, a Workflow integration route, off-site storage or a real customer channel is live.
 
-## Customer delivery lifecycle
+## Current Core platform
 
-Canonical delivery sequence:
-
-1. Create Company.
-2. Complete Company Profile and AI service subscription.
-3. Create AI Employee in Draft.
-4. Configure employee identity/behavior and attach Knowledge.
-5. Configure Actions only when the employee needs operational side effects.
-6. Configure at least one customer Channel.
-7. Move through onboarding/testing and complete non-customer-facing validation.
-8. Activate the Company once setup readiness passes.
-9. Go Live the AI Employee through Delivery Readiness.
-10. Activate the intended customer Channel.
-11. Run the controlled real-channel acceptance window before announcing the service to the customer.
-12. Verify `ready_for_customer`, complete external acceptance and begin first-day monitoring.
-
-Setup readiness and live readiness are intentionally different. A configured channel is sufficient for company setup; a live channel is required before customer-ready status becomes true. Company deactivation is an emergency stop and disables all AI Employees. Re-enabling an employee requires its normal Go Live gate again.
-
-Because Meta/Vapi and similar providers can only prove real delivery while the production route is enabled, their final external smoke test is a controlled post-activation acceptance step. The service is not commercially handed over merely because the lifecycle flag is `live`.
-
-## Core platform
-
-Current platform includes:
+Implemented platform foundations include:
 
 - tenant-scoped Companies and Users
 - JWT/session revocation and role-based access
+- Managed and Self-Service onboarding separation
+- public open-ended employee builder
 - Company Profile / Business Information
-- modular capabilities
 - AI Employees and provider routing
+- Job Brief compile/provision/revise/rebuild lifecycle
 - Knowledge
 - generic Actions / Action Requests
-- Website, WhatsApp and Voice channels
+- Website and WhatsApp customer setup
+- Voice runtime/provisioning foundations
 - Connected Apps / Integrations metadata
-- Customer Portal / unified Inbox
+- Customer Portal and unified Inbox
 - Usage and provider-cost tracking
-- service billing entitlements and limits
-- automation and analytics foundations
+- canonical service subscriptions/entitlements/limits
+- Self-Service plan selection and pending-payment state
+- recurring automation scheduler
 - audit/runtime observability
-- delivery and production readiness checks
+- production and delivery readiness checks
 - PostgreSQL/Redis production Compose
-- Workflow Engine/n8n with a separate PostgreSQL database
+- Workflow Engine/n8n with separate PostgreSQL
 - local and encrypted off-site backup/restore tooling
 - repeatable production release tooling
 
@@ -84,166 +126,232 @@ Implemented provider adapters:
 - Anthropic / Claude
 - Google / Gemini
 - xAI / Grok
-- Mock for development only
+- Mock for development/testing only
 
-Do not advertise an AI provider as supported until a runtime adapter exists, is configured and has passed the intended production acceptance path.
+Do not advertise a provider as live merely because its adapter exists. It must be configured and pass the intended production acceptance path.
 
-Routing supports company default/fallback selection, eligible-provider ranking, reliability signal, priority, latency/cost signals and first-request failover.
+Routing supports company default/fallback selection, eligible-provider ranking, quality limits, priority, reliability/latency/cost signals and first-request failover.
 
-Business facts are grounded in current company Knowledge or successful action results. The runtime must never claim a booking, order, quotation, cancellation, payment or other action succeeded unless the corresponding action reports success.
+Business facts must come from current Knowledge or successful action results. The runtime must never claim a booking, order, quotation, cancellation, payment or other action succeeded unless the corresponding action reports success.
 
 PII protection is enabled by default in production before content is sent to external AI providers. Protected values are restored locally when required for tool execution and customer-visible output.
 
-Known non-blocking future hardening: after a provider has initiated a provider-specific multi-round tool continuation, that continuation remains on the same provider. Cross-provider continuation-state translation is not implemented.
+Known non-blocking future hardening: once a provider-specific multi-round tool continuation has started, continuation remains on that provider. Cross-provider continuation-state translation is not implemented.
 
 ## Workflow Engine and business actions
 
-The registered customer business-action tool is `WorkflowActionRequestTool`.
+The customer business-action runtime is intentionally generic.
 
-Xvond sends routing metadata and customer/action data to the Workflow Engine but strips credential-like fields from action configuration. External execution credentials belong to the workflow plane.
+Xvond sends safe routing/action metadata to the Workflow Engine and strips credential-like fields from Core action configuration. External provider credentials belong to the workflow plane.
 
-Supported destination model:
+Destination model:
 
-- `xvond_internal`: Workflow Engine calls the private Xvond internal execution endpoint.
-- `integration`: Workflow Engine resolves a company/integration route from its execution registry and invokes the external system.
-- unconfigured/unsupported routes fail closed.
+- `xvond_internal` — Workflow Engine calls the private Xvond internal execution endpoint.
+- `integration` — Workflow Engine resolves a tenant/integration route from its execution registry and invokes the external system.
+- unsupported/unconfigured routes fail closed.
 
-The internal Workflow callback is protected with the shared Xvond/Workflow secret and supports availability, execute and cancel with idempotency receipts.
+The private callback is protected by the shared Xvond/Workflow secret and supports the safe action contract with idempotency receipts.
 
-Configured integration types such as CRM, POS, ERP, calendar, webhook and custom API are routing/configuration contracts. A named integration is not service-ready until its actual provider binding, credentials and end-to-end action path are tested.
+Configured integration types such as CRM, POS, ERP, calendar, webhook, email and custom API are contracts/routing metadata until their real provider bindings and credentials exist in the workflow plane.
 
-Production release requires the Workflow Engine container to pass HTTP health when enabled. An AI Employee with enabled business actions also requires the canonical Workflow Engine `health_check` to succeed before Go Live and during production acceptance.
+**Email/Instagram must not currently be described as service-ready customer connectors merely because a contract or catalog entry exists.**
 
-## Channel architecture
+Production release verifies Workflow Engine health when enabled and, after API cutover, verifies that n8n can reach the new API instance.
+
+## Channel truth
 
 ### Website
 
-- origin/domain validation
-- widget key authentication
-- signed visitor tokens for conversation continuity
-- source tagging into the unified conversation model
-- human-handoff awareness
+Implemented:
 
-A real public-domain smoke test remains required before a sold Website channel is declared service-ready.
+- Self-Service Website setup
+- domain normalization
+- stable widget identity
+- public widget script
+- widget key authentication
+- signed visitor tokens
+- origin validation against the customer domain
+- unified-conversation source tagging
+- human-assistance behavior
+- Draft preparation followed by atomic launch activation
+
+The customer portal only presents Website setup when Website belongs to the current Self-Service employee contract.
+
+A real public-domain smoke test remains mandatory before a sold Website channel is service-ready.
 
 ### WhatsApp
 
+Implemented:
+
 - Meta Cloud API webhook verification/signature validation
 - phone-number routing across tenants
-- idempotency and Redis worker path
-- human-handoff/coexistence awareness
-- outbound delivery handling and provider status tracking
-- Meta Embedded Signup provisioning
-- WhatsApp Business App Coexistence onboarding for eligible client numbers
-- WABA/phone ownership verification and app subscription
-- secrets encrypted at rest
+- inbound deduplication
+- Redis worker queue/lease
+- outbound delivery/status handling
+- human handoff
+- Meta Embedded Signup
+- WhatsApp Business App Coexistence support
+- WABA/phone ownership verification
+- app subscription checks
+- encrypted Meta/customer secrets
+- customer-side connection flow
+- live-edit guard and post-Meta-window race guard
+- Self-Service Job-Brief channel-contract enforcement
 
 WhatsApp exposes two separate truths:
 
-- `connected`: the Meta transport is usable. Embedded Signup data is valid, the phone/token probe succeeds, the Xvond app is subscribed to the WABA and required webhook fields (`messages`, `smb_message_echoes`) are subscribed.
-- `coexistence_ready`: a real WhatsApp Business App echo has been observed, proving the automatic human-takeover path in practice.
+- `connected` — the Meta transport is usable and required app/WABA/webhook setup is present.
+- `coexistence_ready` — a real `smb_message_echoes` event has been observed, proving native WhatsApp Business App human takeover in practice.
 
-A fresh correctly subscribed Coexistence connection may serve AI traffic before the first human echo. The first real Business App reply supplies the echo evidence and activates human control. Missing app/WABA/webhook subscription setup still fails closed.
+Required Meta webhook fields for the intended coexistence path include:
 
-A live Meta customer acceptance remains mandatory before calling WhatsApp service-ready: customer inbound, AI outbound, native Business App human reply, AI suppression during human control, portal handoff/reply, explicit Return to AI and duplicate webhook replay.
+- `messages`
+- `smb_message_echoes`
 
-### Voice
+A correctly subscribed coexistence connection may serve AI traffic before the first native human reply. That first real WhatsApp Business App reply supplies echo evidence and moves that conversation under human control.
 
-- generic authenticated Voice turn contract for non-Vapi providers
-- Vapi dedicated authenticated callback path
-- shared AgentRuntime, Knowledge and Actions
-- voice-specific behavior/provisioning checkpoints
+A live customer acceptance remains mandatory before WhatsApp is called service-ready: customer inbound, AI outbound, native human reply/echo, AI suppression while human owns the conversation, portal handoff/reply, explicit Return to AI and duplicate webhook replay.
 
-Live Voice is not service-ready until a real provider key, phone number and call path are tested end to end.
+### Other communication surfaces
 
-## Security and privacy
+Voice has runtime/provisioning foundations but is not service-ready until a real provider/phone/call path passes end-to-end acceptance.
 
-- current password policy and secure hashing
-- issuer/audience/expiry/token-version session revocation
-- bundled Admin and Customer Portal use HttpOnly SameSite session cookies
-- bearer tokens remain supported for non-browser API clients
-- production cookies use Secure
-- public CORS is credential-free
-- channel/integration/config secrets use encrypted storage
-- external HTTP security includes SSRF controls
-- Xvond Admin is the infrastructure/configuration control plane and does not expose tenant customer-content payloads as an operator inbox
-- Customer Portal remains tenant scoped
+Self-Service direct live channel support currently centers on **Website and WhatsApp**. Other compiled connection requirements must remain truthfully marked as needing an Xvond/provider adapter rather than being shown as magically connectable.
 
-Enterprise-specific governance claims such as formal data-residency commitments, DPA coverage, subprocessor policy or customer-specific retention guarantees must not be sold unless separately implemented and contractually established.
+## Automation scheduler
 
-## Admin UI
+Recurring/background Self-Service employees use the production automation scheduler.
 
-The Company Workspace is the active operator control plane for:
+Release/runtime truth:
 
-- company identity and lifecycle
-- capabilities
-- AI Employees
-- Knowledge
-- Channels
-- Operations metadata/reconciliation
-- Connected Apps
-- Usage
-- Users
-- Billing entitlements
-- logs/readiness
+- scheduler runs the same reviewed application image as the API and WhatsApp worker
+- scheduler publishes a TTL heartbeat to Redis
+- production deploy waits for that heartbeat
+- production acceptance fails closed when scheduler heartbeat is missing
+- schedule execution remains bounded by the generated safe automation/runtime contract
 
-Obsolete duplicate Admin API surfaces should not be reintroduced.
+The scheduler is not arbitrary-code execution.
 
 ## Billing truth
 
-`ServicePlan` / `ServiceSubscription` are the canonical commercial entitlement and limit system. They do not constitute a payment gateway, invoicing ledger or accounting system.
+`ServicePlan` / `ServiceSubscription` are the canonical service entitlement and limit system. They are not a payment gateway, invoice ledger or accounting platform.
 
-Until an automated payment stack is intentionally implemented, payment collection/invoicing may remain an Operations process while Core remains authoritative for service entitlement, periods, limits and usage.
+Self-Service plan flow currently behaves truthfully:
 
-## Data and migrations
+- a free plan can activate entitlement immediately
+- selecting a paid plan creates/keeps `pending_payment`
+- `pending_payment` does **not** grant entitlement
+- repeating the same pending paid selection is idempotent
+- an active subscription is not silently replaced by a customer plan change
+- when Xvond/Admin activates a pending paid subscription, its billing period starts from activation time
 
-The migration chain must build from a fresh PostgreSQL database in CI.
+**There is no real online payment checkout/provider in Xvond Core yet.** Paid-plan selection must not be described as completed payment.
 
-Conversation source metadata is generic:
+## Security and privacy
 
-- `channel_id`
-- `channel_type`
-- `external_contact_id`
+- secure password hashing and password policy
+- issuer/audience/expiry/token-version session revocation
+- HttpOnly SameSite browser sessions in Admin/Customer Portal
+- Secure cookies in production
+- bearer-token support for non-browser API clients
+- credential-free public CORS
+- public Website requests require origin + widget/visitor security
+- encrypted channel/integration/config secrets
+- SSRF controls for outbound HTTP
+- tenant-scoped customer data
+- Xvond Admin is an infrastructure/configuration control plane, not a cross-tenant operator inbox for customer-content payloads
 
-This supports the unified Inbox and future channel adapters without adding channel-specific conversation tables.
+Enterprise governance claims such as formal data-residency commitments, DPA coverage, retention guarantees or subprocessor promises must not be sold unless separately implemented and contractually established.
 
-## CI and release gate
+## Production public routing
 
-GitHub CI runs for pull requests and pushes to `main` or `staging` and checks:
+`PUBLIC_BASE_URL` is the canonical public Xvond Core origin.
+
+Production validation requires it to be a clean HTTPS origin without credentials, path, query or fragment.
+
+The repository Nginx installer:
+
+- reads `PUBLIC_BASE_URL` from the process environment or repository `.env`
+- targets the exact matching `server_name` token
+- does not mistake a sibling/subdomain vhost for the requested host
+- verifies the Core include inside the target server block
+- backs up the active vhost
+- validates with `nginx -t`
+- reloads Nginx
+- restores the prior vhost if validation/reload fails
+
+Canonical server release sequence starts with:
+
+```bash
+python3 scripts/install_nginx_core_routes.py
+./scripts/deploy_production.sh
+```
+
+## CI and production release gate
+
+GitHub CI checks:
 
 1. dependency installation and `pip check`
 2. Python compilation
-3. fresh PostgreSQL `alembic upgrade head`
-4. Admin and Customer JavaScript syntax
-5. shell-script syntax
+3. fresh PostgreSQL migration chain
+4. frontend JavaScript syntax
+5. shell syntax
 6. Meta Embedded Signup tests
 7. production Compose validation
 8. full pytest suite
-9. production Docker image build
+9. production container build
 
-A change is not code-ready until this gate passes.
+Production deploy additionally:
 
-Production deployment should use `scripts/deploy_production.sh`. The release flow validates a clean Git state and Compose configuration, brings database/Redis up, takes a fresh database backup before application replacement, stops the previous WhatsApp worker, builds one reviewed application image, recreates API and worker from that same image, waits for service health, starts and verifies Workflow Engine health when enabled, confirms the API/worker image IDs match and can run customer-specific production acceptance.
+- refuses a dirty Git tree
+- requires the canonical release branch (`main` by default)
+- validates required production environment values and rejects placeholders
+- validates production Compose
+- starts/verifies PostgreSQL and Redis
+- takes a fresh local PostgreSQL backup before application replacement
+- builds one reviewed application image
+- verifies Workflow Engine configuration/contract when enabled
+- stops old WhatsApp/scheduler processes before API cutover
+- recreates the API and waits for readiness
+- verifies n8n -> new API reachability after cutover
+- recreates WhatsApp worker and automation scheduler
+- requires a real WhatsApp Redis worker lease
+- requires a scheduler Redis heartbeat
+- requires API, WhatsApp worker and scheduler to use the same image ID
+- supports customer-specific production acceptance after cutover
 
 ## External validation boundary
 
-The following cannot truthfully be called live-verified by repository CI alone:
+Repository CI cannot truthfully prove:
 
-- deployed server environment/secrets and the exact released image
-- real Meta customer Embedded Signup/Coexistence onboarding
-- real WhatsApp inbound/outbound/human-handoff acceptance on a client number
-- real Voice/Vapi phone call
-- live AI acceptance with the intended production providers
-- real external CRM/POS/ERP/calendar/API action
-- deployed HTTPS/reverse-proxy/CDN acceptance
-- off-site backup restore against the chosen production storage
+- the current server has pulled/deployed the reviewed `main`
+- production `.env` and live secrets are correct
+- the real HTTPS/DNS/Nginx route is serving the released Core
+- Meta customer Embedded Signup/Coexistence works on a real customer number
+- real WhatsApp inbound/outbound/human-handoff works
+- a real Website widget works on a customer domain
+- a real Voice call works
+- the intended production AI providers accept live requests
+- a real CRM/POS/ERP/calendar/email/Instagram/API target executes correctly
+- the chosen off-site backup repository restores correctly
 
-No live provider, Meta, Workflow Engine, Vapi or customer integration secret belongs in Git.
+No live provider, Meta, Workflow Engine, customer-integration or payment secret belongs in Git.
+
+## Current release status at this checkpoint
+
+Repository state through the Self-Service channel-contract work is **code validated**, but this checkpoint does **not** claim that the reviewed release has been deployed to the production server.
+
+Highest-priority remaining external/product work:
+
+1. Deploy the reviewed `main` release to the server using the canonical Nginx + deploy flow.
+2. Run real production end-to-end acceptance for Website, WhatsApp/Meta, Workflow Engine and the intended AI provider.
+3. Implement a real payment provider/checkout/webhook/idempotency path before calling paid Self-Service checkout automated.
+4. Implement and externally validate real Email/Instagram provider adapters before selling them as live connectors.
 
 ## Branch model
 
 - `main` = canonical release branch
-- `staging` = integration mirror and must be kept aligned with a validated released `main`
-- `feat/*` and `fix/*` = temporary change branches
+- `staging` = integration mirror kept aligned through normal merges
+- `feat/*`, `fix/*`, `docs/*` = temporary change branches
 
-After a validated release merge and exact-head CI success, `staging` should be fast-forwarded/aligned to the resulting `main` commit so the branches do not drift.
+Do not force-reset staging merely to make commit graphs look identical. A staging compare may be ahead because of historical sync merge commits; the important release condition is that staging is not missing validated main code.
