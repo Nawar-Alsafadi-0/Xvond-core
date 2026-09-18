@@ -182,12 +182,16 @@ def evaluate_readiness(
     requested = communication_channels(requested_channels)
     required = _requirement_channel_keys(spec)
 
+    active = communication_channels(enabled_channels)
+
     slot_channels = list(requested)
     for item in required:
         if item not in slot_channels:
             slot_channels.append(item)
+    for item in active:
+        if item not in slot_channels:
+            slot_channels.append(item)
 
-    active = communication_channels(enabled_channels)
     # Xvond Workspace is a built-in communication surface and needs no
     # AgentChannel row. If it was requested/required, it is considered active.
     if "xvond" in slot_channels and "xvond" not in active:
@@ -212,7 +216,7 @@ def evaluate_readiness(
 
     blockers.extend(_execution_blockers(spec))
 
-    mode = interaction_mode(spec, requested)
+    mode = interaction_mode(spec, slot_channels)
     channels_required = bool(slot_channels)
 
     return {
