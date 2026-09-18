@@ -12,6 +12,7 @@ from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.integrations.catalog import integration_validation_ready
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.automation.models import AutomationWorkflow
+from backend.app.modules.automation.execution_graph import normalize_execution_graph
 from backend.app.modules.automation.schedule import ScheduleConfigError, normalize_schedule_config
 from backend.app.modules.ai_agent.employee_compiler import normalize_requirement_key
 from backend.app.modules.tools.models import AgentToolAssignment
@@ -455,6 +456,7 @@ def _provision_self_service_schedule(
     agent_id: int,
     requirement: dict,
     action: dict,
+    execution_graph: dict | None = None,
 ) -> tuple[str, int | None]:
     if str(company.onboarding_source or "").strip().lower() != "self_service":
         return "managed_delivery", None
@@ -498,39 +500,99 @@ def _provision_self_service_schedule(
             str(requirement.get("purpose") or key.replace("_", " ")).strip()
             or "Scheduled employee task"
         )
-        workflow_steps: list[dict] = []
-        if "content_generation" in (requirement.get("primitives") or []):
-            workflow_steps.append(
-                {
-                    "type": "ai",
-                    "agent_id": agent_id,
-                    "prompt": (
-                        "Perform this scheduled employee task now. "
-                        f"Task: {task_purpose}. "
-                        "Use the employee's current instructions, knowledge and supplied runtime data. "
-                        "Return only the final content or result that should be passed to the configured action."
-                    )[:2000],
-                }
-            )
-        if "media_generation" in (requirement.get("primitives") or []):
-            workflow_steps.append(
-                {
-                    "type": "media_generation",
-                    "prompt": (
-                        "Create the publishable visual for this scheduled task. "
-                        f"Task: {task_purpose}. "
-                        "Use the generated content from the previous AI step as the primary creative direction."
-                    )[:2000],
-                    "size": "1024x1024",
-                }
-            )
-        workflow_steps.append(
-            {
-                "type": "scheduled_action",
-                "agent_id": agent_id,
-                "action_type": key,
+        compiled_graph = normalize_execution_graph(execution_graph or {})
+        graph_nodes = list(compiled_graph.get("nodes") or [])
+        target_ids = {
+            str(node.get("id") or "")
+            for node in graph_nodes
+            if isinstance(node, dict)
+            and node.get("type") == "action"
+            and str((node.get("params") or {}).get("action_type") or "") == key
+        }
+        if target_ids:
+            by_id = {
+                str(node.get("id") or ""): node
+                for node in graph_nodes
+                if isinstance(node, dict)
             }
-        )
+            keep = set(target_ids)
+            changed_deps = True
+            while changed_deps:
+                changed_deps = False
+                for node_id in list(keep):
+                    node = by_id.get(node_id) or {}
+                    for dep in node.get("depends_on") or []:
+                        if dep not in keep and dep in by_id:
+                            keep.add(dep)
+                            changed_deps = True
+            selected_graph = {
+                "version": compiled_graph.get("version") or 1,
+                "nodes": [
+                    node for node in graph_nodes
+                    if str(node.get("id") or "") in keep
+                ],
+            }
+        else:
+            fallback_nodes: list[dict] = []
+            previous_id = None
+            if "content_generation" in (requirement.get("primitives") or []):
+                previous_id = "generate_content"
+                fallback_nodes.append(
+                    {
+                        "id": previous_id,
+                        "type": "ai",
+                        "depends_on": [],
+                        "params": {
+                            "prompt": (
+                                "Perform this scheduled employee task now. "
+                                f"Task: {task_purpose}. "
+                                "Use the employee's current instructions and knowledge. "
+                                "Return the final content/result for the next step."
+                            )[:2000],
+                        },
+                    }
+                )
+            if "media_generation" in (requirement.get("primitives") or []):
+                deps = [previous_id] if previous_id else []
+                previous_id = "generate_media"
+                fallback_nodes.append(
+                    {
+                        "id": previous_id,
+                        "type": "media",
+                        "depends_on": deps,
+                        "params": {
+                            "prompt": (
+                                "Create the publishable visual for this task."
+                            ),
+                            "size": "1024x1024",
+                        },
+                    }
+                )
+            action_args = {}
+            if any(node.get("id") == "generate_content" for node in fallback_nodes):
+                action_args["caption"] = "$nodes.generate_content.ai_response"
+            if any(node.get("id") == "generate_media" for node in fallback_nodes):
+                action_args["media_url"] = "$nodes.generate_media.media_url"
+            fallback_nodes.append(
+                {
+                    "id": "execute_action",
+                    "type": "action",
+                    "depends_on": [previous_id] if previous_id else [],
+                    "params": {
+                        "action_type": key,
+                        "arguments": action_args,
+                    },
+                }
+            )
+            selected_graph = {"version": 1, "nodes": fallback_nodes}
+
+        workflow_steps = [
+            {
+                "type": "graph",
+                "agent_id": agent_id,
+                "graph": selected_graph,
+            }
+        ]
         workflow = AutomationWorkflow(
             company_id=company.id,
             name=task_purpose[:200],
@@ -678,6 +740,7 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                 agent_id=agent_id,
                 requirement=item,
                 action=action,
+                execution_graph=prepared.get("execution_graph"),
             )
             if schedule_status not in {"ready", "not_required", "managed_delivery"}:
                 execution_status = "setup_required"
