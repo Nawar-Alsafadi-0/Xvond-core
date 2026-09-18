@@ -42,13 +42,13 @@ def test_instagram_publish_creates_container_then_publishes(monkeypatch):
     assert result.data["creation_id"] == "creation-123"
     assert result.data["media_id"] == "media-456"
 
-    assert calls[0]["url"] == "https://graph.facebook.com/178414000/media"
+    assert calls[0]["url"] == "https://graph.facebook.com/v26.0/178414000/media"
     assert calls[0]["headers"]["Authorization"] == "Bearer secret-token"
     assert calls[0]["form_data"] == {
         "image_url": "https://cdn.example.com/post.jpg",
         "caption": "Generated caption",
     }
-    assert calls[1]["url"] == "https://graph.facebook.com/178414000/media_publish"
+    assert calls[1]["url"] == "https://graph.facebook.com/v26.0/178414000/media_publish"
     assert calls[1]["form_data"] == {"creation_id": "creation-123"}
 
 
