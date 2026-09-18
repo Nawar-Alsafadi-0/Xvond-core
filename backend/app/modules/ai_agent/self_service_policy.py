@@ -34,6 +34,7 @@ COMMUNICATION_CHANNELS = frozenset(
 )
 
 EXTERNAL_COMMUNICATION_CHANNELS = COMMUNICATION_CHANNELS - {"xvond"}
+SELF_SERVICE_LIVE_EXTERNAL_CHANNELS = frozenset({"whatsapp", "website"})
 
 
 def is_self_service_company(company: Company | None) -> bool:
@@ -166,7 +167,7 @@ def configured_channel_types(db, *, company_id: int, agent_id: int) -> list[str]
     result: list[str] = []
     for row in rows:
         key = str(row.channel_type or "").strip().lower()
-        if key not in EXTERNAL_COMMUNICATION_CHANNELS or key in result:
+        if key not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS or key in result:
             continue
         try:
             validate_channel_config(key, reveal_config(row.config) or {})
@@ -189,7 +190,7 @@ def self_service_channel_activation_blockers(
 
     if channel.company_id != company.id or channel.agent_id != agent.id:
         return ["Communication channel ownership does not match this employee"]
-    if channel_type not in {"whatsapp", "website"}:
+    if channel_type not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS:
         return [f"{channel_type or 'channel'} is not available for Self-Service launch"]
 
     if not company.active:
