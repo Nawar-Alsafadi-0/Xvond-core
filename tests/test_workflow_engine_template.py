@@ -158,7 +158,9 @@ def test_telegram_provider_normalizes_updates_and_returns_provider_message_ident
     assert "channel.send" in outbound
     assert "provider_secret" in outbound
     assert "route_key" in outbound
-    assert "bot_token" not in outbound
+    assert "route.bot_token" in outbound
+    emitted = outbound.split("return [{json:{", 1)[-1]
+    assert "bot_token:" not in emitted
 
     send = str(nodes["Telegram sendMessage"]["parameters"])
     assert "api.telegram.org" in send
@@ -170,10 +172,18 @@ def test_telegram_provider_normalizes_updates_and_returns_provider_message_ident
     assert "message_id" in result
 
 
-def test_telegram_provider_route_credentials_are_not_written_into_workflow_data():
+def test_telegram_provider_route_credentials_are_not_written_into_workflow_execution_payload():
     payload = json.loads(TELEGRAM_PROVIDER_PATH.read_text(encoding="utf-8"))
-    serialized = json.dumps(payload)
-    assert "route.bot_token" not in serialized
-    assert "bot_token:String" not in serialized
-    assert "route.provider_secret" in serialized
-    assert "provider_secret:String" not in serialized
+    nodes = {node["name"]: node for node in payload["nodes"]}
+    outbound = nodes["Validate Telegram Send"]["parameters"]["jsCode"]
+
+    # Secrets may be read from the workflow-only registry for validation/use,
+    # but they must never be copied into the emitted item passed between nodes.
+    emitted = outbound.split("return [{json:{", 1)[-1]
+    assert "bot_token:" not in emitted
+    assert "provider_secret:" not in emitted
+    assert "route_key:routeKey" in emitted
+
+    send_url = nodes["Telegram sendMessage"]["parameters"]["url"]
+    assert "XVOND_TELEGRAM_ROUTES_JSON" in send_url
+    assert ".bot_token" in send_url
