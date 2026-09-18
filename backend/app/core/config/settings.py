@@ -52,6 +52,7 @@ class Settings:
     XAI_API_KEY = os.getenv("XAI_API_KEY", "")
     N8N_ENABLED = os.getenv("N8N_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "").strip()
+    N8N_CHANNEL_WEBHOOK_URL = os.getenv("N8N_CHANNEL_WEBHOOK_URL", "").strip()
     N8N_SHARED_SECRET = os.getenv("N8N_SHARED_SECRET", "")
     N8N_TIMEOUT_SECONDS = max(1.0, float(os.getenv("N8N_TIMEOUT_SECONDS", "15")))
     N8N_MAX_RETRIES = min(3, max(0, int(os.getenv("N8N_MAX_RETRIES", "1"))))
