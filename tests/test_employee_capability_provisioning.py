@@ -607,6 +607,51 @@ def test_self_service_media_generation_schedule_builds_ai_media_then_action(data
         assert nodes[2]["params"]["arguments"]["media_url"] == "$nodes.generate_media.media_url"
 
 
+def test_self_service_manual_graph_is_provisioned_for_dashboard_worker(database):
+    factory, _ = database
+    brief = "Give me an internal dashboard worker that summarizes the supplied data when I run it."
+    payload = {
+        "role": "Dashboard worker",
+        "scope": "personal",
+        "requirements": [],
+        "permissions": [],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "summarize",
+                    "type": "ai",
+                    "depends_on": [],
+                    "params": {
+                        "prompt": "Summarize the supplied data for the owner."
+                    },
+                }
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "ready"
+    assert trigger["trigger_type"] == "manual"
+    assert trigger["workflow_id"]
+
+    with factory() as db:
+        workflow = db.get(AutomationWorkflow, trigger["workflow_id"])
+        assert workflow.trigger_type == "manual"
+        assert workflow.enabled is True
+        assert workflow.steps[0]["type"] == "graph"
+        assert workflow.steps[0]["graph"]["nodes"][0]["type"] == "ai"
+
+
 def test_self_service_webhook_graph_is_provisioned_when_actions_are_ready(database):
     factory, _ = database
     brief = "When my external system sends an event, notify me automatically."
