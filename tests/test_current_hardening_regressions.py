@@ -36,7 +36,8 @@ def test_shared_runtime_resolves_whatsapp_behavior_from_channel():
     runtime = source("backend/app/core/agent_runtime.py")
     assert "build_runtime_system_prompt" in runtime
     assert 'conversation.channel_type or ""' in runtime
-    assert 'AgentChannel.channel_type == "whatsapp"' in runtime
+    assert "get_channel_capability" in runtime
+    assert "N8N_CHANNEL_ADAPTER" in runtime
     assert "build_text_channel_behavior_prompt" in runtime
     assert "system_prompt=system_prompt" in runtime
 

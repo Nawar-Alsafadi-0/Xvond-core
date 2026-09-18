@@ -13,9 +13,9 @@ from backend.app.modules.ai_agent.self_service_policy import (
     self_service_spec_view,
 )
 from backend.app.modules.channels.catalog import (
-    CHANNEL_RUNTIME_ADAPTER_REQUIRED,
     CHANNEL_RUNTIME_LIVE,
     CHANNEL_SETUP_MANAGED,
+    N8N_CHANNEL_ADAPTER,
     CHANNEL_SETUP_SELF_SERVICE,
     canonical_channel_type,
     get_channel_capability,
@@ -55,7 +55,8 @@ def test_channel_registry_covers_replit_style_employee_surfaces():
 
     for key in expected - {"xvond", "website", "whatsapp", "voice"}:
         assert items[key]["setup_mode"] == CHANNEL_SETUP_MANAGED
-        assert items[key]["runtime_state"] == CHANNEL_RUNTIME_ADAPTER_REQUIRED
+        assert items[key]["runtime_state"] == CHANNEL_RUNTIME_LIVE
+        assert items[key]["runtime_adapter"] == N8N_CHANNEL_ADAPTER
 
 
 def test_channel_aliases_are_canonical_and_do_not_create_parallel_channel_types():
@@ -72,7 +73,7 @@ def test_public_channel_catalog_exposes_delivery_truth_without_configs_or_secret
 
     assert items["website"]["availability"] == "self_service_live"
     assert items["voice"]["availability"] == "xvond_managed_live"
-    assert items["instagram"]["availability"] == "xvond_managed_adapter"
+    assert items["instagram"]["availability"] == "xvond_managed_live"
     assert items["xvond"]["availability"] == "built_in"
 
     for item in payload["channels"]:
@@ -93,8 +94,8 @@ def test_open_ended_builder_detects_managed_and_self_service_channels():
     readiness = blueprint_readiness(blueprint)
     assert readiness["channels"]["whatsapp"] == "connect_required"
     assert readiness["channels"]["voice"] == "xvond_managed_setup"
-    assert readiness["channels"]["instagram"] == "xvond_adapter_required"
-    assert readiness["channels"]["telegram"] == "xvond_adapter_required"
+    assert readiness["channels"]["instagram"] == "xvond_managed_setup"
+    assert readiness["channels"]["telegram"] == "xvond_managed_setup"
 
 
 def test_compiler_cached_channel_view_uses_registry_delivery_truth():
@@ -113,7 +114,9 @@ def test_compiler_cached_channel_view_uses_registry_delivery_truth():
 
     assert rows["voice"]["self_service_connection_status"] == "xvond_managed_available"
     assert rows["voice"]["channel_delivery"]["runtime_state"] == "live"
-    assert rows["telegram"]["self_service_connection_status"] == "xvond_adapter_required"
+    assert rows["telegram"]["self_service_connection_status"] == "xvond_managed_available"
+    assert rows["telegram"]["channel_delivery"]["runtime_adapter"] == "xvond_managed"
+    assert "n8n" not in str(rendered).lower()
     assert rows["instagram_dm"]["channel_delivery"]["type"] == "instagram"
     assert rows["email_send"]["self_service_connection_status"] == "xvond_adapter_required"
 
@@ -154,9 +157,13 @@ def test_managed_channel_requests_are_durable_and_cancel_with_job_contract():
     engine.dispose()
 
 
-def test_only_real_managed_runtime_can_be_prepared_before_launch():
+def test_only_real_managed_runtime_can_be_prepared_before_launch(monkeypatch):
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
+    monkeypatch.setattr(
+        "backend.app.modules.ai_agent.self_service_policy.n8n_gateway.configured",
+        lambda: True,
+    )
     with Session(engine, autoflush=False) as db:
         voice = AgentChannel(
             company_id=1,
@@ -178,43 +185,42 @@ def test_only_real_managed_runtime_can_be_prepared_before_launch():
             agent_id=1,
             channel_type="telegram",
             enabled=False,
-            config={"bot_token": "token", "provisioning_state": "connected"},
+            config={
+                "connection_key": "telegram-main",
+                "provisioning_state": "connected",
+            },
         )
         db.add_all([voice, telegram])
         db.commit()
 
         prepared = configured_channel_types(db, company_id=1, agent_id=1)
         assert "voice" in prepared
-        assert "telegram" not in prepared
+        assert "telegram" in prepared
     engine.dispose()
 
-
-def test_non_live_channel_capability_cannot_be_mistaken_for_runtime():
-    telegram = get_channel_capability("telegram")
-    instagram = get_channel_capability("instagram")
-    assert telegram["runtime_adapter"] is None
-    assert instagram["runtime_adapter"] is None
-    assert telegram["runtime_state"] == CHANNEL_RUNTIME_ADAPTER_REQUIRED
-    assert instagram["runtime_state"] == CHANNEL_RUNTIME_ADAPTER_REQUIRED
+def test_managed_channels_share_one_xvond_runtime_adapter():
+    for key in ("telegram", "instagram", "messenger", "email", "sms", "slack", "teams", "custom"):
+        capability = get_channel_capability(key)
+        assert capability["runtime_adapter"] == N8N_CHANNEL_ADAPTER
+        assert capability["runtime_state"] == CHANNEL_RUNTIME_LIVE
+        assert capability["setup_mode"] == CHANNEL_SETUP_MANAGED
 
 
-def test_adapter_required_channel_cannot_be_activated_by_admin_config():
-    channel = SimpleNamespace(channel_type="telegram")
-    blockers = _activation_blockers(None, channel)
-    assert blockers
-    assert "runtime adapter is not available yet" in blockers[0]
+def test_managed_gateway_channel_requires_connected_provisioning():
+    from backend.app.modules.channels.catalog import validate_channel_config
 
-
-def test_custom_channel_is_registered_but_not_claimed_live_without_gateway():
-    custom = get_channel_capability("custom")
-    assert custom["setup_mode"] == CHANNEL_SETUP_MANAGED
-    assert custom["runtime_state"] == CHANNEL_RUNTIME_ADAPTER_REQUIRED
-    assert custom["runtime_adapter"] is None
+    try:
+        validate_channel_config("telegram", {"connection_key": "telegram-main"})
+    except ValueError as exc:
+        assert "provisioning_state" in str(exc)
+    else:
+        raise AssertionError("Managed channel must not validate before provisioning is connected")
 
 
 def test_customer_inbox_only_counts_channels_with_real_runtime():
     assert "website" in LIVE_INBOX_CHANNELS
     assert "whatsapp" in LIVE_INBOX_CHANNELS
     assert "voice" in LIVE_INBOX_CHANNELS
-    assert "instagram" not in LIVE_INBOX_CHANNELS
-    assert "telegram" not in LIVE_INBOX_CHANNELS
+    assert "instagram" in LIVE_INBOX_CHANNELS
+    assert "telegram" in LIVE_INBOX_CHANNELS
+    assert "email" in LIVE_INBOX_CHANNELS

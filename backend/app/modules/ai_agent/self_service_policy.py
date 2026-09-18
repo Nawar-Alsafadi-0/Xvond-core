@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 from backend.app.core.ai.provider_policy import runtime_selections
 from backend.app.core.config.settings import settings
+from backend.app.core.n8n_gateway import N8NGatewayError, n8n_gateway
 from backend.app.core.config_secrets import reveal_config
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
@@ -25,6 +26,7 @@ from backend.app.modules.channels.catalog import (
     CHANNEL_SETUP_INTERNAL,
     CHANNEL_SETUP_MANAGED,
     CHANNEL_SETUP_SELF_SERVICE,
+    N8N_CHANNEL_ADAPTER,
     canonical_channel_type,
     customer_channel_types,
     get_channel_capability,
@@ -188,7 +190,11 @@ def self_service_spec_view(spec: dict | None) -> dict | None:
                     "name": capability.get("name"),
                     "setup_mode": capability.get("setup_mode"),
                     "runtime_state": capability.get("runtime_state"),
-                    "runtime_adapter": capability.get("runtime_adapter"),
+                    "runtime_adapter": (
+                        "xvond_managed"
+                        if capability.get("setup_mode") == CHANNEL_SETUP_MANAGED
+                        else "xvond_native"
+                    ),
                 }
     return rendered
 
@@ -331,6 +337,11 @@ def configured_channel_types(db, *, company_id: int, agent_id: int) -> list[str]
                     continue
                 if any(not str(config.get(item) or "").strip() for item in required):
                     continue
+            elif capability.get("runtime_adapter") == N8N_CHANNEL_ADAPTER:
+                if not n8n_gateway.configured():
+                    continue
+                if not str(config.get("connection_key") or "").strip():
+                    continue
             else:
                 continue
 
@@ -430,6 +441,29 @@ def self_service_channel_activation_blockers(
             blockers.append("Voice: Xvond managed provisioning is not complete")
         elif any(not str(channel_config.get(key) or "").strip() for key in required):
             blockers.append("Voice: Vapi provisioning evidence is incomplete")
+    elif capability.get("runtime_adapter") == N8N_CHANNEL_ADAPTER:
+        if not n8n_gateway.configured():
+            blockers.append("Xvond managed channel gateway is not configured")
+        else:
+            try:
+                route_check = n8n_gateway.execute(
+                    company_id=company.id,
+                    agent_id=agent.id,
+                    action="channel.check",
+                    data={
+                        "channel_id": channel.id,
+                        "connection_key": str(channel_config.get("connection_key") or "").strip(),
+                    },
+                )
+            except N8NGatewayError:
+                blockers.append("Xvond managed channel route could not be verified")
+            else:
+                if (
+                    route_check.get("success") is not True
+                    or not isinstance(route_check.get("data"), dict)
+                    or route_check["data"].get("configured") is not True
+                ):
+                    blockers.append("Xvond managed channel route is not configured")
 
     return blockers
 

@@ -9,6 +9,7 @@ from backend.app.core.config_secrets import (
     reveal_config,
 )
 from backend.app.core.database.connection import SessionLocal
+from backend.app.core.n8n_gateway import N8NGatewayError, n8n_gateway
 from backend.app.core.dependencies import require_xvond_admin
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
@@ -18,6 +19,7 @@ from backend.app.modules.audit.service import audit_service
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.channels.catalog import (
     CHANNEL_RUNTIME_LIVE,
+    N8N_CHANNEL_ADAPTER,
     canonical_channel_type,
     get_channel_capability,
     get_channel_definition,
@@ -279,6 +281,29 @@ def _activation_blockers(db, channel: AgentChannel) -> list[str]:
             blockers.append("Voice: Xvond managed provisioning is not complete")
         elif any(not str(channel_config.get(item) or "").strip() for item in required):
             blockers.append("Voice: Vapi provisioning evidence is incomplete")
+    elif capability.get("runtime_adapter") == N8N_CHANNEL_ADAPTER:
+        if not n8n_gateway.configured():
+            blockers.append("Xvond managed channel gateway is not configured")
+        else:
+            try:
+                route_check = n8n_gateway.execute(
+                    company_id=channel.company_id,
+                    agent_id=channel.agent_id,
+                    action="channel.check",
+                    data={
+                        "channel_id": channel.id,
+                        "connection_key": str(channel_config.get("connection_key") or "").strip(),
+                    },
+                )
+            except N8NGatewayError:
+                blockers.append("Xvond managed channel route could not be verified")
+            else:
+                if (
+                    route_check.get("success") is not True
+                    or not isinstance(route_check.get("data"), dict)
+                    or route_check["data"].get("configured") is not True
+                ):
+                    blockers.append("Xvond managed channel route is not configured")
 
     docs = (
         db.query(KnowledgeDocument)

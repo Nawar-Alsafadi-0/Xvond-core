@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "adapter": "xvond_managed_channel",
+  "inbound_normalized_message": {
+    "webhook": "xvond-channel-inbound",
+    "required_fields": [
+      "company_id",
+      "agent_id",
+      "channel_id",
+      "channel_type",
+      "external_contact_id",
+      "external_message_id",
+      "message"
+    ],
+    "idempotency": "external_message_id is provider-stable and Xvond deduplicates it per channel",
+    "response_fields": [
+      "success",
+      "conversation_id",
+      "mode",
+      "reply"
+    ]
+  },
+  "outbound_provider_webhook": {
+    "action": "channel.send",
+    "required_fields": [
+      "channel_id",
+      "channel_type",
+      "external_contact_id",
+      "message",
+      "idempotency_key"
+    ],
+    "required_headers": [
+      "X-Xvond-Channel-Secret",
+      "X-Xvond-Request-ID",
+      "Idempotency-Key"
+    ],
+    "response_contract": {
+      "success": "boolean",
+      "request_id": "same request id",
+      "action": "channel.send",
+      "data": "object|null; provider_message_id on confirmed success",
+      "error": "string|null"
+    }
+  },
+  "routing": {
+    "registry_env": "XVOND_CHANNEL_ROUTES_JSON",
+    "key_format": "company_id:connection_key",
+    "provider_credentials": "workflow engine/provider workflow only",
+    "xvond_database_access": false
+  }
+}
