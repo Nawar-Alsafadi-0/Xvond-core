@@ -517,7 +517,6 @@ def _provision_self_service_schedule(
                 "type": "scheduled_action",
                 "agent_id": agent_id,
                 "action_type": key,
-                "summary": task_purpose[:2000],
             }
         )
         workflow = AutomationWorkflow(
