@@ -63,6 +63,7 @@ def run_browser_task(
     start_url: str,
     actions: list[dict] | None = None,
     timeout_seconds: int = 30,
+    allow_interactions: bool = False,
 ) -> dict:
     url = _validate_browser_url(start_url)
     steps = list(actions or [])
@@ -116,6 +117,10 @@ def run_browser_task(
                 if not isinstance(raw, dict):
                     raise BrowserExecutionError(f"Browser action {index} must be an object")
                 op = str(raw.get("op") or "").strip().lower()
+                if op in {"click", "fill", "press", "select"} and not allow_interactions:
+                    raise BrowserExecutionError(
+                        f"Browser action {index} ({op}) requires explicit approval"
+                    )
 
                 try:
                     if op == "goto":
