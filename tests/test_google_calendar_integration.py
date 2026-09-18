@@ -283,3 +283,70 @@ def test_action_runtime_dispatches_calendar_adapter(monkeypatch):
     assert result.success is True
     assert captured["operation"] == "availability"
     assert captured["config"]["calendar_id"] == "primary"
+
+
+def test_google_calendar_refreshes_expired_access_token_once(monkeypatch):
+    calls = []
+    config = {
+        **_config(),
+        "access_token": "expired-token",
+        "refresh_token": "refresh-token",
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+    }
+    monkeypatch.setattr(calendar, "validate_public_http_url", lambda url: url)
+
+    def fake_request(**kwargs):
+        calls.append(kwargs)
+        if kwargs["url"] == "https://oauth2.googleapis.com/token":
+            assert kwargs["form_data"]["refresh_token"] == "refresh-token"
+            return {
+                "status_code": 200,
+                "response": json.dumps({"access_token": "fresh-token"}),
+            }
+        authorization = kwargs["headers"]["Authorization"]
+        if authorization == "Bearer expired-token":
+            return {"status_code": 401, "response": "{}"}
+        assert authorization == "Bearer fresh-token"
+        return {
+            "status_code": 200,
+            "response": json.dumps({"id": "primary"}),
+        }
+
+    monkeypatch.setattr(calendar, "safe_http_request", fake_request)
+
+    result = calendar.validate_google_calendar_connection(config)
+
+    assert result["validated"] is True
+    assert any(call["url"] == "https://oauth2.googleapis.com/token" for call in calls)
+    assert calls[-1]["headers"]["Authorization"] == "Bearer fresh-token"
+
+
+def test_google_calendar_slot_lock_blocks_concurrent_create(monkeypatch):
+    class Claims:
+        def claim(self, key, *, ttl_seconds):
+            assert key.startswith("google_calendar_slot:")
+            assert ttl_seconds == 300
+            return False
+
+        def release(self, key):
+            raise AssertionError("Unacquired slot lock must not be released")
+
+    monkeypatch.setattr(calendar, "execution_claims", Claims())
+
+    with pytest.raises(calendar.CalendarConnectorError) as exc:
+        calendar.google_calendar_create(
+            _config(),
+            {
+                "request_id": 88,
+                "details": {
+                    "customer_name": "Nawar",
+                    "service": "Consultation",
+                    "date": "2026-09-20",
+                    "time": "14:30",
+                },
+            },
+            idempotency_key="stable-key",
+        )
+
+    assert "being booked" in str(exc.value)
