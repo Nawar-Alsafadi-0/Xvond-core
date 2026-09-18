@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 
-COMPILER_VERSION = 2
+COMPILER_VERSION = 3
 
 GENERIC_PRIMITIVES = {
     "workflow_engine",
@@ -133,6 +133,8 @@ _ALLOWED_KINDS = {
     "custom",
 }
 _ALLOWED_PERMISSION_MODES = {"automatic", "ask_before", "never"}
+_ALLOWED_EXECUTION_OPS = {"http_get_json", "extract", "compare", "notify"}
+_ALLOWED_COMPARE_OPERATORS = {"lt", "lte", "gt", "gte", "eq", "neq"}
 
 
 COMPILER_SYSTEM_PROMPT = """You are Xvond's AI Employee Compiler.
@@ -158,7 +160,13 @@ Use this shape:
       "purpose": "why it is needed",
       "requires_connection": false,
       "customer_inputs": [],
-      "primitives": ["workflow_engine"]
+      "primitives": ["workflow_engine"],
+      "execution_plan": [
+        {"id":"fetch","op":"http_get_json","url_field":"url"},
+        {"id":"value","op":"extract","source":"fetch","path":"price"},
+        {"id":"condition","op":"compare","source":"value","operator":"lte","value_field":"target_price"},
+        {"id":"notify","op":"notify","when":"condition","title":"Condition matched","message":"The monitored condition matched."}
+      ]
     }
   ],
   "permissions": [
@@ -176,6 +184,12 @@ Rules:
 - Monitoring and recurring work must include scheduling/workflow primitives.
 - If the job needs private data or an external account, include the relevant connection requirement and customer input.
 - Do not claim a system or account is already connected.
+- For xvond_build work, include execution_plan only when the job can be represented with the allowed runtime ops: http_get_json, extract, compare, notify.
+- execution_plan is declarative data, never code. Do not emit Python, JavaScript, shell commands, SQL, arbitrary HTTP methods, headers, credentials or secrets.
+- http_get_json reads an HTTPS JSON endpoint from a named customer/runtime detail field such as url.
+- extract reads a dot-separated path from a previous step.
+- compare evaluates a previous step against either a literal value or a named runtime detail field.
+- notify creates an idempotent Xvond notification/report; it is not an external email/social/message send.
 """.strip()
 
 
@@ -227,6 +241,64 @@ def _normalized_primitives(values: Any, *, fallback: list[str]) -> list[str]:
         if key in GENERIC_PRIMITIVES and key not in result:
             result.append(key)
     return result or list(fallback)
+
+
+def _normalize_execution_plan(values: Any) -> list[dict]:
+    """Normalize compiler-produced runtime steps into a small declarative DSL.
+
+    This is intentionally not a general code-execution surface. Unknown ops,
+    free-form code, headers, credentials and arbitrary HTTP methods are dropped.
+    """
+    result: list[dict] = []
+    seen_ids: set[str] = set()
+    for raw in values or []:
+        if not isinstance(raw, dict):
+            continue
+        step_id = normalize_requirement_key(raw.get("id"))[:64]
+        op = str(raw.get("op") or "").strip().lower()
+        if not step_id or step_id in seen_ids or op not in _ALLOWED_EXECUTION_OPS:
+            continue
+        step: dict[str, Any] = {"id": step_id, "op": op}
+        if op == "http_get_json":
+            url_field = normalize_requirement_key(raw.get("url_field") or "url")[:80]
+            if not url_field:
+                continue
+            step["url_field"] = url_field
+        elif op == "extract":
+            source = normalize_requirement_key(raw.get("source"))[:64]
+            path = _bounded_text(raw.get("path"), limit=200)
+            if not source or source not in seen_ids or not re.fullmatch(r"[A-Za-z0-9_\\-]+(?:\\.[A-Za-z0-9_\\-]+)*", path):
+                continue
+            step["source"] = source
+            step["path"] = path
+        elif op == "compare":
+            source = normalize_requirement_key(raw.get("source"))[:64]
+            operator = str(raw.get("operator") or "").strip().lower()
+            value_field = normalize_requirement_key(raw.get("value_field"))[:80]
+            literal = raw.get("value")
+            if not source or source not in seen_ids or operator not in _ALLOWED_COMPARE_OPERATORS:
+                continue
+            step["source"] = source
+            step["operator"] = operator
+            if value_field:
+                step["value_field"] = value_field
+            elif isinstance(literal, (str, int, float, bool)) or literal is None:
+                step["value"] = literal
+            else:
+                continue
+        elif op == "notify":
+            when = normalize_requirement_key(raw.get("when"))[:64]
+            if when:
+                if when not in seen_ids:
+                    continue
+                step["when"] = when
+            step["title"] = _bounded_text(raw.get("title"), limit=200) or "Employee update"
+            step["message"] = _bounded_text(raw.get("message"), limit=1000) or "The employee completed a monitored condition."
+        seen_ids.add(step_id)
+        result.append(step)
+        if len(result) >= 20:
+            break
+    return result
 
 
 def normalize_requirement_key(value: Any) -> str:
@@ -309,6 +381,7 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
             "status": status,
             "delivery_mode": delivery_mode,
             "primitives": primitives,
+            "execution_plan": _normalize_execution_plan(item.get("execution_plan")),
             "customer_inputs": customer_inputs,
             "known_to_xvond": bool(catalog),
         })
