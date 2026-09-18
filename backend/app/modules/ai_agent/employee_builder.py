@@ -114,15 +114,18 @@ CHANNEL_KEYWORDS = {
     "telegram": ("telegram", "تيليغرام", "تلغرام", "تليجرام", "تيليجرام"),
     "instagram": (
         "instagram dm", "instagram dms", "instagram messages", "insta dm",
-        "انستغرام", "انستا", "رسائل انستغرام", "رسائل انستا",
+        "reply on instagram", "reply to instagram messages",
+        "رسائل انستغرام", "رسائل انستا", "رد على انستغرام", "رد على انستا",
     ),
     "messenger": (
         "facebook messenger", "messenger", "facebook messages",
         "ماسنجر", "فيسبوك ماسنجر", "رسائل فيسبوك",
     ),
     "email": (
-        "email channel", "email inbox", "reply by email", "emails", "mail",
-        "ايميل", "إيميل", "بريد", "البريد",
+        "email channel", "customer email inbox", "reply by email",
+        "reply to customers by email", "email conversations",
+        "قناة ايميل", "قناة إيميل", "محادثات البريد",
+        "الرد على العملاء بالايميل", "الرد على العملاء بالإيميل",
     ),
     "sms": ("sms", "text message", "text messages", "رسائل نصية", "رسالة نصية"),
     "slack": ("slack", "سلاك"),
