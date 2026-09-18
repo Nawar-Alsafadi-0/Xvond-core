@@ -15,7 +15,8 @@ RUN groupadd --system xvond \
 
 COPY requirements.txt .
 RUN python -m pip install --upgrade pip \
-    && pip install -r requirements.txt
+    && pip install -r requirements.txt \
+    && python -m playwright install --with-deps chromium
 
 COPY --chown=xvond:xvond . .
 RUN chmod +x /app/scripts/container_entrypoint.sh
