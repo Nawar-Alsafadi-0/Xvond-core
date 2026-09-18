@@ -251,7 +251,7 @@ def _billing_gate(
                 ServiceRenewalAttempt.company_id == company_id,
                 ServiceRenewalAttempt.service_subscription_id == subscription.id,
                 ServiceRenewalAttempt.provider == "tap",
-                ServiceRenewalAttempt.status.in_(("sending", "unknown", "failed")),
+                ServiceRenewalAttempt.status.in_(("sending", "submitted", "unknown", "failed")),
             )
             .count()
         )
