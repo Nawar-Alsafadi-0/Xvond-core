@@ -1766,8 +1766,6 @@ def rollback_self_service_employee(
         config = _employee_config_or_404(db, agent)
         db.refresh(config, with_for_update=True)
         db.refresh(agent, with_for_update=True)
-        if agent.enabled:
-            raise HTTPException(409, "Deactivate this employee before rolling it back")
 
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
@@ -1783,25 +1781,80 @@ def rollback_self_service_employee(
         if selected is None:
             raise HTTPException(404, "Employee version not found")
 
+        restored_brief = str(selected.get("source_description") or "").strip()
+        if not restored_brief:
+            raise HTTPException(409, "Selected version has no Job Brief")
+        restored_spec = selected.get("compiled_spec")
+        restored_channels = communication_channels(
+            selected.get("requested_channels") or []
+        )
+        restored_capabilities = dict(selected.get("capabilities") or {})
+
+        if agent.enabled:
+            now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            pending = {
+                "version": 1,
+                "status": "built" if isinstance(restored_spec, dict) else "draft",
+                "source_description": restored_brief,
+                "job_brief": restored_brief,
+                "audience": selected.get("audience"),
+                "requested_channels": restored_channels,
+                "permissions": deepcopy(dict(selected.get("permissions") or {})),
+                "capabilities": restored_capabilities,
+                "setup_answers": deepcopy(dict(selected.get("setup_answers") or {})),
+                "base_compiled_at": builder.get("compiled_at"),
+                "created_at": now_iso,
+                "updated_at": now_iso,
+                "source_version_id": selected.get("id"),
+                "compiled_spec": (
+                    deepcopy(restored_spec)
+                    if isinstance(restored_spec, dict)
+                    else None
+                ),
+                "compiled_at": now_iso if isinstance(restored_spec, dict) else None,
+            }
+            if not isinstance(restored_spec, dict) and _has_ai_agents_entitlement(
+                db, company.id
+            ):
+                staged = _compile_staged_employee_spec(
+                    db,
+                    company_id=company.id,
+                    agent=agent,
+                    job_brief=restored_brief,
+                    requested_channels=restored_channels,
+                    previous_spec=(
+                        builder.get("compiled_spec")
+                        if isinstance(builder.get("compiled_spec"), dict)
+                        else None
+                    ),
+                )
+                pending.update(staged)
+                pending["status"] = "built"
+
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": "rollback_staged",
+                "agent_id": agent.id,
+                "source_version_id": selected.get("id"),
+                "compiled": isinstance(pending.get("compiled_spec"), dict),
+                "live_employee_unchanged": True,
+            }
+
         previous_capabilities = dict(config.capabilities or {})
         builder = _snapshot_builder_version(
             builder,
             reason="before_rollback",
             capabilities=previous_capabilities,
         )
-        restored_brief = str(selected.get("source_description") or "").strip()
-        if not restored_brief:
-            raise HTTPException(409, "Selected version has no Job Brief")
-
         _clear_generated_self_service_build(
             db,
             company_id=company.id,
             agent_id=agent.id,
         )
 
-        restored_spec = selected.get("compiled_spec")
-        restored_channels = communication_channels(selected.get("requested_channels") or [])
-        restored_capabilities = dict(selected.get("capabilities") or {})
         builder["source_description"] = restored_brief
         builder["job_brief"] = restored_brief
         builder["requested_channels"] = restored_channels
