@@ -55,6 +55,13 @@ class Settings:
     N8N_SHARED_SECRET = os.getenv("N8N_SHARED_SECRET", "")
     N8N_TIMEOUT_SECONDS = max(1.0, float(os.getenv("N8N_TIMEOUT_SECONDS", "15")))
     N8N_MAX_RETRIES = min(3, max(0, int(os.getenv("N8N_MAX_RETRIES", "1"))))
+    BILLING_PROVIDER = os.getenv("BILLING_PROVIDER", "none").strip().lower()
+    PADDLE_API_KEY = os.getenv("PADDLE_API_KEY", "").strip()
+    PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
+    PADDLE_ENVIRONMENT = os.getenv("PADDLE_ENVIRONMENT", "sandbox").strip().lower()
+    PADDLE_CHECKOUT_URL = os.getenv("PADDLE_CHECKOUT_URL", "").strip()
+    PADDLE_PRICE_MAP_JSON = os.getenv("PADDLE_PRICE_MAP_JSON", "{}").strip() or "{}"
+    PADDLE_WEBHOOK_TOLERANCE_SECONDS = max(5, int(os.getenv("PADDLE_WEBHOOK_TOLERANCE_SECONDS", "30")))
     KNOWLEDGE_SEMANTIC_ENABLED = os.getenv("KNOWLEDGE_SEMANTIC_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     KNOWLEDGE_EMBEDDING_PROVIDER = os.getenv("KNOWLEDGE_EMBEDDING_PROVIDER", "openai").strip().lower()
     KNOWLEDGE_EMBEDDING_MODEL = os.getenv("KNOWLEDGE_EMBEDDING_MODEL", "text-embedding-3-small").strip()
@@ -87,6 +94,17 @@ class Settings:
             errors.append("ACCESS_TOKEN_EXPIRE_MINUTES must be between 5 and 1440")
         if self.KNOWLEDGE_EMBEDDING_PROVIDER not in {"openai"}:
             errors.append("KNOWLEDGE_EMBEDDING_PROVIDER must be a supported provider")
+        if self.BILLING_PROVIDER not in {"none", "paddle"}:
+            errors.append("BILLING_PROVIDER must be none or paddle")
+        if self.PADDLE_ENVIRONMENT not in {"sandbox", "live"}:
+            errors.append("PADDLE_ENVIRONMENT must be sandbox or live")
+        if self.BILLING_PROVIDER == "paddle":
+            if not self.PADDLE_API_KEY:
+                errors.append("PADDLE_API_KEY is required when Paddle billing is enabled")
+            if not self.PADDLE_WEBHOOK_SECRET:
+                errors.append("PADDLE_WEBHOOK_SECRET is required when Paddle billing is enabled")
+            if self.is_production and self.PADDLE_ENVIRONMENT != "live":
+                errors.append("PADDLE_ENVIRONMENT must be live in production when Paddle billing is enabled")
         if self.N8N_ENABLED:
             if not self.N8N_WEBHOOK_URL:
                 errors.append("N8N_WEBHOOK_URL is required when n8n is enabled")
