@@ -217,6 +217,7 @@ Use this shape:
       "kind": "tool|integration|module|channel|automation|knowledge|permission|custom",
       "purpose": "why it is needed",
       "requires_connection": false,
+      "fulfillment_mode": "xvond_internal|external_connection|auto",
       "customer_inputs": [],
       "primitives": ["workflow_engine"],
       "schedule": {"kind":"interval|daily|weekly","every_minutes":60,"hour":8,"minute":0,"weekdays":[0,1,2,3,4],"timezone":"Asia/Muscat","source_text":"exact cadence/time words copied from the customer Job Brief"},
@@ -243,7 +244,10 @@ Rules:
 - Keep intake field keys stable snake_case identifiers. Labels should be short human-readable labels in the customer's language when practical.
 - intake.known values must be copied from information explicitly present in the Job Brief. Never invent values. Do not place passwords, API keys, access tokens or other credentials in intake.known; credentials belong to protected connection flows.
 - Never use a missing Xvond feature as a reason to reject the job. For a novel digital requirement, return it and give it useful generic primitives so Xvond can compose it.
-- Set requires_connection=true only when the customer must connect an external account, grant access or provide credentials for the work to function.
+- Set requires_connection=true only when the customer explicitly wants to use an existing external account/system, or the requested work inherently depends on one.
+- For capabilities Xvond can provide internally (for example booking/reservations, simple lead capture, forms, lightweight records or schedules), prefer fulfillment_mode=xvond_internal when no external system is explicitly required. Do not force the customer to buy or connect a third-party system merely because one exists.
+- For booking/reservations specifically: if the Job Brief names an existing booking/calendar/provider that must be used, set requires_connection=true and fulfillment_mode=external_connection. Otherwise use fulfillment_mode=xvond_internal and let Xvond provide the booking capability. For internal booking, require only missing operational facts needed to make real slots: working_days, opening_time, closing_time and slot_minutes. Put explicitly stated values in runtime_inputs and only absent values in customer_inputs.
+- Use fulfillment_mode=auto only when the customer's wording genuinely requires a choice that cannot be safely defaulted; prefer a working Xvond-native default over asking unnecessary questions.
 - Separate reading from acting where permissions differ, e.g. email_read and email_send.
 - Customer-selected communication surfaces must be represented as kind=channel requirements using their channel key. Email as a conversation surface is key=email; reading/sending mailbox work remains email_read/email_send. Instagram DM as a conversation surface is key=instagram; publishing remains instagram_publish.
 - Publishing, sending, purchasing, deleting, booking, changing external data, or other consequential external actions should normally use ask_before unless the customer's brief explicitly says to do them automatically.
@@ -553,6 +557,9 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
             declared_kind = "custom"
         catalog = REQUIREMENT_CATALOG.get(key)
         requires_connection = bool(item.get("requires_connection"))
+        fulfillment_mode = str(item.get("fulfillment_mode") or "").strip().lower()
+        if fulfillment_mode not in {"xvond_internal", "external_connection", "auto"}:
+            fulfillment_mode = "external_connection" if requires_connection else "xvond_internal"
         if catalog:
             status = str(catalog["status"])
             delivery_mode = str(catalog["delivery_mode"])
@@ -574,11 +581,33 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
                 fallback=["workflow_engine"],
             )
         customer_inputs = _bounded_string_list(item.get("customer_inputs"))
+        runtime_inputs = _grounded_runtime_inputs(
+            item.get("runtime_inputs"),
+            job_brief=job_brief,
+        )
+
+        # Internal booking gets a deterministic minimum operating contract. The
+        # compiler may ground values from the brief; only missing values become
+        # dynamic setup fields.
+        if key == "booking" and not requires_connection:
+            fulfillment_mode = "xvond_internal"
+            for booking_field in (
+                "working_days",
+                "opening_time",
+                "closing_time",
+                "slot_minutes",
+            ):
+                if booking_field not in runtime_inputs and booking_field not in customer_inputs:
+                    customer_inputs.append(booking_field)
+
+        after_input_status = None
         # Explicit customer prerequisites take precedence over build defaults.
         if requires_connection:
             status = "connection_required"
             delivery_mode = "connect_and_compose"
+            fulfillment_mode = "external_connection"
         elif customer_inputs and status == "xvond_build":
+            after_input_status = "xvond_build"
             status = "customer_input_required"
             delivery_mode = "configure"
         schedule = _normalize_schedule_spec(item.get("schedule"), job_brief=job_brief)
@@ -594,12 +623,12 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
             "delivery_mode": delivery_mode,
             "primitives": primitives,
             "schedule": schedule,
-            "runtime_inputs": _grounded_runtime_inputs(
-                item.get("runtime_inputs"),
-                job_brief=job_brief,
-            ),
+            "runtime_inputs": runtime_inputs,
             "execution_plan": _normalize_execution_plan(item.get("execution_plan")),
             "customer_inputs": customer_inputs,
+            "requires_connection": requires_connection,
+            "fulfillment_mode": fulfillment_mode,
+            "after_input_status": after_input_status,
             "known_to_xvond": bool(catalog),
         })
         if len(requirements) >= 50:
