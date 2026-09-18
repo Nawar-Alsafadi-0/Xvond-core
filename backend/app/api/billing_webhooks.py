@@ -7,6 +7,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 
 from backend.app.core.database.connection import SessionLocal
+from backend.app.core.config_secrets import protect_config
 from backend.app.modules.audit.service import audit_service
 from backend.app.modules.billing.cycle import _add_month
 from backend.app.modules.billing.payment_gateway import (
@@ -17,7 +18,9 @@ from backend.app.modules.billing.payment_gateway import (
 from backend.app.modules.billing.service_models import (
     ServiceCheckout,
     ServicePaymentEvent,
+    ServicePaymentProfile,
     ServicePlan,
+    ServiceRenewalAttempt,
     ServiceSubscription,
 )
 
@@ -255,18 +258,150 @@ def _tap_checkout_from_charge(db, data: dict) -> tuple[ServiceCheckout, ServiceS
     return checkout, subscription
 
 
+def _upsert_tap_payment_profile(
+    db,
+    *,
+    subscription: ServiceSubscription,
+    data: dict,
+) -> ServicePaymentProfile | None:
+    agreement = data.get("payment_agreement")
+    agreement = agreement if isinstance(agreement, dict) else {}
+    contract = agreement.get("contract")
+    contract = contract if isinstance(contract, dict) else {}
+    customer = data.get("customer")
+    customer = customer if isinstance(customer, dict) else {}
+    card = data.get("card")
+    card = card if isinstance(card, dict) else {}
+
+    customer_id = str(
+        customer.get("id")
+        or contract.get("customer_id")
+        or ""
+    ).strip()
+    card_id = str(
+        card.get("id")
+        or (
+            contract.get("id")
+            if str(contract.get("type") or "").upper() == "SAVED_CARD"
+            else ""
+        )
+        or ""
+    ).strip()
+    agreement_id = str(agreement.get("id") or "").strip()
+
+    if not customer_id or not card_id or not agreement_id:
+        return None
+
+    item = (
+        db.query(ServicePaymentProfile)
+        .filter(
+            ServicePaymentProfile.service_subscription_id == subscription.id,
+            ServicePaymentProfile.provider == "tap",
+        )
+        .with_for_update()
+        .first()
+    )
+    config = protect_config(
+        {
+            "provider_customer_token": customer_id,
+            "provider_card_token": card_id,
+            "payment_agreement_token": agreement_id,
+            "card_brand": str(card.get("brand") or "").strip() or None,
+            "card_last4": str(
+                card.get("last_four")
+                or card.get("last4")
+                or ""
+            ).strip() or None,
+        }
+    )
+    if item is None:
+        item = ServicePaymentProfile(
+            company_id=subscription.company_id,
+            service_subscription_id=subscription.id,
+            provider="tap",
+            status="active",
+            provider_config=config,
+        )
+        db.add(item)
+    else:
+        item.company_id = subscription.company_id
+        item.status = "active"
+        item.provider_config = config
+    db.flush()
+    return item
+
+
+def _sync_tap_renewal_attempt(
+    db,
+    *,
+    transaction_id: str,
+    charge_status: str,
+) -> ServiceRenewalAttempt | None:
+    attempt = (
+        db.query(ServiceRenewalAttempt)
+        .filter(
+            ServiceRenewalAttempt.provider == "tap",
+            ServiceRenewalAttempt.provider_transaction_id == transaction_id,
+        )
+        .order_by(ServiceRenewalAttempt.id.desc())
+        .with_for_update()
+        .first()
+    )
+    if attempt is None:
+        return None
+
+    if charge_status == "CAPTURED":
+        attempt.status = "captured"
+        attempt.last_error_code = None
+    elif charge_status == "UNKNOWN":
+        attempt.status = "unknown"
+        attempt.last_error_code = "tap_charge_unknown"
+    elif charge_status in {
+        "ABANDONED",
+        "CANCELLED",
+        "FAILED",
+        "DECLINED",
+        "RESTRICTED",
+        "VOID",
+        "TIMEDOUT",
+    }:
+        attempt.status = "failed"
+        attempt.last_error_code = f"tap_{charge_status.lower()}"
+    else:
+        attempt.status = "submitted"
+    return attempt
+
+
 def _process_tap_charge(db, data: dict) -> dict:
     checkout, subscription = _tap_checkout_from_charge(db, data)
     status = str(data.get("status") or "").strip().upper()
     transaction_id = str(data.get("id") or "").strip()
+    metadata = data.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    recurring_charge = str(metadata.get("xvond_renewal") or "").strip().lower() == "true"
+    now = _utcnow_naive()
+
+    renewal_attempt = _sync_tap_renewal_attempt(
+        db,
+        transaction_id=transaction_id,
+        charge_status=status,
+    )
 
     if status == "CAPTURED":
         checkout.status = "completed"
-        start = _utcnow_naive()
+        if recurring_charge:
+            start = max(subscription.current_period_end, now)
+        else:
+            start = now
         subscription.status = "active"
         subscription.plan_id = checkout.plan_id
         subscription.current_period_start = start
         subscription.current_period_end = _add_month(start)
+        profile = _upsert_tap_payment_profile(
+            db,
+            subscription=subscription,
+            data=data,
+        )
     elif status in {
         "ABANDONED",
         "CANCELLED",
@@ -277,10 +412,17 @@ def _process_tap_charge(db, data: dict) -> dict:
         "TIMEDOUT",
     }:
         checkout.status = "failed"
+        profile = None
+        if recurring_charge and subscription.current_period_end <= now:
+            subscription.status = "past_due"
     elif status == "UNKNOWN":
         checkout.status = "unknown"
+        profile = None
+        if recurring_charge and subscription.current_period_end <= now:
+            subscription.status = "past_due"
     else:
         checkout.status = "pending"
+        profile = None
 
     return {
         "subscription_id": subscription.id,
@@ -290,6 +432,8 @@ def _process_tap_charge(db, data: dict) -> dict:
         "charge_status": status.lower(),
         "transaction_id": transaction_id,
         "checkout_id": checkout.id,
+        "payment_profile_id": profile.id if profile is not None else None,
+        "renewal_attempt_id": renewal_attempt.id if renewal_attempt is not None else None,
     }
 
 @router.post("/paddle")
