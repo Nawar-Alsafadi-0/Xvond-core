@@ -6,6 +6,7 @@ import json
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from backend.app.core.execution_claims import execution_claims
 from backend.app.core.http_security import safe_http_request, validate_public_http_url
 
 
@@ -35,10 +36,52 @@ def _calendar_id(config: dict) -> str:
 
 
 def _access_token(config: dict) -> str:
-    value = str(config.get("access_token") or "").strip()
-    if not value:
-        raise CalendarConnectorError("Calendar access token is required")
-    return value
+    return str(config.get("access_token") or "").strip()
+
+
+def _refresh_credentials(config: dict) -> tuple[str, str, str] | None:
+    refresh_token = str(config.get("refresh_token") or "").strip()
+    client_id = str(config.get("client_id") or "").strip()
+    client_secret = str(config.get("client_secret") or "").strip()
+    if refresh_token and client_id and client_secret:
+        return refresh_token, client_id, client_secret
+    return None
+
+
+def _refresh_access_token(config: dict) -> str:
+    credentials = _refresh_credentials(config)
+    if credentials is None:
+        raise CalendarConnectorError(
+            "Google Calendar needs an access token or OAuth refresh credentials"
+        )
+    refresh_token, client_id, client_secret = credentials
+    try:
+        result = safe_http_request(
+            url=validate_public_http_url("https://oauth2.googleapis.com/token"),
+            method="POST",
+            headers={"Accept": "application/json"},
+            form_data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            timeout=15,
+            max_response_bytes=128_000,
+        )
+    except Exception as exc:
+        raise CalendarConnectorError("Google OAuth token refresh request failed") from exc
+    status = int(result.get("status_code") or 0)
+    if not 200 <= status < 300:
+        raise CalendarConnectorError(f"Google OAuth token refresh returned HTTP {status}")
+    try:
+        body = json.loads(result.get("response") or "{}")
+    except ValueError as exc:
+        raise CalendarConnectorError("Google OAuth token refresh returned invalid JSON") from exc
+    token = str(body.get("access_token") or "").strip() if isinstance(body, dict) else ""
+    if not token:
+        raise CalendarConnectorError("Google OAuth token refresh did not return an access token")
+    return token
 
 
 def _timezone(config: dict) -> ZoneInfo:
@@ -63,12 +106,46 @@ def _slot_minutes(config: dict) -> int:
     return value
 
 
-def _headers(config: dict) -> dict:
+def _headers(access_token: str) -> dict:
+    if not str(access_token or "").strip():
+        raise CalendarConnectorError(
+            "Google Calendar needs an access token or OAuth refresh credentials"
+        )
     return {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {_access_token(config)}",
+        "Authorization": f"Bearer {access_token}",
     }
+
+
+def _authorized_request(
+    config: dict,
+    *,
+    url: str,
+    method: str,
+    json_data=None,
+    timeout: float,
+    max_response_bytes: int,
+) -> dict:
+    token = _access_token(config)
+    if not token:
+        token = _refresh_access_token(config)
+
+    def send(current_token: str) -> dict:
+        return safe_http_request(
+            url=url,
+            method=method,
+            headers=_headers(current_token),
+            json_data=json_data,
+            timeout=timeout,
+            max_response_bytes=max_response_bytes,
+        )
+
+    result = send(token)
+    if int(result.get("status_code") or 0) == 401 and _refresh_credentials(config):
+        token = _refresh_access_token(config)
+        result = send(token)
+    return result
 
 
 def _calendar_url(config: dict, suffix: str = "") -> str:
@@ -100,10 +177,10 @@ def validate_google_calendar_connection(
     zone = _timezone(config)
     _slot_minutes(config)
     try:
-        result = safe_http_request(
+        result = _authorized_request(
+            config,
             url=_calendar_url(config),
             method="GET",
-            headers=_headers(config),
             timeout=timeout,
             max_response_bytes=128_000,
         )
@@ -158,10 +235,10 @@ def _freebusy(
     calendar_id = _calendar_id(config)
     url = validate_public_http_url(f"{_GOOGLE_CALENDAR_API}/freeBusy")
     try:
-        result = safe_http_request(
+        result = _authorized_request(
+            config,
             url=url,
             method="POST",
-            headers=_headers(config),
             json_data={
                 "timeMin": start.isoformat(),
                 "timeMax": end.isoformat(),
@@ -267,10 +344,10 @@ def _event_body(config: dict, payload: dict) -> tuple[str, dict]:
 
 def _event_lookup(config: dict, event_id: str) -> dict | None:
     try:
-        result = safe_http_request(
+        result = _authorized_request(
+            config,
             url=_calendar_url(config, f"/events/{quote(event_id, safe='')}"),
             method="GET",
-            headers=_headers(config),
             timeout=15,
             max_response_bytes=256_000,
         )
@@ -297,24 +374,41 @@ def google_calendar_create(
     if not isinstance(details, dict):
         details = {}
     start, end = _local_interval(config, details)
-    availability = _freebusy(config, start=start, end=end)
-    if availability["busy"]:
-        raise CalendarConnectorError("Requested calendar time is no longer available")
-
-    event_id, body = _event_body(config, payload)
-    try:
-        result = safe_http_request(
-            url=_calendar_url(config, "/events"),
-            method="POST",
-            headers=_headers(config),
-            json_data=body,
-            timeout=20,
-            max_response_bytes=256_000,
-        )
-    except Exception as exc:
+    calendar_scope = hashlib.sha256(
+        _calendar_id(config).encode("utf-8")
+    ).hexdigest()[:16]
+    slot_claim = (
+        f"google_calendar_slot:{calendar_scope}:"
+        f"{start.isoformat()}:{end.isoformat()}"
+    )
+    if not execution_claims.claim(slot_claim, ttl_seconds=300):
         raise CalendarConnectorError(
-            "Google Calendar create request outcome is unknown; reconcile before retrying"
-        ) from exc
+            "This calendar slot is being booked right now; check availability again"
+        )
+
+    try:
+        availability = _freebusy(config, start=start, end=end)
+        if availability["busy"]:
+            raise CalendarConnectorError("Requested calendar time is no longer available")
+
+        event_id, body = _event_body(config, payload)
+        try:
+            result = _authorized_request(
+                config,
+                url=_calendar_url(config, "/events"),
+                method="POST",
+                json_data=body,
+                timeout=20,
+                max_response_bytes=256_000,
+            )
+        except CalendarConnectorError:
+            raise
+        except Exception as exc:
+            raise CalendarConnectorError(
+                "Google Calendar create request outcome is unknown; reconcile before retrying"
+            ) from exc
+    finally:
+        execution_claims.release(slot_claim)
 
     status = int(result.get("status_code") or 0)
     if status == 409:
@@ -345,10 +439,10 @@ def google_calendar_cancel(config: dict, payload: dict) -> dict:
     request_id = int(payload.get("request_id") or 0)
     event_id = _event_id(request_id)
     try:
-        result = safe_http_request(
+        result = _authorized_request(
+            config,
             url=_calendar_url(config, f"/events/{quote(event_id, safe='')}"),
             method="DELETE",
-            headers=_headers(config),
             timeout=20,
             max_response_bytes=64_000,
         )
