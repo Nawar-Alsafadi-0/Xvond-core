@@ -490,6 +490,8 @@ def _provision_self_service_graph_trigger(
         return "managed_delivery", None
 
     graph = normalize_execution_graph(execution_graph or {})
+    if not graph.get("nodes"):
+        return "not_required", None
     trigger = graph.get("trigger") or {"type": "manual"}
     trigger_type = str(trigger.get("type") or "manual").strip().lower()
     if trigger_type not in {"manual", "webhook", "event"}:
