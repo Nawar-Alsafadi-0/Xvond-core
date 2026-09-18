@@ -47,7 +47,7 @@ from backend.app.modules.ai_agent.self_service_policy import (
     self_service_readiness,
     self_service_spec_view,
 )
-from backend.app.modules.automation.models import AutomationWorkflow
+from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.automation.webhook_auth import automation_webhook_key
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
@@ -2493,6 +2493,82 @@ def customer_employee_webhook(
                 company_id=company_id,
             ),
             "idempotency_header": "Idempotency-Key",
+        }
+    finally:
+        db.close()
+
+
+@router.get("/{agent_id}/automation-runs")
+def customer_employee_automation_runs(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        company = _company_or_404(db, company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Automation runs are available for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+
+        workflows = (
+            db.query(AutomationWorkflow)
+            .filter(AutomationWorkflow.company_id == company_id)
+            .order_by(AutomationWorkflow.id.asc())
+            .all()
+        )
+        workflow_ids = []
+        workflow_names = {}
+        for workflow in workflows:
+            config = workflow.trigger_config if isinstance(workflow.trigger_config, dict) else {}
+            if (
+                config.get("_xvond_source") == "self_service_employee"
+                and int(config.get("_xvond_agent_id") or 0) == int(agent_id)
+            ):
+                workflow_ids.append(workflow.id)
+                workflow_names[workflow.id] = workflow.name
+
+        if not workflow_ids:
+            return {"agent_id": agent.id, "runs": []}
+
+        runs = (
+            db.query(AutomationRun)
+            .filter(
+                AutomationRun.company_id == company_id,
+                AutomationRun.workflow_id.in_(workflow_ids),
+            )
+            .order_by(AutomationRun.id.desc())
+            .limit(50)
+            .all()
+        )
+        return {
+            "agent_id": agent.id,
+            "runs": [
+                {
+                    "id": run.id,
+                    "workflow_id": run.workflow_id,
+                    "workflow_name": workflow_names.get(run.workflow_id),
+                    "status": run.status,
+                    "input_data": run.input_data,
+                    "output_data": run.output_data,
+                    "error_message": run.error_message,
+                    "created_at": run.created_at,
+                    "finished_at": run.finished_at,
+                }
+                for run in runs
+            ],
         }
     finally:
         db.close()
