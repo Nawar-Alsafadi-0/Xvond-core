@@ -406,9 +406,17 @@ def test_stored_contract_reaches_generic_runtime_and_fails_closed_without_plan(d
 
 
 def _scheduled_payload(*, permission_mode="automatic", schedule=None):
+    schedule = deepcopy(schedule) if schedule is not None else {
+        "kind": "interval",
+        "every_minutes": 60,
+        "source_text": "every 60 minutes",
+    }
+    source_text = str(schedule.get("source_text") or "every 60 minutes")
+    schedule["source_text"] = source_text
     brief = (
-        "Monitor https://prices.example.com automatically and notify me "
-        "when the value reaches 100."
+        "Monitor https://prices.example.com "
+        + source_text
+        + " automatically and notify me when the value reaches 100."
     )
     payload = {
         "role": "Price monitor",
@@ -420,7 +428,7 @@ def _scheduled_payload(*, permission_mode="automatic", schedule=None):
             "kind": "custom",
             "purpose": "Monitor price",
             "primitives": ["http_api", "scheduler", "workflow_engine"],
-            "schedule": schedule or {"kind": "interval", "every_minutes": 60},
+            "schedule": schedule,
             "runtime_inputs": {
                 "url": "https://prices.example.com",
                 "threshold": 100,
@@ -526,7 +534,7 @@ def test_self_service_schedule_requires_explicit_automatic_permission(database):
 def test_self_service_daily_schedule_inherits_workspace_timezone(database):
     factory, _ = database
     brief, payload = _scheduled_payload(
-        schedule={"kind": "daily", "hour": 8, "minute": 15},
+        schedule={"kind": "daily", "hour": 8, "minute": 15, "source_text": "every day at 8:15"},
     )
     with factory() as db:
         company = db.get(Company, 1)
