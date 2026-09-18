@@ -179,3 +179,34 @@ def test_channel_bridge_rejects_invalid_shared_secret(channel_bridge_database):
             x_xvond_n8n_secret="wrong",
         )
     assert exc.value.status_code == 401
+
+
+def test_retry_does_not_attach_a_later_turns_reply(channel_bridge_database):
+    factory, _calls = channel_bridge_database
+    with factory() as db:
+        conversation = AIConversation(
+            company_id=1,
+            agent_id=1,
+            channel_id=7,
+            channel_type="instagram",
+            external_contact_id="ig-user-retry",
+            title="Retry ordering",
+        )
+        db.add(conversation)
+        db.flush()
+        inbound = AIMessage(
+            conversation_id=conversation.id,
+            role="user",
+            content="first question",
+            source_key="managed-channel:7:retry-old",
+        )
+        db.add(inbound)
+        db.flush()
+        # A newer customer turn comes before its assistant reply. That later
+        # assistant must never be reused as the old inbound message's response.
+        db.add(AIMessage(conversation_id=conversation.id, role="user", content="newer question"))
+        db.add(AIMessage(conversation_id=conversation.id, role="assistant", content="newer answer"))
+        db.commit()
+        db.refresh(inbound)
+
+        assert bridge._existing_reply(db, inbound) is None
