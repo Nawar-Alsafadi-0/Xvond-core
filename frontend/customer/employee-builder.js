@@ -227,6 +227,16 @@
                 <div id="subscription-plans" class="employee-builder-section hidden"></div>
                 <div id="subscription-error" class="error"></div>
                 <div id="prepare-employee-error" class="error"></div>
+                <div id="employee-builder-test-panel" class="employee-builder-section hidden">
+                    <h3>Preview & Test</h3>
+                    <p class="muted">Talk to the current draft. Xvond will not use live channels or execute business actions in this preview.</p>
+                    <div id="employee-builder-test-log" class="chat-box"></div>
+                    <div class="chat-input">
+                        <input id="employee-builder-test-message" maxlength="12000" placeholder="Try a real customer question...">
+                        <button type="button" id="employee-builder-test-send">Send test</button>
+                    </div>
+                    <div id="employee-builder-test-error" class="error"></div>
+                </div>
                 <div id="launch-employee-error" class="error"></div>
             </div>
         `;
@@ -438,6 +448,13 @@
                 await prepareEmployee(employee.agent_id);
                 return;
             }
+            if (actionType === "test_employee") {
+                const panel = document.getElementById("employee-builder-test-panel");
+                panel?.classList.remove("hidden");
+                panel?.scrollIntoView({behavior: "smooth", block: "center"});
+                document.getElementById("employee-builder-test-message")?.focus();
+                return;
+            }
             if (actionType === "launch_employee") {
                 await launchEmployee(employee.agent_id);
                 return;
@@ -550,6 +567,18 @@
         if (saveRevisionButton && revisionInput) {
             saveRevisionButton.addEventListener("click", () => {
                 saveJobBrief(employee.agent_id, revisionInput.value, employee.can_compile);
+            });
+        }
+
+        const testInput = document.getElementById("employee-builder-test-message");
+        const testSend = document.getElementById("employee-builder-test-send");
+        if (testSend && testInput) {
+            testSend.addEventListener("click", () => testEmployee(employee.agent_id));
+            testInput.addEventListener("keydown", event => {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    testEmployee(employee.agent_id);
+                }
             });
         }
 
@@ -680,6 +709,41 @@
             if (error) error.textContent = err?.message || "Could not build employee.";
         } finally {
             if (button) button.disabled = false;
+        }
+    }
+
+    function appendTestMessage(role, message) {
+        const log = document.getElementById("employee-builder-test-log");
+        if (!log) return;
+        log.innerHTML += `<div class="chat-row"><strong>${escapeHtml(role)}</strong><div>${escapeHtml(message)}</div></div>`;
+        log.scrollTop = log.scrollHeight;
+    }
+
+    async function testEmployee(agentId) {
+        const input = document.getElementById("employee-builder-test-message");
+        const button = document.getElementById("employee-builder-test-send");
+        const error = document.getElementById("employee-builder-test-error");
+        const message = String(input?.value || "").trim();
+        if (!message) return;
+        if (error) error.textContent = "";
+        appendTestMessage("You", message);
+        if (input) input.value = "";
+        if (button) button.disabled = true;
+        try {
+            const result = await api(`/customer/employee-builder/${agentId}/test`, {
+                method: "POST",
+                body: JSON.stringify({message})
+            });
+            appendTestMessage("AI Employee", result.message || "");
+            await loadEmployeeBuilder();
+            requestAnimationFrame(() => {
+                const panel = document.getElementById("employee-builder-test-panel");
+                panel?.classList.remove("hidden");
+            });
+        } catch (err) {
+            if (error) error.textContent = err?.message || "Could not test employee.";
+        } finally {
+            if (button && document.body.contains(button)) button.disabled = false;
         }
     }
 
