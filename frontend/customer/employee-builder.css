@@ -355,9 +355,13 @@
     background: #fff;
 }
 
-.employee-builder-setup-answer textarea {
+.employee-builder-setup-answer textarea,
+.employee-builder-setup-answer input {
     width: 100%;
     box-sizing: border-box;
+}
+
+.employee-builder-setup-answer textarea {
     resize: vertical;
 }
 
