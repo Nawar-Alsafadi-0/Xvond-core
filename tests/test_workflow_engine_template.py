@@ -108,7 +108,7 @@ def test_universal_channel_send_is_routed_by_xvond_connection_key():
     assert contracts["policy"]["channel_routes_are_tenant_scoped"] is True
 
 
-def test_inbound_channel_gateway_only_normalizes_and_hands_control_to_xvond():
+def test_inbound_channel_gateway_prefers_core_owned_delivery_with_safe_legacy_cutover():
     payload = json.loads(CHANNEL_INBOUND_PATH.read_text(encoding="utf-8"))
     nodes = {node["name"]: node for node in payload["nodes"]}
 
@@ -120,13 +120,18 @@ def test_inbound_channel_gateway_only_normalizes_and_hands_control_to_xvond():
     assert "external_contact_id" in validate
     assert "external_message_id" in validate
     assert "XVOND_INTERNAL_CHANNEL_URL" in str(nodes["Run Xvond Employee"]["parameters"])
-    assert "Return Channel Result" in nodes
+    assert "Core Owns Delivery?" in nodes
+    gate = str(nodes["Core Owns Delivery?"]["parameters"])
+    assert "delivery.delivery_id" in gate
 
-    # Provider delivery is deliberately NOT performed inside the inbound
-    # workflow. Core first persists durable delivery state, then dispatches the
-    # canonical channel.send action through the master gateway.
-    assert "Prepare Channel Reply" not in nodes
-    assert "Send Channel Reply" not in nodes
-    assert "Provider Delivery Confirmed?" not in nodes
-    assert "Confirm Channel Delivery" not in nodes
-    assert "XVOND_CHANNEL_ROUTES_JSON" not in str(payload)
+    # During deployment the workflow is synced before the new Core container.
+    # Old Core has no delivery object, so the legacy provider path remains as a
+    # temporary compatibility fallback. New Core returns durable delivery state,
+    # causing the workflow to return immediately without a second provider send.
+    assert "Prepare Channel Reply" in nodes
+    assert "Send Channel Reply" in nodes
+    assert "Confirm Channel Delivery" in nodes
+    true_branch = payload["connections"]["Core Owns Delivery?"]["main"][0]
+    false_branch = payload["connections"]["Core Owns Delivery?"]["main"][1]
+    assert true_branch[0]["node"] == "Return Channel Result"
+    assert false_branch[0]["node"] == "Prepare Channel Reply"
