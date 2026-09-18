@@ -2001,3 +2001,88 @@ def test_automation_trace_records_step_lifecycle(monkeypatch):
         assert span["duration_ms"] >= 0
 
     engine.dispose()
+
+
+
+def test_owner_never_permission_skips_scheduled_action_without_side_effect(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Denied Action", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Denied worker",
+                system_prompt="Do not execute denied actions.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "send_report": {
+                            "enabled": False,
+                            "confirmation_required": True,
+                            "_xvond_permission_mode": "never",
+                            "xvond_generated": True,
+                            "destination": {
+                                "type": "xvond_internal",
+                                "adapter": "generic_capability",
+                                "execution_plan": [
+                                    {
+                                        "id": "notify",
+                                        "op": "notify",
+                                        "title": "Report",
+                                        "message": "Sent.",
+                                    }
+                                ],
+                            },
+                        }
+                    }
+                },
+            )
+        )
+        db.commit()
+
+        called = {"count": 0}
+
+        def forbidden(*args, **kwargs):
+            called["count"] += 1
+            raise AssertionError("owner-denied action must not execute")
+
+        monkeypatch.setattr(
+            automation_runtime_module,
+            "execute_generic_capability",
+            forbidden,
+        )
+
+        result = automation_runtime_module.AutomationRuntime().execute_step(
+            db=db,
+            company_id=1,
+            step={
+                "type": "scheduled_action",
+                "agent_id": 1,
+                "action_type": "send_report",
+            },
+            state={"_xvond_execution_key": "denied-action-test"},
+            run_id=1,
+            step_index=0,
+        )
+
+        assert called["count"] == 0
+        assert result["scheduled_action_result"] == {
+            "skipped": True,
+            "reason": "owner_permission_never",
+            "action_type": "send_report",
+        }
+
+    engine.dispose()
