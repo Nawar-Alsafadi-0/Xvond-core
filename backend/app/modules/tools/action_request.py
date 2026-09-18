@@ -14,7 +14,6 @@ from backend.app.modules.channels.handoff import activate_human_handoff
 from backend.app.modules.channels.whatsapp_models import WhatsAppSession
 from backend.app.modules.integrations.catalog import integration_validation_ready
 from backend.app.modules.integrations.models import CompanyIntegration
-from backend.app.modules.automation.event_dispatch import dispatch_automation_event
 from backend.app.modules.tools.base import AgentTool, ToolResult
 from backend.app.modules.tools.business_models import ActionRequest, HumanHandoff
 
@@ -1044,6 +1043,8 @@ class ActionRequestTool(AgentTool):
                 if str(availability.get("mode") or "none") != "none"
                 else f"{request.action_type}.created"
             )
+            from backend.app.modules.automation.event_dispatch import dispatch_automation_event
+
             event_result = dispatch_automation_event(
                 company_id=context["company_id"],
                 event_name=event_name,
