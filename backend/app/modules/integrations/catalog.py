@@ -16,6 +16,12 @@ INTEGRATION_CATALOG = {
                 "required": False,
                 "secret": True,
             },
+            {
+                "name": "validation_endpoint",
+                "label": "Validation Endpoint",
+                "required": true,
+                "secret": false,
+            },
         ],
     },
 
@@ -35,6 +41,12 @@ INTEGRATION_CATALOG = {
                 "required": False,
                 "secret": True,
             },
+            {
+                "name": "validation_endpoint",
+                "label": "Validation Endpoint",
+                "required": true,
+                "secret": false,
+            },
         ],
     },
 
@@ -53,6 +65,12 @@ INTEGRATION_CATALOG = {
                 "label": "API Key",
                 "required": False,
                 "secret": True,
+            },
+            {
+                "name": "validation_endpoint",
+                "label": "Validation Endpoint",
+                "required": true,
+                "secret": false,
             },
         ],
     },
@@ -116,6 +134,12 @@ INTEGRATION_CATALOG = {
                 "label": "API Key",
                 "required": False,
                 "secret": True,
+            },
+            {
+                "name": "validation_endpoint",
+                "label": "Validation Endpoint",
+                "required": true,
+                "secret": false,
             },
         ],
     },
