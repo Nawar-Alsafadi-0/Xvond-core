@@ -40,6 +40,18 @@ def test_internal_adapter_accepts_only_xvond_internal_destination():
     assert "Action is not routed to Xvond Internal" in INTERNAL
 
 
+
+def test_internal_workflow_routes_generic_capability_runtime():
+    assert "generic_capability_readiness" in INTERNAL
+    assert "execute_generic_capability" in INTERNAL
+    assert 'adapter == "generic_capability"' in INTERNAL
+    assert '"runtime": "generic_capability"' in INTERNAL
+
+
+def test_generic_runtime_cancel_does_not_claim_compensating_action():
+    assert "Generic capability cancellation requires an explicit compensating plan" in INTERNAL
+
+
 def test_master_workflow_routes_xvond_internal_to_private_callback():
     assert "Execute Xvond Internal" in WORKFLOW
     assert "XVOND_INTERNAL_ACTION_URL" in WORKFLOW

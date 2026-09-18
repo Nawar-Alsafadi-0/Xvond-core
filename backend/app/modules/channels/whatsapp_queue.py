@@ -16,6 +16,7 @@ class WhatsAppJobQueue:
     retry_key = "xvond:whatsapp:retry"
     worker_lock_key = "xvond:whatsapp:worker-lock"
     retry_delays = (5, 30, 120, 600)
+    human_marker_ttl_seconds = 600
 
     def __init__(self, redis_url: str | None = None):
         self.redis_url = redis_url or settings.REDIS_URL
@@ -177,14 +178,37 @@ class WhatsAppJobQueue:
         digest = hashlib.sha256(f"{phone_number_id}:{wa_id}".encode()).hexdigest()
         return f"xvond:whatsapp:human:{digest}"
 
-    def mark_human(self, phone_number_id: str, wa_id: str, event_id: str) -> None:
+    def mark_human(
+        self,
+        phone_number_id: str,
+        wa_id: str,
+        event_id: str,
+        ttl_seconds: int | None = None,
+    ) -> None:
         if self.client is not None:
-            self.client.set(self._human_key(phone_number_id, wa_id), event_id)
+            ttl = max(
+                60,
+                min(
+                    int(ttl_seconds or self.human_marker_ttl_seconds),
+                    86400,
+                ),
+            )
+            self.client.set(
+                self._human_key(phone_number_id, wa_id),
+                event_id,
+                ex=ttl,
+            )
 
     def human_marker(self, phone_number_id: str, wa_id: str) -> str | None:
         if self.client is None:
             return None
-        return self.client.get(self._human_key(phone_number_id, wa_id))
+        key = self._human_key(phone_number_id, wa_id)
+        marker = self.client.get(key)
+        if marker and int(self.client.ttl(key)) < 0:
+            # Transitional safety for markers written by older releases without
+            # an expiry: bound them instead of allowing permanent human mode.
+            self.client.expire(key, self.human_marker_ttl_seconds)
+        return marker
 
     def clear_human_marker(self, phone_number_id: str, wa_id: str, expected: str | None) -> None:
         if self.client is not None and expected is not None:

@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Xvond — Build your AI employee</title>
+  <style>
+    :root{font-family:Inter,Arial,sans-serif;color:#0f172a;background:#f8fafc}*{box-sizing:border-box}body{margin:0}.wrap{max-width:920px;margin:0 auto;padding:28px 20px 64px}.brand{font-size:28px;font-weight:800;color:#2563eb}.hero{padding:72px 0 34px}.hero h1{font-size:clamp(38px,7vw,72px);line-height:1.05;margin:12px 0}.hero p{font-size:20px;color:#475569;max-width:780px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:24px;box-shadow:0 14px 40px rgba(15,23,42,.06);margin-top:18px}textarea,input{width:100%;border:1px solid #cbd5e1;border-radius:12px;padding:14px 16px;font:inherit;background:#fff}textarea{min-height:190px;resize:vertical}button{border:0;border-radius:12px;padding:13px 18px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff}button:disabled{opacity:.55;cursor:not-allowed}.row{display:flex;gap:10px;flex-wrap:wrap}.muted{color:#64748b}.status{margin-top:12px;color:#b91c1c}.hidden{display:none!important}.chips{display:flex;gap:8px;flex-wrap:wrap}.chip{display:flex;gap:7px;align-items:center;padding:9px 11px;border:1px solid #dbeafe;border-radius:999px;background:#eff6ff}.chip input{width:auto}.auth-tabs{display:flex;gap:8px;margin-bottom:14px}.auth-tabs button{background:#e2e8f0;color:#0f172a}.auth-tabs button.active{background:#2563eb;color:#fff}.success{border-color:#86efac;background:#f0fdf4}.note{margin-top:14px;padding:12px 14px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0}.examples{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:16px 0 0}.example{padding:12px 14px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc;color:#334155;font-size:14px}.ltr{direction:ltr;text-align:left}@media(max-width:720px){.hero{padding-top:40px}.examples{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="brand" dir="ltr">Xvond</div>
+    <section class="hero">
+      <div class="muted" dir="ltr">BUILD WHATEVER AI EMPLOYEE YOU NEED</div>
+      <h1>شو بدك موظفك يعمل؟</h1>
+      <p>احكيلنا الوظيفة أو الشغل اللي بدك ياه مثل ما بتحكي مع شخص. ممكن يكون موظف لشركة، مساعد شخصي، Agent للمتابعة، أو موظف ينفذ مهام بشكل تلقائي.</p>
+      <div class="examples">
+        <div class="example">يقرأ إيميلاتي ويلخص المهم ويرد على أنواع محددة.</div>
+        <div class="example">يرد على العملاء، يحجز مواعيد، ويحوّل لبشري عند اللزوم.</div>
+        <div class="example">يتابع عروض أو أسعار معينة ويخبرني لما يصير تغيير.</div>
+        <div class="example">يولّد محتوى وينشره تلقائيًا على القنوات اللي أوصلها.</div>
+      </div>
+    </section>
+
+    <section id="build-card" class="card">
+      <label for="description">شو بدك منه؟</label>
+      <textarea id="description" placeholder="مثال: بدي موظف شخصي يقرأ إيميلاتي كل صباح، يلخصلي المهم، وإذا كان الإيميل من عميل محتمل يجهز رد مناسب وما يرسله إلا بعد موافقتي."></textarea>
+
+      <label for="employee-name" style="display:block;margin-top:18px">اسم الموظف <span class="muted">(اختياري)</span></label>
+      <input id="employee-name" value="My AI Employee" maxlength="200">
+
+      <div style="margin-top:20px">
+        <h3>قنوات المحادثة <span class="muted" style="font-size:14px;font-weight:400">(اختياري)</span></h3>
+        <p class="muted">إذا الموظف رح يحكي مع عملاء أو أشخاص، اختار القناة. إذا هو شخصي، محتوى، مراقبة أو شغل خلفي، فيك تترك القنوات كلها فاضية.</p>
+        <p class="muted">Gmail، قراءة البريد، Instagram Publishing وباقي الأنظمة تنربط كـ Integrations حسب الوظيفة وما بتنحسب قناة محادثة. عدد القنوات المتاحة لاحقًا حسب الباقة.</p>
+        <div id="channels" class="chips"></div>
+      </div>
+
+      <div class="note muted">البناء والحفظ مجانيان وما بيستخدموا AI مدفوع. نحفظ طلبك كامل كـ Job Brief بدون ما نحصره بقائمة وظائف. بعد الاشتراك يبدأ تشغيل الـAI وربط الأدوات والأنظمة اللازمة حسب الوظيفة.</div>
+      <div class="row" style="margin-top:22px;align-items:center">
+        <button id="create-btn">ابنِ موظفي</button>
+      </div>
+      <div id="create-error" class="status"></div>
+    </section>
+
+    <section id="auth-card" class="card hidden">
+      <h2>سجّل دخول حتى نحفظ طلب الموظف</h2>
+      <p class="muted">الوصف والاختيارات محفوظة. ما رح تعيد شي بعد تسجيل الدخول.</p>
+      <div class="auth-tabs">
+        <button id="login-tab" class="active">تسجيل دخول</button>
+        <button id="signup-tab">إنشاء حساب</button>
+      </div>
+      <div id="login-form">
+        <input id="login-email" class="ltr" type="email" placeholder="Email">
+        <input id="login-password" class="ltr" type="password" placeholder="Password" style="margin-top:10px">
+        <button id="login-btn" style="margin-top:12px">تسجيل دخول وحفظ الطلب</button>
+      </div>
+      <div id="signup-form" class="hidden">
+        <input id="signup-name" placeholder="اسمك">
+        <input id="signup-workspace" placeholder="اسم الشركة أو مساحة العمل (اختياري)" style="margin-top:10px">
+        <input id="signup-email" class="ltr" type="email" placeholder="Email" style="margin-top:10px">
+        <input id="signup-password" class="ltr" type="password" placeholder="Password" style="margin-top:10px">
+        <button id="signup-btn" style="margin-top:12px">إنشاء حساب وحفظ الطلب</button>
+      </div>
+      <div id="auth-error" class="status"></div>
+    </section>
+
+    <section id="success-card" class="card success hidden">
+      <h2>طلب موظفك انحفظ</h2>
+      <p>حفظنا الـJob Brief كامل بدون استخدام AI. من لوحة التحكم بتشترك، وبعدها يبدأ تجهيز وتشغيل الموظف حسب الشغل اللي طلبته.</p>
+      <a href="/customer-ui"><button>افتح لوحة التحكم</button></a>
+    </section>
+  </main>
+
+<script>
+(() => {
+  const CHANNEL_LABELS = {
+    xvond: "Xvond Workspace",
+    website: "Website Chat",
+    whatsapp: "WhatsApp"
+  };
+
+  const $ = id => document.getElementById(id);
+  const show = (id, yes=true) => $(id).classList.toggle("hidden", !yes);
+  const checked = name => Array.from(document.querySelectorAll(`input[name="${name}"]:checked`)).map(x => x.value);
+  const detail = async response => {
+    try { const data = await response.json(); return typeof data.detail === "string" ? data.detail : (data.detail?.message || "حدث خطأ"); }
+    catch { return "حدث خطأ"; }
+  };
+
+  function renderChannels(selectedValues=[]) {
+    const selected = new Set(selectedValues || []);
+    $("channels").innerHTML = Object.entries(CHANNEL_LABELS).map(([value, label]) => `<label class="chip"><input type="checkbox" name="channel" value="${value}" ${selected.has(value) ? "checked" : ""}> ${label}</label>`).join("");
+  }
+
+  const saveDraft = () => sessionStorage.setItem("xvond_employee_draft", JSON.stringify({
+    description: $("description").value.trim(),
+    name: $("employee-name").value.trim() || "My AI Employee",
+    channels: checked("channel")
+  }));
+  const loadDraft = () => { try { return JSON.parse(sessionStorage.getItem("xvond_employee_draft") || "null"); } catch { return null; } };
+
+  async function createEmployee(showAuthOn401=true) {
+    $("create-error").textContent = "";
+    $("auth-error").textContent = "";
+    const description = $("description").value.trim();
+    if (description.length < 8) {
+      $("create-error").textContent = "اكتب شوي أكتر عن الشغل اللي بدك الموظف يعمله.";
+      return false;
+    }
+
+    saveDraft();
+    const draft = loadDraft();
+    $("create-btn").disabled = true;
+    try {
+      const response = await fetch("/customer/employee-builder/create", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(draft)
+      });
+      if (response.ok) {
+        sessionStorage.removeItem("xvond_employee_draft");
+        show("auth-card", false);
+        show("build-card", false);
+        show("success-card", true);
+        $("success-card").scrollIntoView({behavior:"smooth"});
+        return true;
+      }
+      if (response.status === 401 && showAuthOn401) {
+        show("auth-card", true);
+        $("auth-card").scrollIntoView({behavior:"smooth"});
+        return false;
+      }
+      if (response.status === 409) {
+        show("auth-card", false);
+        show("build-card", false);
+        show("success-card", true);
+        $("success-card").querySelector("h2").textContent = "عندك موظف موجود بالفعل";
+        return true;
+      }
+      const message = await detail(response);
+      if (showAuthOn401) $("create-error").textContent = message;
+      else $("auth-error").textContent = message;
+      return false;
+    } finally {
+      $("create-btn").disabled = false;
+    }
+  }
+
+  async function login() {
+    $("auth-error").textContent = "";
+    const response = await fetch("/auth/login", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({email:$("login-email").value.trim(),password:$("login-password").value})
+    });
+    if (!response.ok) { $("auth-error").textContent = await detail(response); return; }
+    await createEmployee(false);
+  }
+
+  async function signup() {
+    $("auth-error").textContent = "";
+    const payload = {
+      full_name:$("signup-name").value.trim(),
+      workspace_name:$("signup-workspace").value.trim() || null,
+      email:$("signup-email").value.trim(),
+      password:$("signup-password").value
+    };
+    const response = await fetch("/auth/signup", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(payload)
+    });
+    if (!response.ok) { $("auth-error").textContent = await detail(response); return; }
+    await createEmployee(false);
+  }
+
+  renderChannels();
+  const saved = loadDraft();
+  if (saved?.description) {
+    $("description").value = saved.description;
+    $("employee-name").value = saved.name || "My AI Employee";
+    renderChannels(saved.channels || []);
+  }
+
+  $("create-btn").addEventListener("click", () => createEmployee(true));
+  $("login-btn").addEventListener("click", login);
+  $("signup-btn").addEventListener("click", signup);
+  $("login-tab").addEventListener("click", () => {
+    $("login-tab").classList.add("active");
+    $("signup-tab").classList.remove("active");
+    show("login-form", true);
+    show("signup-form", false);
+  });
+  $("signup-tab").addEventListener("click", () => {
+    $("signup-tab").classList.add("active");
+    $("login-tab").classList.remove("active");
+    show("signup-form", true);
+    show("login-form", false);
+  });
+})();
+</script>
+</body>
+</html>

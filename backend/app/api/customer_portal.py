@@ -138,6 +138,7 @@ def _company_portal_state(company: Company) -> dict:
         "name": company.name,
         "active": company.active,
         "lifecycle_status": company.lifecycle_status,
+        "onboarding_source": company.onboarding_source,
         "lifecycle_updated_at": company.lifecycle_updated_at,
     }
 
@@ -216,8 +217,20 @@ def overview(current_user: User = Depends(require_customer_user)):
         active_service_codes = [
             item["service_code"] for item in services if item["status"] == "active"
         ]
+
+        has_self_service_employee = bool(
+            company.onboarding_source == "self_service"
+            and db.query(AIAgent.id).filter(AIAgent.company_id == company_id).first()
+        )
+        portal_service_codes = list(active_service_codes)
+        if has_self_service_employee and "ai_agents" not in portal_service_codes:
+            # A self-service draft may be managed in the portal before purchase.
+            # This is display-only and does not create a paid entitlement or
+            # enable runtime/channels.
+            portal_service_codes.append("ai_agents")
+
         navigation = build_customer_portal_navigation(
-            active_service_codes,
+            portal_service_codes,
             enabled_modules,
         )
         navigation.insert(

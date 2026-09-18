@@ -39,29 +39,40 @@ def test_business_app_echo_timestamp_is_normalized_to_utc_naive_datetime():
     assert _business_app_echo_created_at({"timestamp": "bad"}) is None
 
 
-def test_human_takeover_does_not_expire_until_explicit_resume():
-    old_deadline = datetime.utcnow() - timedelta(hours=4)
+def test_business_app_human_takeover_expires_after_inactivity():
+    now = datetime.utcnow()
     session = SimpleNamespace(
         automation_state="ai",
         handoff_reason=None,
-        human_takeover_until=old_deadline,
+        human_takeover_until=None,
         updated_at=None,
         last_human_message_at=None,
+        ai_resumed_at=None,
+        ai_resume_echo_id=None,
     )
 
     activate_human_handoff(
         session,
         reason="business_app_reply",
+        now=now,
         human_message=True,
     )
 
     assert session.automation_state == "human"
-    assert session.human_takeover_until is None
-    assert session.last_human_message_at is not None
-    assert human_handoff_active(session, now=datetime.utcnow() + timedelta(days=7)) is True
-
-    resume_ai(session)
-
+    assert session.human_takeover_until == now + timedelta(minutes=10)
+    assert session.last_human_message_at == now
+    assert human_handoff_active(
+        session,
+        now=now + timedelta(minutes=9, seconds=59),
+    ) is True
+    assert human_handoff_active(
+        session,
+        now=now + timedelta(minutes=10),
+    ) is False
     assert session.automation_state == "ai"
     assert session.handoff_reason is None
+
+    resume_ai(session, now=now + timedelta(minutes=11))
+
+    assert session.automation_state == "ai"
     assert human_handoff_active(session) is False

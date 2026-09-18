@@ -1,9 +1,10 @@
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from redis.exceptions import RedisError
 
 
+DEFAULT_BUSINESS_APP_TAKEOVER_MINUTES = 10
 _ARABIC_DIACRITICS = re.compile(r"[\u064b-\u065f\u0670]")
 _HUMAN_REQUEST_PATTERNS = (
     "موظف",
@@ -40,6 +41,40 @@ def echo_recipient(message_echo: dict) -> str | None:
     return None
 
 
+def _complete_expired_handoff_records(session, current: datetime) -> None:
+    """Close durable handoff rows when a timed Business App takeover expires."""
+
+    company_id = getattr(session, "company_id", None)
+    conversation_id = getattr(session, "conversation_id", None)
+    if company_id is None or conversation_id is None:
+        return
+
+    try:
+        from sqlalchemy.orm import object_session
+
+        db = object_session(session)
+    except Exception:
+        db = None
+    if db is None:
+        return
+
+    from backend.app.modules.tools.business_models import HumanHandoff
+
+    rows = (
+        db.query(HumanHandoff)
+        .filter(
+            HumanHandoff.company_id == company_id,
+            HumanHandoff.conversation_id == conversation_id,
+            HumanHandoff.status.in_(["pending", "in_progress"]),
+        )
+        .all()
+    )
+    for row in rows:
+        row.status = "completed"
+        row.completed_at = current
+        row.updated_at = current
+
+
 def activate_human_handoff(
     session,
     reason: str,
@@ -47,18 +82,40 @@ def activate_human_handoff(
     minutes: int | None = None,
     human_message: bool = False,
 ):
-    """Put the conversation under explicit human control.
+    """Put a conversation under human control.
 
-    Human takeover is intentionally open-ended. The AI resumes only when an
-    authorized user explicitly returns the conversation to AI. ``minutes`` is
-    retained for backwards-compatible call signatures but is no longer used to
-    auto-resume conversations.
+    A real reply from the WhatsApp Business App pauses AI for ten minutes by
+    default. Every newer Business App reply resets that window. Customer
+    requests, portal takeovers, and service fallbacks remain open-ended unless
+    a caller explicitly supplies a positive ``minutes`` value.
     """
     current = now or datetime.utcnow()
+    previous_state = getattr(session, "automation_state", None)
+    previous_reason = getattr(session, "handoff_reason", None)
+    previous_deadline = getattr(session, "human_takeover_until", None)
+
+    takeover_minutes = minutes
+    if reason == "business_app_reply" and takeover_minutes is None:
+        takeover_minutes = DEFAULT_BUSINESS_APP_TAKEOVER_MINUTES
+
+    preserve_business_app_deadline = (
+        reason == "business_app_reply"
+        and not human_message
+        and previous_state == "human"
+        and previous_reason == "business_app_reply"
+        and previous_deadline is not None
+    )
 
     session.automation_state = "human"
     session.handoff_reason = reason
-    session.human_takeover_until = None
+    if preserve_business_app_deadline:
+        session.human_takeover_until = previous_deadline
+    elif takeover_minutes is not None and int(takeover_minutes) > 0:
+        session.human_takeover_until = current + timedelta(
+            minutes=int(takeover_minutes)
+        )
+    else:
+        session.human_takeover_until = None
     session.updated_at = current
 
     if human_message:
@@ -71,9 +128,20 @@ def human_handoff_active(
     session,
     now: datetime | None = None,
 ) -> bool:
-    # Human mode is explicit and does not expire. Only resume_ai() may return
-    # the conversation to automation.
-    return session.automation_state == "human"
+    if getattr(session, "automation_state", None) != "human":
+        return False
+
+    deadline = getattr(session, "human_takeover_until", None)
+    if deadline is None:
+        return True
+
+    current = now or datetime.utcnow()
+    if current < deadline:
+        return True
+
+    _complete_expired_handoff_records(session, current)
+    resume_ai(session, now=current)
+    return False
 
 
 def extend_human_handoff(

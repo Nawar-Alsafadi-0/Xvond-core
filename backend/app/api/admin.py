@@ -61,7 +61,7 @@ def workflow_engine_status(current_admin: User = Depends(require_xvond_operator)
 
 @router.post("/companies")
 def create_company(data: CompanyCreate, current_admin: User = Depends(require_xvond_admin)):
-    """Create an onboarding tenant shell with portal access and AI runtime off."""
+    """Create an Xvond-managed onboarding tenant with portal access and runtime off."""
     name = data.name.strip()
     owner_email = data.owner_email.strip().lower()
     owner_full_name = data.owner_full_name.strip()
@@ -81,7 +81,12 @@ def create_company(data: CompanyCreate, current_admin: User = Depends(require_xv
         existing_user = db.query(User).filter(User.email == owner_email).first()
         if existing_user is not None:
             raise HTTPException(status_code=400, detail="Owner email already exists")
-        company = Company(name=name, active=False, lifecycle_status="onboarding")
+        company = Company(
+            name=name,
+            active=False,
+            lifecycle_status="onboarding",
+            onboarding_source="managed",
+        )
         db.add(company)
         db.flush()
         owner = User(
@@ -110,6 +115,7 @@ def create_company(data: CompanyCreate, current_admin: User = Depends(require_xv
                 "initial_state": "onboarding",
                 "runtime_active": False,
                 "billing_source": "service_subscriptions",
+                "onboarding_source": "managed",
             },
         )
         db.commit()
@@ -121,6 +127,7 @@ def create_company(data: CompanyCreate, current_admin: User = Depends(require_xv
                 "name": company.name,
                 "active": company.active,
                 "lifecycle_status": company.lifecycle_status,
+                "onboarding_source": company.onboarding_source,
             },
             "owner": {
                 "id": owner.id,
@@ -191,6 +198,7 @@ def update_company_lifecycle(
                 "name": company.name,
                 "active": company.active,
                 "lifecycle_status": company.lifecycle_status,
+                "onboarding_source": company.onboarding_source,
                 "lifecycle_updated_at": company.lifecycle_updated_at,
             },
         }
@@ -259,6 +267,7 @@ def update_company_status(
                 "name": company.name,
                 "active": company.active,
                 "lifecycle_status": company.lifecycle_status,
+                "onboarding_source": company.onboarding_source,
             },
         }
     except HTTPException:
@@ -272,10 +281,58 @@ def update_company_status(
 
 
 @router.get("/companies")
-def list_companies(current_admin: User = Depends(require_xvond_operator)):
+def list_companies(
+    source: str | None = None,
+    lifecycle: str | None = None,
+    search: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+    current_admin: User = Depends(require_xvond_operator),
+):
+    """List tenants with optional server-side filters for the admin control plane.
+
+    Omitting every filter preserves the legacy behavior and returns the complete
+    company list, so existing internal callers remain compatible.
+    """
+    normalized_source = str(source or "").strip().lower()
+    if normalized_source and normalized_source not in {"managed", "self_service"}:
+        raise HTTPException(status_code=400, detail="Invalid company source")
+
+    normalized_lifecycle = str(lifecycle or "").strip().lower()
+    allowed_lifecycle = {
+        "onboarding",
+        "testing",
+        "live",
+        "paused",
+        "suspended",
+        "cancelled",
+        "archived",
+    }
+    if normalized_lifecycle and normalized_lifecycle not in allowed_lifecycle:
+        raise HTTPException(status_code=400, detail="Invalid company lifecycle")
+
+    safe_offset = max(0, int(offset or 0))
+    safe_limit = None if limit is None else max(1, min(int(limit), 200))
+    search_term = str(search or "").strip()
+
     db = SessionLocal()
     try:
-        companies = db.query(Company).order_by(Company.id.asc()).all()
+        query = db.query(Company)
+        if normalized_source:
+            query = query.filter(Company.onboarding_source == normalized_source)
+        if normalized_lifecycle:
+            query = query.filter(Company.lifecycle_status == normalized_lifecycle)
+        if search_term:
+            query = query.filter(Company.name.ilike(f"%{search_term}%"))
+
+        total = query.count()
+        ordered = query.order_by(Company.id.asc())
+        if safe_offset:
+            ordered = ordered.offset(safe_offset)
+        if safe_limit is not None:
+            ordered = ordered.limit(safe_limit)
+        companies = ordered.all()
+
         return {
             "companies": [
                 {
@@ -283,11 +340,15 @@ def list_companies(current_admin: User = Depends(require_xvond_operator)):
                     "name": company.name,
                     "active": company.active,
                     "lifecycle_status": company.lifecycle_status,
+                    "onboarding_source": company.onboarding_source,
                     "lifecycle_updated_at": company.lifecycle_updated_at,
                     "created_at": company.created_at,
                 }
                 for company in companies
-            ]
+            ],
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
         }
     finally:
         db.close()

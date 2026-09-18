@@ -32,6 +32,7 @@ async function xvondPauseEmployee(agentId){
 
 function xvondInjectEmployeeProductionControls(){
   if(typeof xvondWorkspace==='undefined'||xvondWorkspace.tab!=='agents'||!xvondWorkspace.data)return;
+  if(String(xvondWorkspace.data?.view?.company?.onboarding_source||'managed')==='self_service')return;
   const content=document.getElementById('workspace-content');
   if(!content||content.querySelector('[data-xvond-employee-production]'))return;
   const agents=xvondWorkspace.data.view?.agents||[];

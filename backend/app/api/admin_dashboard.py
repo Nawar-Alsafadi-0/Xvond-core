@@ -134,6 +134,15 @@ def summary(current_admin: User = Depends(require_xvond_operator)):
 
         companies = db.query(func.count(Company.id)).scalar() or 0
         lifecycle_counts = _lifecycle_counts(db)
+        source_counts = {"managed": 0, "self_service": 0}
+        for source, count in (
+            db.query(Company.onboarding_source, func.count(Company.id))
+            .group_by(Company.onboarding_source)
+            .all()
+        ):
+            key = str(source or "managed").strip().lower()
+            if key in source_counts:
+                source_counts[key] = int(count or 0)
         active_companies = (
             db.query(func.count(Company.id))
             .filter(Company.active.is_(True))
@@ -190,6 +199,7 @@ def summary(current_admin: User = Depends(require_xvond_operator)):
         return {
             "companies": companies,
             "lifecycle_counts": lifecycle_counts,
+            "source_counts": source_counts,
             "active_companies": active_companies,
             "inactive_companies": max(0, companies - active_companies),
             "users": db.query(func.count(User.id)).scalar() or 0,

@@ -1,4 +1,5 @@
 {
+  "id": "77dbf1b8-241b-44ec-b0f8-a16fe415490a",
   "name": "Xvond Actions Gateway",
   "nodes": [
     {
@@ -37,7 +38,7 @@
       "position": [980, 140]
     },
     {
-      "parameters": {"conditions": {"options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2}, "conditions": [{"id": "dispatch-connected-integration", "leftValue": "={{ $json._dispatch }}", "rightValue": "connected_integration", "operator": {"type": "string", "operation": "equals"}}], "combinator": "and"}, "options": {}},
+      "parameters": {"conditions": {"options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2}, "conditions": [{"id":"dispatch-connected-integration","leftValue":"={{ $json._dispatch }}","rightValue":"connected_integration","operator":{"type":"string","operation":"equals"}}],"combinator":"and"},"options":{}},
       "id": "route-connected-integration",
       "name": "Connected Integration?",
       "type": "n8n-nodes-base.if",
@@ -45,7 +46,7 @@
       "position": [980, 380]
     },
     {
-      "parameters": {"method": "POST", "url": "={{ JSON.parse($env.XVOND_WORKFLOW_INTEGRATIONS_JSON || '{}')[$json.route_key].url }}", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "Content-Type", "value": "application/json"}, {"name": "X-Xvond-Integration-Secret", "value": "={{ JSON.parse($env.XVOND_WORKFLOW_INTEGRATIONS_JSON || '{}')[$json.route_key].secret || '' }}"}, {"name": "X-Xvond-Request-ID", "value": "={{ $json.request_id }}"}, {"name": "Idempotency-Key", "value": "={{ $json.data.idempotency_key || '' }}"}]}, "sendBody": true, "contentType": "raw", "rawContentType": "application/json", "body": "={{ JSON.stringify({ company_id: $json.company_id, agent_id: $json.agent_id, conversation_id: $json.conversation_id, integration_id: $json.integration_id, action: $json.action, request_id: $json.request_id, data: $json.data }) }}", "options": {"timeout": 15000}},
+      "parameters": {"method":"POST","url":"={{ JSON.parse($env.XVOND_WORKFLOW_INTEGRATIONS_JSON || '{}')[$json.route_key].url }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Content-Type","value":"application/json"},{"name":"X-Xvond-Integration-Secret","value":"={{ JSON.parse($env.XVOND_WORKFLOW_INTEGRATIONS_JSON || '{}')[$json.route_key].secret || '' }}"},{"name":"X-Xvond-Request-ID","value":"={{ $json.request_id }}"},{"name":"Idempotency-Key","value":"={{ $json.data.idempotency_key || '' }}"}]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({ company_id: $json.company_id, agent_id: $json.agent_id, conversation_id: $json.conversation_id, integration_id: $json.integration_id, action: $json.action, request_id: $json.request_id, data: $json.data }) }}","options":{"timeout":15000}},
       "id": "execute-connected-integration",
       "name": "Execute Connected Integration",
       "type": "n8n-nodes-base.httpRequest",
@@ -53,7 +54,7 @@
       "position": [1220, 300]
     },
     {
-      "parameters": {"respondWith": "json", "responseBody": "={{ $json }}", "options": {}},
+      "parameters": {"respondWith": "firstIncomingItem", "options": {}},
       "id": "xvond-response",
       "name": "Return to Xvond",
       "type": "n8n-nodes-base.respondToWebhook",

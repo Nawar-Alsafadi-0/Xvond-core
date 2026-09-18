@@ -10,6 +10,11 @@ from backend.app.core.config.settings import settings
 from backend.app.core.database.connection import SessionLocal
 from backend.app.modules.tools.action_request import _internal_slots
 from backend.app.modules.tools.business_models import ActionRequest
+from backend.app.modules.tools.generic_capability_runtime import (
+    GenericCapabilityRuntimeError,
+    execute_generic_capability,
+    generic_capability_readiness,
+)
 
 
 router = APIRouter(prefix="/internal/workflow", tags=["Xvond Internal Workflow"])
@@ -56,7 +61,21 @@ def execute_xvond_internal(
 
     db = SessionLocal()
     try:
+        adapter = str((action_config.get("destination") or {}).get("adapter") or "").strip()
         if operation == "check_availability":
+            if adapter == "generic_capability":
+                readiness = generic_capability_readiness(action_config)
+                return {
+                    "success": True,
+                    "action": payload.action,
+                    "request_id": payload.request_id,
+                    "data": {
+                        "available": bool(readiness.get("ready")),
+                        "runtime": "generic_capability",
+                        "reason": readiness.get("reason"),
+                    },
+                    "error": None,
+                }
             details = data.get("details") or {}
             result = _internal_slots(
                 db,
@@ -102,7 +121,36 @@ def execute_xvond_internal(
                 "error": None,
             }
 
-        if operation == "execute":
+        runtime_result = None
+        if adapter == "generic_capability":
+            if operation == "cancel":
+                return {
+                    "success": False,
+                    "action": payload.action,
+                    "request_id": payload.request_id,
+                    "data": {"runtime": "generic_capability"},
+                    "error": "Generic capability cancellation requires an explicit compensating plan",
+                }
+            try:
+                runtime_result = execute_generic_capability(
+                    db,
+                    company_id=payload.company_id,
+                    agent_id=payload.agent_id,
+                    action_type=action_type,
+                    action_config=action_config,
+                    details=data.get("details") or {},
+                    idempotency_key=idempotency_key,
+                )
+            except GenericCapabilityRuntimeError as exc:
+                return {
+                    "success": False,
+                    "action": payload.action,
+                    "request_id": payload.request_id,
+                    "data": {"runtime": "generic_capability"},
+                    "error": str(exc),
+                }
+
+        if operation == "execute" and adapter != "generic_capability":
             availability = action_config.get("availability") or {}
             if str(availability.get("mode") or "none") == "xvond_schedule":
                 availability_result = _internal_slots(
@@ -132,11 +180,14 @@ def execute_xvond_internal(
         details["_xvond_native_execution"] = receipt
         request.details = details
         db.commit()
+        response_data = {"native_execution": receipt, "action_request_id": request.id}
+        if runtime_result is not None:
+            response_data["runtime_result"] = runtime_result
         return {
             "success": True,
             "action": payload.action,
             "request_id": payload.request_id,
-            "data": {"native_execution": receipt, "action_request_id": request.id},
+            "data": response_data,
             "error": None,
         }
     finally:

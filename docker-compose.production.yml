@@ -56,6 +56,24 @@ services:
       redis:
         condition: service_healthy
 
+  automation-scheduler:
+    image: xvond-core:latest
+    container_name: xvond-automation-scheduler
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    entrypoint: []
+    command: ["python", "-m", "scripts.automation_scheduler"]
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      DATABASE_URL: ${DATABASE_URL_DOCKER:?DATABASE_URL_DOCKER is required}
+      AUTOMATION_SCHEDULER_POLL_SECONDS: ${AUTOMATION_SCHEDULER_POLL_SECONDS:-30}
+    depends_on:
+      app:
+        condition: service_healthy
+
   postgres:
     image: postgres:17
     container_name: xvond-postgres
@@ -198,7 +216,8 @@ services:
       N8N_HOST: ${WORKFLOW_HOST:-workflow.xvond.com}
       N8N_PORT: 5678
       N8N_PROTOCOL: https
-      WEBHOOK_URL: ${WORKFLOW_PUBLIC_URL:?WORKFLOW_PUBLIC_URL is required}
+      N8N_WEBHOOK_URL: ${WORKFLOW_PUBLIC_URL:?WORKFLOW_PUBLIC_URL is required}
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
       GENERIC_TIMEZONE: ${WORKFLOW_TIMEZONE:-Asia/Muscat}
       TZ: ${WORKFLOW_TIMEZONE:-Asia/Muscat}
       N8N_DIAGNOSTICS_ENABLED: "false"

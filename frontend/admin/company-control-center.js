@@ -49,49 +49,62 @@ function wsPill(text,kind='neutral'){return `<span class="workspace-pill ${kind}
 function wsEmpty(title,body=''){return `<div class="workspace-empty"><strong>${f(title)}</strong>${body?`<p>${f(body)}</p>`:''}</div>`}
 function wsOption(value,selected,label=null){return `<option value="${f(value)}" ${String(value)===String(selected||'')?'selected':''}>${f(label||value)}</option>`}
 function wsSelect(values,selected,empty='Select'){return `<option value="">${f(empty)}</option>`+(values||[]).map(x=>wsOption(x,selected)).join('')}
-async function wsOptional(path,fallback){try{return await api(path)}catch(_e){return fallback}}
+async function wsOptional(path,fallback,label=null,issues=null){
+  try{return await api(path)}
+  catch(error){
+    if(Array.isArray(issues)&&label)issues.push({label,message:error?.message||"Unavailable"});
+    return fallback;
+  }
+}
 
 async function loadCompanyControlCenter(companyId,tab=null){
   simpleCompanyId=Number(companyId);xvondWorkspace.companyId=Number(companyId);if(tab)xvondWorkspace.tab=tab;
-  const [view,channelResult,moduleResult,catalog,integrations,requests,conversations,usage,profile,setup,handoffs,audit,serviceBilling,servicePlans,users,readiness,unresolved]=await Promise.all([
-    api(`/admin/company-view/${companyId}`),
-    api(`/admin/channels/companies/${companyId}`),
-    api(`/admin/companies/${companyId}/modules`),
-    api('/admin/agent-actions/templates/catalog'),
-    api(`/admin/integrations/companies/${companyId}`),
-    api(`/admin/agent-actions/companies/${companyId}/requests`),
-    api(`/admin/operations/companies/${companyId}/conversations`),
-    api(`/admin/operations/companies/${companyId}/usage`),
-    api(`/admin/company-profile/${companyId}`),
-    api('/admin/setup/catalog'),
-    wsOptional(`/admin/handoff/companies/${companyId}/sessions`,{sessions:[]}),
-    wsOptional(`/admin/audit/?company_id=${companyId}&limit=100`,{logs:[],total:0}),
-    wsOptional(`/admin/service-billing/companies/${companyId}`,{services:[]}),
-    wsOptional('/admin/service-billing/plans',{plans:[]}),
-    wsOptional(`/admin/company-users/companies/${companyId}`,{users:[]}),
-    wsOptional(`/admin/production/companies/${companyId}/readiness`,null),
-    wsOptional(`/admin/operations/companies/${companyId}/external-unresolved`,{requests:[]})
+  const loadIssues=[];
+  const view=await api(`/admin/company-view/${companyId}`);
+  const [channelResult,moduleResult,catalog,integrations,requests,conversations,usage,profile,setup,handoffs,audit,serviceBilling,servicePlans,users,readiness,unresolved]=await Promise.all([
+    wsOptional(`/admin/channels/companies/${companyId}`,{channels:[]},'Channels',loadIssues),
+    wsOptional(`/admin/companies/${companyId}/modules`,{modules:[]},'Company capabilities',loadIssues),
+    wsOptional('/admin/agent-actions/templates/catalog',{templates:[]},'Action catalog',loadIssues),
+    wsOptional(`/admin/integrations/companies/${companyId}`,{integrations:[]},'Integrations',loadIssues),
+    wsOptional(`/admin/agent-actions/companies/${companyId}/requests`,{requests:[]},'Operations',loadIssues),
+    wsOptional(`/admin/operations/companies/${companyId}/conversations`,{conversations:[]},'Conversations',loadIssues),
+    wsOptional(`/admin/operations/companies/${companyId}/usage`,{summary:{},usage:[]},'Usage',loadIssues),
+    wsOptional(`/admin/company-profile/${companyId}`,{company_name:view.company?.name||''},'Company profile',loadIssues),
+    wsOptional('/admin/setup/catalog',{},'Setup catalog',loadIssues),
+    wsOptional(`/admin/handoff/companies/${companyId}/sessions`,{sessions:[]},'Handoff sessions',loadIssues),
+    wsOptional(`/admin/audit/?company_id=${companyId}&limit=100`,{logs:[],total:0},'Audit trail',loadIssues),
+    wsOptional(`/admin/service-billing/companies/${companyId}`,{services:[]},'Billing',loadIssues),
+    wsOptional('/admin/service-billing/plans',{plans:[]},'Plan catalog',loadIssues),
+    wsOptional(`/admin/company-users/companies/${companyId}`,{users:[]},'Company users',loadIssues),
+    wsOptional(`/admin/production/companies/${companyId}/readiness`,null,'Managed delivery readiness',loadIssues),
+    wsOptional(`/admin/operations/companies/${companyId}/external-unresolved`,{requests:[]},'External reconciliation',loadIssues)
   ]);
   const agentMeta=await Promise.all((view.agents||[]).map(async agent=>{
     const [agentProfile,knowledge,actions]=await Promise.all([
-      wsOptional(`/admin/ai-employee-profile/companies/${companyId}/${agent.id}`,{name:agent.name}),
-      wsOptional(`/admin/ai-employees/companies/${companyId}/${agent.id}/knowledge`,{items:[]}),
-      wsOptional(`/admin/agent-actions/${agent.id}`,{actions:[],ready:false})
+      wsOptional(`/admin/ai-employee-profile/companies/${companyId}/${agent.id}`,{name:agent.name},`${agent.name} profile`,loadIssues),
+      wsOptional(`/admin/ai-employees/companies/${companyId}/${agent.id}/knowledge`,{items:[]},`${agent.name} knowledge`,loadIssues),
+      wsOptional(`/admin/agent-actions/${agent.id}`,{actions:[],ready:false},`${agent.name} actions`,loadIssues)
     ]);
     return {agent,profile:agentProfile,knowledge:knowledge.items||[],actions:actions.actions||[],operationsReady:!!actions.ready};
   }));
   const billingServices=serviceBilling.services||[];
-  xvondWorkspace.data={view,channels:channelResult.channels||[],modules:moduleResult.modules||[],catalog,integrations:integrations.integrations||[],requests:requests.requests||[],conversations:conversations.conversations||[],usage,profile,setup,handoffs:handoffs.sessions||[],audit:audit.logs||[],billingServices,plans:servicePlans.plans||[],users:(users.users&&users.users.length?users.users:view.users)||[],readiness,unresolved:unresolved.requests||[],agentMeta};
+  xvondWorkspace.data={view,channels:channelResult.channels||[],modules:moduleResult.modules||[],catalog,integrations:integrations.integrations||[],requests:requests.requests||[],conversations:conversations.conversations||[],usage,profile,setup,handoffs:handoffs.sessions||[],audit:audit.logs||[],billingServices,plans:servicePlans.plans||[],users:(users.users&&users.users.length?users.users:view.users)||[],readiness,unresolved:unresolved.requests||[],agentMeta,loadIssues};
   renderCompanyControlCenter();
 }
 
 function renderCompanyControlCenter(){
   const d=xvondWorkspace.data;if(!d)return;const c=d.view.company,p=d.profile||{};
+  const selfService=String(c.onboarding_source||'managed')==='self_service';
   document.querySelectorAll('.page').forEach(x=>x.classList.add('hidden'));
   document.getElementById('page-company-detail').classList.remove('hidden');
   document.getElementById('page-title').textContent=c.name;
-  const tabs=[['overview','Overview'],['company','Company'],['capabilities','Capabilities'],['agents','AI Employees'],['knowledge','Knowledge'],['channels','Channels'],['operations','Operations'],['integrations','Integrations'],['conversations','Conversations'],['usage','Usage'],['users','Users'],['billing','Billing'],['logs','Logs']];
-  document.getElementById('company-detail').innerHTML=`<div class="workspace-shell"><div class="workspace-hero"><div><div class="workspace-eyebrow">Company Workspace</div><h2>${f(c.name)}</h2><div class="workspace-subtitle">${f(p.business_type||'Business type not set')}${p.country?` · ${f(p.country)}`:''}</div></div><div class="workspace-hero-actions">${wsPill(c.active?'Active':'Inactive',c.active?'good':'bad')}<button class="table-button" onclick="toggleWorkspaceCompany(${!c.active})">${c.active?'Deactivate':'Activate'}</button><button class="primary-button" onclick="openCompanyIdentityEditor()">Edit Company</button></div></div><div class="workspace-tabs">${tabs.map(([key,label])=>`<button class="workspace-tab ${xvondWorkspace.tab===key?'active':''}" onclick="switchWorkspaceTab('${key}')">${label}</button>`).join('')}</div><div id="workspace-content">${renderWorkspaceTab()}</div></div>`;
+  const tabs=selfService
+    ?[['overview','Overview'],['company','Workspace'],['agents','AI Employees'],['knowledge','Knowledge'],['channels','Connections'],['operations','Operations'],['integrations','Integrations'],['usage','Usage'],['users','Users'],['billing','Billing'],['logs','Audit']]
+    :[['overview','Overview'],['company','Company'],['capabilities','Capabilities'],['agents','AI Employees'],['knowledge','Knowledge'],['channels','Channels'],['operations','Operations'],['integrations','Integrations'],['conversations','Conversations'],['usage','Usage'],['users','Users'],['billing','Billing'],['logs','Audit']];
+  const sourceLabel=selfService?'Self-Service Workspace':'Managed Delivery Workspace';
+  const sourcePill=wsPill(selfService?'Self-Service':'Managed by Xvond',selfService?'good':'neutral');
+  const managedActions=selfService?'':`<button class="primary-button" onclick="openCompanyIdentityEditor()">Edit Company</button>`;
+  document.getElementById('company-detail').innerHTML=`<div class="workspace-shell"><div class="workspace-hero"><div><div class="workspace-eyebrow">${sourceLabel}</div><h2>${f(c.name)}</h2><div class="workspace-subtitle">${f(p.business_type||'Business type not set')}${p.country?` · ${f(p.country)}`:''}</div></div><div class="workspace-hero-actions">${sourcePill}${wsPill(c.active?'Runtime Active':'Runtime Stopped',c.active?'good':'bad')}${managedActions}</div></div><div class="workspace-tabs">${tabs.map(([key,label])=>`<button class="workspace-tab ${xvondWorkspace.tab===key?'active':''}" onclick="switchWorkspaceTab('${key}')">${label}</button>`).join('')}</div><div id="workspace-content">${renderWorkspaceTab()}</div></div>`;
 }
 function switchWorkspaceTab(tab){xvondWorkspace.tab=tab;renderCompanyControlCenter()}
 function renderWorkspaceTab(){switch(xvondWorkspace.tab){case'company':return renderCompanyProfileTab();case'capabilities':return renderCapabilitiesTab();case'agents':return renderAgentsTab();case'knowledge':return renderKnowledgeTab();case'channels':return renderChannelsTab();case'operations':return renderOperationsTab();case'integrations':return renderIntegrationsTab();case'conversations':return renderConversationsTab();case'usage':return renderUsageTab();case'users':return renderUsersTab();case'billing':return renderBillingTab();case'logs':return renderLogsTab();default:return renderOverviewTab()}}

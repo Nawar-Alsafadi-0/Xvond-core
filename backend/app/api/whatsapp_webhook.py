@@ -28,7 +28,9 @@ from backend.app.modules.channels.handoff import (
     echo_recipient,
     extend_human_handoff,
     human_handoff_active,
+    normalize_message,
     requests_human,
+    resume_ai,
 )
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.channels.whatsapp_delivery import (
@@ -47,6 +49,15 @@ from backend.app.modules.tools.business_models import HumanHandoff
 router = APIRouter(prefix="/webhooks/whatsapp", tags=["WhatsApp Webhook"])
 ACTIVE_HANDOFF_STATUSES = ["pending", "in_progress"]
 TERMINAL_INBOUND_STATUSES = {"processed", "ignored"}
+RETURN_TO_AI_COMMANDS = {
+    "/ai",
+    "/resume-ai",
+    "/resume_ai",
+    "رجع ai",
+    "ارجع ai",
+    "رجع الذكاء الاصطناعي",
+    "ارجع الذكاء الاصطناعي",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -205,6 +216,27 @@ def _ensure_handoff_record(
     return row
 
 
+def _is_return_to_ai_command(content: str) -> bool:
+    return normalize_message(content) in RETURN_TO_AI_COMMANDS
+
+
+def _complete_active_handoffs(db, *, company_id: int, conversation_id: int, now: datetime):
+    rows = (
+        db.query(HumanHandoff)
+        .filter(
+            HumanHandoff.company_id == company_id,
+            HumanHandoff.conversation_id == conversation_id,
+            HumanHandoff.status.in_(ACTIVE_HANDOFF_STATUSES),
+        )
+        .all()
+    )
+    for row in rows:
+        row.status = "completed"
+        row.completed_at = now
+        row.updated_at = now
+    return len(rows)
+
+
 def _business_app_echo_content(echo: dict) -> str:
     message_type = str(echo.get("type") or "unknown").strip().lower()
     payload = echo.get(message_type) or {}
@@ -299,6 +331,66 @@ def process_business_app_echo(
                 incoming_text=content,
             )
             created_at = _business_app_echo_created_at(echo)
+
+            config = reveal_config(channel.config) or {}
+            if config.get("coexistence") is True:
+                channel.config = merge_config(
+                    channel.config,
+                    {
+                        "coexistence_echo_received_at": datetime.utcnow().isoformat()
+                    },
+                )
+                if config.get("activation_pending_coexistence"):
+                    from backend.app.api.admin_channels import _activation_blockers
+
+                    if not _activation_blockers(db, channel):
+                        channel.enabled = True
+                        channel.config = merge_config(
+                            channel.config,
+                            {"activation_pending_coexistence": False},
+                        )
+
+            if _is_return_to_ai_command(content):
+                marker = whatsapp_job_queue.human_marker(phone_number_id, wa_id)
+                resumed_at = created_at or datetime.utcnow()
+                completed_handoffs = _complete_active_handoffs(
+                    db,
+                    company_id=channel.company_id,
+                    conversation_id=session.conversation_id,
+                    now=resumed_at,
+                )
+                resume_ai(session, now=resumed_at)
+                audit_service.log(
+                    db=db,
+                    company_id=channel.company_id,
+                    action="whatsapp.ai_resumed_by_business_app_command",
+                    resource_type="channel",
+                    resource_id=channel.id,
+                    details={
+                        "message_id": message_id,
+                        "conversation_id": session.conversation_id,
+                        "wa_id": wa_id,
+                        "source": "whatsapp_business_app",
+                        "completed_handoffs": completed_handoffs,
+                    },
+                )
+                complete_message_claim(db, message_id)
+                db.commit()
+                whatsapp_job_queue.clear_human_marker(
+                    phone_number_id,
+                    wa_id,
+                    marker,
+                )
+                processed.append(
+                    {
+                        "message_id": message_id,
+                        "conversation_id": session.conversation_id,
+                        "status": "ai_resumed_by_command",
+                        "mirrored": False,
+                    }
+                )
+                continue
+
             stale_after_resume = _echo_precedes_explicit_ai_resume(
                 session,
                 message_id=message_id,
@@ -337,24 +429,6 @@ def process_business_app_echo(
                 if created_at is not None:
                     message_kwargs["created_at"] = created_at
                 db.add(AIMessage(**message_kwargs))
-
-            config = reveal_config(channel.config) or {}
-            if config.get("coexistence") is True:
-                channel.config = merge_config(
-                    channel.config,
-                    {
-                        "coexistence_echo_received_at": datetime.utcnow().isoformat()
-                    },
-                )
-                if config.get("activation_pending_coexistence"):
-                    from backend.app.api.admin_channels import _activation_blockers
-
-                    if not _activation_blockers(db, channel):
-                        channel.enabled = True
-                        channel.config = merge_config(
-                            channel.config,
-                            {"activation_pending_coexistence": False},
-                        )
 
             audit_service.log(
                 db=db,

@@ -26,6 +26,7 @@ def test_ai_agents_portal_is_capability_aware():
         "account",
         "billing",
     ]
+    assert "employee-builder" not in _ids(basic)
     assert next(item for item in basic if item["id"] == "business-profile")["group"] == "Company"
     assert next(item for item in basic if item["id"] == "agents")["group"] == "AI Workforce"
     assert next(item for item in basic if item["id"] == "conversations")["group"] == "Customer Operations"
@@ -65,6 +66,7 @@ def test_multiple_capabilities_create_separate_operation_pages():
         ["quotation", "booking", "orders", "lead_management", "customer_support"],
     )
     ids = _ids(navigation)
+    assert "employee-builder" not in ids
     assert "requests-quotation" in ids
     assert "requests-booking" in ids
     assert "requests-orders" in ids
@@ -90,6 +92,7 @@ def test_portal_separates_active_services_and_keeps_account_core():
         "account",
         "billing",
     ]
+    assert "employee-builder" not in ids
     assert "agents" not in ids
     assert "customers" not in ids
     assert "business-profile" not in ids
