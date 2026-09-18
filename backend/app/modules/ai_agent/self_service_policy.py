@@ -14,6 +14,7 @@ from backend.app.models.company_module import CompanyModule
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.billing.service_limits import service_limits
+from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
 from backend.app.modules.channels.catalog import validate_channel_config
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
@@ -148,12 +149,22 @@ def subscription_snapshot(db, company_id: int) -> dict:
     except HTTPException as exc:
         if exc.status_code != 403:
             raise
+        pending = (
+            db.query(ServiceSubscription)
+            .filter(
+                ServiceSubscription.company_id == company_id,
+                ServiceSubscription.service_code == "ai_agents",
+            )
+            .first()
+        )
+        pending_plan = db.get(ServicePlan, pending.plan_id) if pending is not None else None
         return {
             "active": False,
-            "subscription": None,
-            "plan": None,
-            "plan_name": None,
-            "plan_tier": None,
+            "subscription": pending,
+            "plan": pending_plan,
+            "plan_name": pending_plan.name if pending_plan is not None else None,
+            "plan_tier": pending_plan.tier if pending_plan is not None else None,
+            "subscription_status": pending.status if pending is not None else None,
             "channel_limit": None,
         }
 
@@ -163,6 +174,7 @@ def subscription_snapshot(db, company_id: int) -> dict:
         "plan": plan,
         "plan_name": plan.name,
         "plan_tier": plan.tier,
+        "subscription_status": subscription.status,
         "channel_limit": channel_limit_from_plan(plan),
     }
 
@@ -455,6 +467,7 @@ def self_service_readiness(
     state["prepared_channels"] = prepared_channels
     state["subscription"] = {
         "active": bool(billing["active"]),
+        "status": billing.get("subscription_status"),
         "plan_name": billing["plan_name"],
         "plan_tier": billing["plan_tier"],
     }
