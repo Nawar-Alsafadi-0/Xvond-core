@@ -4,6 +4,7 @@ from pathlib import Path
 
 WORKFLOW_PATH = Path("ops/n8n/xvond-actions.workflow.json")
 CONTRACTS_PATH = Path("ops/n8n/action-contracts.json")
+CHANNEL_INBOUND_PATH = Path("ops/n8n/xvond-channel-inbound.workflow.json")
 
 
 def _workflow_code() -> str:
@@ -84,3 +85,38 @@ def test_generic_action_key_is_not_hardcoded_to_business_templates():
     assert "action.match" in code
     assert "action_key: actionKey" in code
     assert "Unsupported workflow action" in code
+
+
+def test_universal_channel_send_is_routed_by_xvond_connection_key():
+    contracts = json.loads(CONTRACTS_PATH.read_text(encoding="utf-8"))
+    code = _workflow_code()
+    channel = contracts["actions"]["channel.send"]
+
+    assert channel["adapter"] == "channel"
+    assert channel["side_effect"] is True
+    assert "connection_key" in channel["required_data"]
+    assert "external_contact_id" in channel["required_data"]
+    assert "XVOND_CHANNEL_ROUTES_JSON" in code
+    assert "channel_provider" in code
+    assert "channel.send" in code
+    assert contracts["policy"]["channel_credentials_live_in_workflow_engine"] is True
+    assert contracts["policy"]["channel_routes_are_tenant_scoped"] is True
+
+
+def test_inbound_channel_gateway_calls_xvond_then_provider_without_exposing_credentials():
+    payload = json.loads(CHANNEL_INBOUND_PATH.read_text(encoding="utf-8"))
+    nodes = {node["name"]: node for node in payload["nodes"]}
+
+    webhook = nodes["Xvond Channel Inbound"]
+    assert webhook["parameters"]["path"] == "xvond-channel-inbound"
+    validate = nodes["Validate Normalized Message"]["parameters"]["jsCode"]
+    prepare = nodes["Prepare Channel Reply"]["parameters"]["jsCode"]
+
+    assert "N8N_SHARED_SECRET" in validate
+    assert "external_contact_id" in validate
+    assert "external_message_id" in validate
+    assert "XVOND_INTERNAL_CHANNEL_URL" in str(nodes["Run Xvond Employee"]["parameters"])
+    assert "XVOND_CHANNEL_ROUTES_JSON" in prepare
+    assert "channel-reply:" in prepare
+    assert "provider_secret" in prepare
+    assert "Send Channel Reply" in nodes
