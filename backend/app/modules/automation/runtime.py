@@ -160,6 +160,15 @@ class AutomationRuntime:
                     raise ValueError(
                         f"Execution graph dependency is unavailable for node {node_id}"
                     )
+                gate = resolve_graph_value(
+                    node.get("when"),
+                    state=state,
+                    node_outputs=node_outputs,
+                ) if "when" in node else True
+                if not bool(gate):
+                    node_outputs[node_id] = {"skipped": True}
+                    continue
+
                 params = resolve_graph_value(
                     node.get("params") or {},
                     state=state,
@@ -221,11 +230,29 @@ class AutomationRuntime:
                         "values": params.get("values") or params,
                     }
                 elif node_type == "condition":
-                    nested_step = {
-                        "type": "condition",
-                        "field": params.get("field"),
-                        "equals": params.get("equals"),
-                    }
+                    operator = str(params.get("operator") or "eq").strip().lower()
+                    left = params.get("left")
+                    right = params.get("right")
+                    if operator == "eq":
+                        matched = left == right
+                    elif operator == "neq":
+                        matched = left != right
+                    elif operator == "gt":
+                        matched = left > right
+                    elif operator == "gte":
+                        matched = left >= right
+                    elif operator == "lt":
+                        matched = left < right
+                    elif operator == "lte":
+                        matched = left <= right
+                    elif operator == "contains":
+                        matched = right in left if left is not None else False
+                    else:
+                        raise ValueError(
+                            f"Unsupported execution graph condition operator: {operator}"
+                        )
+                    node_outputs[node_id] = {"matched": bool(matched)}
+                    continue
                 elif node_type == "notify":
                     message = str(params.get("message") or node.get("label") or "").strip()
                     if not message:
