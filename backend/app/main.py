@@ -45,6 +45,7 @@ from backend.app.api.public_channels import router as public_channels_router
 from backend.app.api.public_employee_builder import router as public_employee_builder_router
 from backend.app.api.public_billing import router as public_billing_router
 from backend.app.api.public_media import router as public_media_router
+from backend.app.api.public_automation_webhooks import router as public_automation_webhooks_router
 from backend.app.api.voice_llm import router as voice_llm_router
 from backend.app.api.website_widget import router as website_widget_router
 from backend.app.api.ai_agents import router as ai_agents_router
@@ -183,6 +184,8 @@ async def protect_public_endpoints(request: Request, call_next):
             rule = (180, 60)
         elif request.url.path.startswith("/v1/voice/") and request.url.path.endswith("/chat/completions"):
             rule = (240, 60)
+        elif request.url.path.startswith("/webhooks/automation/"):
+            rule = (120, 60)
     if rule is not None:
         client_ip = request_client_ip(request)
         limit, window = rule
@@ -237,6 +240,7 @@ for r in [
     public_employee_builder_router,
     public_billing_router,
     public_media_router,
+    public_automation_webhooks_router,
     voice_llm_router,
     website_widget_router,
     modules_router,
