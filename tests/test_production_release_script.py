@@ -140,8 +140,11 @@ def test_workflow_sync_publishes_and_sets_active_before_restart():
     telegram_sync = WORKFLOW_SYNC.index(
         'sync_one_workflow "$TELEGRAM_WORKFLOW_FILE" "$TELEGRAM_WORKFLOW_ID"'
     )
+    meta_sync = WORKFLOW_SYNC.index(
+        'sync_one_workflow "$META_WORKFLOW_FILE" "$META_WORKFLOW_ID"'
+    )
     restart = WORKFLOW_SYNC.index("up -d --no-deps workflow-engine")
-    assert helper < publish < activate < action_sync < channel_sync < telegram_sync < restart
+    assert helper < publish < activate < action_sync < channel_sync < telegram_sync < meta_sync < restart
 
 
 def test_workflow_sync_retries_transient_runtime_startup_failures():
@@ -152,6 +155,8 @@ def test_workflow_sync_retries_transient_runtime_startup_failures():
     assert 'invalid_channel_gateway_response' in WORKFLOW_SYNC
     assert 'invalid_telegram_gateway_response' in WORKFLOW_SYNC
     assert "probe_telegram_gateway" in WORKFLOW_SYNC
+    assert 'invalid_meta_gateway_response' in WORKFLOW_SYNC
+    assert "probe_meta_gateway" in WORKFLOW_SYNC
     assert 'Last runtime probe error:' in WORKFLOW_SYNC
 
 
@@ -215,3 +220,11 @@ def test_telegram_provider_workflow_is_source_controlled_and_synced():
     assert 'TELEGRAM_WORKFLOW_FILE="${TELEGRAM_WORKFLOW_FILE:-ops/n8n/xvond-telegram-provider.workflow.json}"' in WORKFLOW_SYNC
     assert 'TELEGRAM_WORKFLOW_ID="${TELEGRAM_WORKFLOW_ID:-xvond-telegram-provider-v1}"' in WORKFLOW_SYNC
     assert "XVOND_TELEGRAM_ROUTES_JSON" in COMPOSE
+
+
+def test_meta_messaging_provider_workflow_is_source_controlled_and_synced():
+    assert 'META_WORKFLOW_FILE="${META_WORKFLOW_FILE:-ops/n8n/xvond-meta-messaging-provider.workflow.json}"' in WORKFLOW_SYNC
+    assert 'META_WORKFLOW_ID="${META_WORKFLOW_ID:-xvond-meta-messaging-provider-v1}"' in WORKFLOW_SYNC
+    assert "XVOND_META_MESSAGING_ROUTES_JSON" in COMPOSE
+    assert "XVOND_META_MESSAGING_VERIFY_TOKEN" in COMPOSE
+    assert "NODE_FUNCTION_ALLOW_BUILTIN: crypto" in COMPOSE
