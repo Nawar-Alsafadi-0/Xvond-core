@@ -949,13 +949,39 @@ def deactivate_self_service_employee(
         ).first()
         if agent is None:
             raise HTTPException(404, "AI employee not found")
-        _employee_config_or_404(db, agent)
+        config = _employee_config_or_404(db, agent)
+        # Keep the same mutation lock order as launch/revision.
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+
+        channel_rows = (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.company_id == company.id,
+                AgentChannel.agent_id == agent.id,
+                AgentChannel.enabled.is_(True),
+            )
+            .with_for_update()
+            .all()
+        )
+        deactivated_channels = []
+        for channel in channel_rows:
+            channel_type = str(channel.channel_type or "").strip().lower()
+            if communication_channels([channel_type]):
+                channel.enabled = False
+                deactivated_channels.append(channel_type)
+
         agent.enabled = False
+        company.active = False
+        company.lifecycle_status = "paused"
+        company.lifecycle_updated_at = datetime.utcnow()
         db.commit()
         return {
             "status": "draft",
             "agent_id": agent.id,
             "lifecycle": "draft",
+            "company_lifecycle": "paused",
+            "deactivated_channels": deactivated_channels,
         }
     except HTTPException:
         db.rollback()
