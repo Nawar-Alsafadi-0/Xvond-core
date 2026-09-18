@@ -909,7 +909,11 @@
                     const requirementKey = decodeURIComponent(String(select.dataset.integrationSelect || ""));
                     const allowedTypes = requirementKey === "instagram_publish"
                         ? new Set(["instagram_publish"])
-                        : null;
+                        : (requirementKey === "email_send"
+                            ? new Set(["email_smtp"])
+                            : (requirementKey === "email_read"
+                                ? new Set(["email_imap"])
+                                : null));
                     const compatible = allowedTypes
                         ? integrations.filter(item => allowedTypes.has(String(item.integration_type || "")))
                         : integrations;
@@ -921,7 +925,10 @@
                         const encodedKey = String(select.dataset.integrationSelect || "");
                         const wrapper = document.querySelector(`[data-integration-endpoint-fields="${encodedKey}"]`);
                         const selectedType = String(select.selectedOptions?.[0]?.dataset?.integrationType || "");
-                        if (wrapper) wrapper.classList.toggle("hidden", selectedType === "instagram_publish");
+                        if (wrapper) wrapper.classList.toggle(
+                            "hidden",
+                            new Set(["instagram_publish", "email_smtp", "email_imap"]).has(selectedType)
+                        );
                     };
                     select.addEventListener("change", syncEndpointFields);
                     syncEndpointFields();
