@@ -14,11 +14,14 @@ from backend.app.api.admin_channels import (
 from backend.app.core.config.settings import settings
 from backend.app.core.config_secrets import merge_config, reveal_config
 from backend.app.core.database.connection import SessionLocal
-from backend.app.core.dependencies import require_xvond_admin
+from backend.app.core.dependencies import require_customer_manager, require_xvond_admin
+from backend.app.models.company import Company
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.ai_agent.self_service_policy import is_self_service_company
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
+from backend.app.modules.channels.catalog import validate_channel_config
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.knowledge.models import AgentKnowledge, KnowledgeDocument
 
@@ -158,6 +161,104 @@ def _ready(db, channel: AgentChannel) -> list[str]:
     return blockers
 
 
+def _website_config_from_setup(
+    *,
+    agent: AIAgent,
+    data: WebsiteSetup,
+    previous: dict | None = None,
+) -> dict:
+    previous = dict(previous or {})
+    legacy_label = (data.launcher_label or "").strip()
+    label_ar = (data.launcher_label_ar or legacy_label or "مساعد Xvond").strip()[:30]
+    label_en = (data.launcher_label_en or legacy_label or "Chat").strip()[:30]
+    config = {
+        "allowed_domain": _normalized_domain(data.allowed_domain),
+        "widget_name": (data.widget_name or agent.name).strip()[:120],
+        "welcome_message": (
+            data.welcome_message or "مرحباً، كيف يمكنني مساعدتك؟"
+        ).strip()[:1000],
+        "welcome_message_en": (
+            data.welcome_message_en or "Hello, how can I help you?"
+        ).strip()[:1000],
+        "position": "left" if data.position == "left" else "right",
+        "custom_instructions": (data.custom_instructions or "").strip()[:4000],
+        "accent_color": (
+            data.accent_color
+            if data.accent_color.startswith("#") and len(data.accent_color) in {4, 7}
+            else "#111827"
+        ),
+        "launcher_label": label_en,
+        "launcher_label_ar": label_ar,
+        "launcher_label_en": label_en,
+        "human_assistance_mode": data.human_assistance_mode,
+        "contact_phone": (data.contact_phone or "").strip()[:120],
+        "contact_whatsapp": (data.contact_whatsapp or "").strip()[:120],
+        "contact_email": (data.contact_email or "").strip()[:254],
+        "contact_url": (data.contact_url or "").strip()[:1000],
+        "widget_key": previous.get("widget_key") or secrets.token_urlsafe(32),
+    }
+    if isinstance(previous.get("employee_setup"), dict):
+        config["employee_setup"] = previous["employee_setup"]
+    return config
+
+
+_CUSTOMER_WEBSITE_FIELDS = {
+    "allowed_domain",
+    "widget_name",
+    "welcome_message",
+    "welcome_message_en",
+    "position",
+    "custom_instructions",
+    "accent_color",
+    "launcher_label",
+    "launcher_label_ar",
+    "launcher_label_en",
+    "human_assistance_mode",
+    "contact_phone",
+    "contact_whatsapp",
+    "contact_email",
+    "contact_url",
+}
+
+
+def _customer_website_config(config: dict) -> dict:
+    return {
+        key: value
+        for key, value in (config or {}).items()
+        if key in _CUSTOMER_WEBSITE_FIELDS
+    }
+
+
+def _website_prepared(config: dict) -> bool:
+    try:
+        validate_channel_config("website", config or {})
+    except ValueError:
+        return False
+    return bool(str((config or {}).get("widget_key") or "").strip())
+
+
+def _customer_self_service_agent(
+    db,
+    *,
+    current_user: User,
+    agent_id: int,
+) -> tuple[Company, AIAgent]:
+    agent = (
+        db.query(AIAgent)
+        .filter(
+            AIAgent.id == agent_id,
+            AIAgent.company_id == current_user.company_id,
+        )
+        .first()
+    )
+    if agent is None:
+        raise HTTPException(404, "AI employee not found")
+    company = db.query(Company).filter(Company.id == current_user.company_id).first()
+    if not is_self_service_company(company):
+        raise HTTPException(409, "Website Self-Service setup is only available to Self-Service workspaces")
+    return company, agent
+
+
 def _behavior(config: dict) -> str:
     custom = str(config.get("custom_instructions") or "").strip()
     mode = _assistance_mode(config)
@@ -183,6 +284,126 @@ def _behavior(config: dict) -> str:
     if custom:
         parts.append("Website-specific instructions: " + custom)
     return "\n".join(parts)
+
+
+@router.get("/customer/website-channel/agents/{agent_id}")
+def customer_get_website_config(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        _company, agent = _customer_self_service_agent(
+            db,
+            current_user=current_user,
+            agent_id=agent_id,
+        )
+        channel = (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.company_id == current_user.company_id,
+                AgentChannel.agent_id == agent.id,
+                AgentChannel.channel_type == "website",
+            )
+            .first()
+        )
+        if channel is None:
+            return {
+                "agent_id": agent.id,
+                "configured": False,
+                "prepared": False,
+                "enabled": False,
+                "can_edit": not agent.enabled,
+                "config": {},
+                "embed_code": None,
+            }
+        plain = reveal_config(channel.config) or {}
+        prepared = _website_prepared(plain)
+        return {
+            "agent_id": agent.id,
+            "channel_id": channel.id,
+            "configured": prepared,
+            "prepared": prepared,
+            "enabled": bool(channel.enabled),
+            "can_edit": not agent.enabled,
+            "config": _customer_website_config(plain),
+            "embed_code": _embed(channel.id) if prepared else None,
+        }
+    finally:
+        db.close()
+
+
+@router.put("/customer/website-channel/agents/{agent_id}")
+def customer_configure_website(
+    agent_id: int,
+    data: WebsiteSetup,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        _company, agent = _customer_self_service_agent(
+            db,
+            current_user=current_user,
+            agent_id=agent_id,
+        )
+        if agent.enabled:
+            raise HTTPException(
+                409,
+                "Deactivate this employee before changing Website Chat setup",
+            )
+
+        channel = (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.company_id == current_user.company_id,
+                AgentChannel.agent_id == agent.id,
+                AgentChannel.channel_type == "website",
+            )
+            .with_for_update()
+            .first()
+        )
+        old = reveal_config(channel.config) if channel is not None else {}
+        config = _website_config_from_setup(
+            agent=agent,
+            data=data,
+            previous=old,
+        )
+        if channel is None:
+            channel = AgentChannel(
+                company_id=current_user.company_id,
+                agent_id=agent.id,
+                channel_type="website",
+                config=config,
+                enabled=False,
+            )
+            db.add(channel)
+        else:
+            channel.config = merge_config(channel.config, config)
+            channel.enabled = False
+
+        _ensure_channels_module(db, current_user.company_id)
+        db.commit()
+        db.refresh(channel)
+        plain = reveal_config(channel.config) or {}
+        return {
+            "status": "configured",
+            "agent_id": agent.id,
+            "channel_id": channel.id,
+            "configured": _website_prepared(plain),
+            "prepared": _website_prepared(plain),
+            "enabled": False,
+            "can_edit": True,
+            "config": _customer_website_config(plain),
+            "embed_code": _embed(channel.id),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 @router.get("/admin/website-channel/agents/{agent_id}")
@@ -229,7 +450,6 @@ def configure(
         agent = db.query(AIAgent).filter(AIAgent.id == agent_id).first()
         if not agent:
             raise HTTPException(404, "AI employee not found")
-        domain = _normalized_domain(data.allowed_domain)
         channel = (
             db.query(AgentChannel)
             .filter(
@@ -238,43 +458,16 @@ def configure(
             )
             .first()
         )
-        legacy_label = (data.launcher_label or "").strip()
-        label_ar = (data.launcher_label_ar or legacy_label or "مساعد Xvond").strip()[:30]
-        label_en = (data.launcher_label_en or legacy_label or "Chat").strip()[:30]
-        config = {
-            "allowed_domain": domain,
-            "widget_name": (data.widget_name or agent.name).strip()[:120],
-            "welcome_message": (
-                data.welcome_message or "مرحباً، كيف يمكنني مساعدتك؟"
-            ).strip()[:1000],
-            "welcome_message_en": (
-                data.welcome_message_en or "Hello, how can I help you?"
-            ).strip()[:1000],
-            "position": "left" if data.position == "left" else "right",
-            "custom_instructions": (data.custom_instructions or "").strip()[:4000],
-            "accent_color": (
-                data.accent_color
-                if data.accent_color.startswith("#") and len(data.accent_color) in {4, 7}
-                else "#111827"
-            ),
-            "launcher_label": label_en,
-            "launcher_label_ar": label_ar,
-            "launcher_label_en": label_en,
-            "human_assistance_mode": data.human_assistance_mode,
-            "contact_phone": (data.contact_phone or "").strip()[:120],
-            "contact_whatsapp": (data.contact_whatsapp or "").strip()[:120],
-            "contact_email": (data.contact_email or "").strip()[:254],
-            "contact_url": (data.contact_url or "").strip()[:1000],
-        }
+        old = reveal_config(channel.config) if channel is not None else {}
+        config = _website_config_from_setup(
+            agent=agent,
+            data=data,
+            previous=old,
+        )
         if channel:
-            old = reveal_config(channel.config) or {}
-            config["widget_key"] = old.get("widget_key") or secrets.token_urlsafe(32)
-            if isinstance(old.get("employee_setup"), dict):
-                config["employee_setup"] = old["employee_setup"]
             channel.config = merge_config(channel.config, config)
             channel.enabled = False
         else:
-            config["widget_key"] = secrets.token_urlsafe(32)
             channel = AgentChannel(
                 company_id=agent.company_id,
                 agent_id=agent.id,
