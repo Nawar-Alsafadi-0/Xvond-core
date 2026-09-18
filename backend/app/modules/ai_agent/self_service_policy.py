@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException
 
+from backend.app.core.ai.provider_policy import runtime_selections
 from backend.app.core.config.settings import settings
+from backend.app.core.config_secrets import reveal_config
 from backend.app.models.company import Company
+from backend.app.models.company_module import CompanyModule
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.billing.service_limits import service_limits
+from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
+from backend.app.modules.channels.catalog import validate_channel_config
 from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
 
 
 SELF_SERVICE_SOURCE = "self_service"
@@ -29,6 +36,8 @@ COMMUNICATION_CHANNELS = frozenset(
 )
 
 EXTERNAL_COMMUNICATION_CHANNELS = COMMUNICATION_CHANNELS - {"xvond"}
+SELF_SERVICE_LIVE_EXTERNAL_CHANNELS = frozenset({"whatsapp", "website"})
+SELF_SERVICE_DIRECT_CONNECTION_REQUIREMENTS = SELF_SERVICE_LIVE_EXTERNAL_CHANNELS
 
 
 def is_self_service_company(company: Company | None) -> bool:
@@ -60,6 +69,35 @@ def _requirement_channel_keys(spec: dict) -> list[str]:
         if key in COMMUNICATION_CHANNELS and key not in result:
             result.append(key)
     return result
+
+
+def self_service_connection_status(item: dict) -> str | None:
+    status = str(item.get("status") or "").strip().lower()
+    if status != "connection_required":
+        return None
+    key = str(item.get("key") or "").strip().lower()
+    kind = str(item.get("kind") or "").strip().lower()
+    if kind == "channel" and key in SELF_SERVICE_DIRECT_CONNECTION_REQUIREMENTS:
+        return "self_service_available"
+    return "xvond_adapter_required"
+
+
+def self_service_spec_view(spec: dict | None) -> dict | None:
+    """Annotate a compiled spec for truthful Self-Service connection UX.
+
+    This is view-layer metadata so cached compiler output does not need a paid
+    recompilation when Xvond's connection surface changes.
+    """
+    if not isinstance(spec, dict):
+        return None
+    rendered = deepcopy(spec)
+    for item in rendered.get("requirements") or []:
+        if not isinstance(item, dict):
+            continue
+        connection_status = self_service_connection_status(item)
+        if connection_status:
+            item["self_service_connection_status"] = connection_status
+    return rendered
 
 
 def interaction_mode(spec: dict | None, requested_channels: list[str] | tuple[str, ...]) -> str:
@@ -111,12 +149,22 @@ def subscription_snapshot(db, company_id: int) -> dict:
     except HTTPException as exc:
         if exc.status_code != 403:
             raise
+        pending = (
+            db.query(ServiceSubscription)
+            .filter(
+                ServiceSubscription.company_id == company_id,
+                ServiceSubscription.service_code == "ai_agents",
+            )
+            .first()
+        )
+        pending_plan = db.get(ServicePlan, pending.plan_id) if pending is not None else None
         return {
             "active": False,
-            "subscription": None,
-            "plan": None,
-            "plan_name": None,
-            "plan_tier": None,
+            "subscription": pending,
+            "plan": pending_plan,
+            "plan_name": pending_plan.name if pending_plan is not None else None,
+            "plan_tier": pending_plan.tier if pending_plan is not None else None,
+            "subscription_status": pending.status if pending is not None else None,
             "channel_limit": None,
         }
 
@@ -126,6 +174,7 @@ def subscription_snapshot(db, company_id: int) -> dict:
         "plan": plan,
         "plan_name": plan.name,
         "plan_tier": plan.tier,
+        "subscription_status": subscription.status,
         "channel_limit": channel_limit_from_plan(plan),
     }
 
@@ -148,6 +197,101 @@ def enabled_channel_types(db, *, company_id: int, agent_id: int) -> list[str]:
     return result
 
 
+def configured_channel_types(db, *, company_id: int, agent_id: int) -> list[str]:
+    """Communication channels with complete stored config, regardless of live state."""
+    rows = (
+        db.query(AgentChannel)
+        .filter(
+            AgentChannel.company_id == company_id,
+            AgentChannel.agent_id == agent_id,
+        )
+        .all()
+    )
+    result: list[str] = []
+    for row in rows:
+        key = str(row.channel_type or "").strip().lower()
+        if key not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS or key in result:
+            continue
+        try:
+            validate_channel_config(key, reveal_config(row.config) or {})
+        except ValueError:
+            continue
+        result.append(key)
+    return result
+
+
+def self_service_channel_activation_blockers(
+    db,
+    *,
+    company: Company,
+    agent: AIAgent,
+    channel: AgentChannel,
+) -> list[str]:
+    """Live activation checks for Self-Service communication channels only."""
+    blockers: list[str] = []
+    channel_type = str(channel.channel_type or "").strip().lower()
+
+    if channel.company_id != company.id or channel.agent_id != agent.id:
+        return ["Communication channel ownership does not match this employee"]
+    if channel_type not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS:
+        return [f"{channel_type or 'channel'} is not available for Self-Service launch"]
+
+    if not company.active:
+        blockers.append("Company must be active")
+    if not agent.enabled:
+        blockers.append("AI employee must be active")
+
+    channels_module = (
+        db.query(CompanyModule)
+        .filter(
+            CompanyModule.company_id == company.id,
+            CompanyModule.module_name == "channels",
+            CompanyModule.enabled.is_(True),
+        )
+        .first()
+    )
+    if channels_module is None:
+        blockers.append("Channels module is not enabled")
+
+    if settings.is_production:
+        try:
+            selections = runtime_selections(
+                db,
+                company.id,
+                agent.provider,
+                agent.model,
+            )
+        except Exception:
+            selections = []
+        if not any(item.provider != "mock" for item in selections):
+            blockers.append("At least one real AI provider/model must be available")
+
+    channel_config = reveal_config(channel.config) or {}
+    try:
+        validate_channel_config(channel_type, channel_config)
+    except ValueError:
+        blockers.append(f"{channel_type.title()} channel configuration is incomplete")
+        return blockers
+
+    if channel_type == "whatsapp":
+        connection = whatsapp_connection_state(
+            channel_config,
+            verify_remote=True,
+        )
+        if connection.get("connected") is not True:
+            blockers.append(
+                connection.get("connection_issue")
+                or "WhatsApp must be connected and verified with Meta"
+            )
+    elif channel_type == "website":
+        if not str(channel_config.get("widget_key") or "").strip():
+            blockers.append("Website widget key is missing")
+        if settings.is_production and not settings.PUBLIC_BASE_URL:
+            blockers.append("Xvond public API URL is not configured")
+
+    return blockers
+
+
 def _execution_blockers(spec: dict, *, resolved_channels: list[str]) -> list[str]:
     blockers: list[str] = []
     resolved = set(communication_channels(resolved_channels))
@@ -162,7 +306,13 @@ def _execution_blockers(spec: dict, *, resolved_channels: list[str]) -> list[str
 
         if kind == "channel" and channel_key in resolved:
             continue
-        if status in {"connection_required", "customer_input_required", "setup_required"}:
+        if status == "connection_required":
+            if self_service_connection_status(item) == "xvond_adapter_required":
+                blockers.append(f"{key}: Xvond connection adapter required")
+            else:
+                blockers.append(f"{key}: setup required")
+            continue
+        if status in {"customer_input_required", "setup_required"}:
             blockers.append(f"{key}: setup required")
             continue
         if status == "xvond_managed" and execution_status in {
@@ -276,9 +426,7 @@ def self_service_readiness(
             "This employee is not a self-service employee",
         )
 
-    spec = builder.get("compiled_spec")
-    if not isinstance(spec, dict):
-        spec = None
+    spec = self_service_spec_view(builder.get("compiled_spec"))
     provisioned = bool(
         isinstance(spec, dict)
         and (spec.get("delivery") or {}).get("provisioning_version") == 1
@@ -290,16 +438,36 @@ def self_service_readiness(
         company_id=company.id,
         agent_id=agent.id,
     )
+    requested_channels = list(builder.get("requested_channels") or [])
+    resolved_channels = active_channels
+    prepared_channels: list[str] = []
+    if not agent.enabled:
+        desired = set(communication_channels(requested_channels))
+        desired.update(_requirement_channel_keys(spec or {}))
+        prepared_channels = [
+            item
+            for item in configured_channel_types(
+                db,
+                company_id=company.id,
+                agent_id=agent.id,
+            )
+            if item in desired
+        ]
+        resolved_channels = prepared_channels
+
     state = evaluate_readiness(
         subscribed=bool(billing["active"]),
         channel_limit=billing["channel_limit"],
-        requested_channels=list(builder.get("requested_channels") or []),
-        enabled_channels=active_channels,
+        requested_channels=requested_channels,
+        enabled_channels=resolved_channels,
         compiled_spec=spec,
         provisioned=provisioned,
     )
+    state["active_channels"] = active_channels
+    state["prepared_channels"] = prepared_channels
     state["subscription"] = {
         "active": bool(billing["active"]),
+        "status": billing.get("subscription_status"),
         "plan_name": billing["plan_name"],
         "plan_tier": billing["plan_tier"],
     }

@@ -288,7 +288,7 @@ def subscribe_service(
             plan_changed = previous_plan_id != plan.id
             item.plan_id = plan.id
             item.status = "active"
-            if plan_changed or data.renew or period_expired or previous_status == "cancelled":
+            if plan_changed or data.renew or period_expired or previous_status in {"cancelled", "pending_payment"}:
                 item.current_period_start = now
                 item.current_period_end = _add_month(now)
 
@@ -435,7 +435,7 @@ def set_service_status(
             if plan is None:
                 raise HTTPException(409, "Cannot activate a service whose plan is disabled")
             now = _utcnow_naive()
-            if item.current_period_end <= now or item.status == "cancelled":
+            if item.current_period_end <= now or item.status in {"cancelled", "pending_payment"}:
                 item.current_period_start = now
                 item.current_period_end = _add_month(now)
         item.status = status

@@ -5,6 +5,7 @@ from backend.app.modules.ai_agent.self_service_policy import (
     communication_channels,
     evaluate_readiness,
     interaction_mode,
+    self_service_spec_view,
 )
 
 
@@ -132,8 +133,8 @@ def test_email_and_instagram_publishing_are_not_channel_slots():
     assert state["channel_slots_used"] == 0
     assert state["channels_required"] is False
     assert state["ready"] is False
-    assert any("email_read: setup required" == item for item in state["blockers"])
-    assert any("instagram_publish: setup required" == item for item in state["blockers"])
+    assert "email_read: Xvond connection adapter required" in state["blockers"]
+    assert "instagram_publish: Xvond connection adapter required" in state["blockers"]
 
 
 def test_plan_channel_slots_are_enforced():
@@ -190,3 +191,57 @@ def test_interaction_mode_does_not_treat_integrations_as_channels():
         ],
     )
     assert interaction_mode(spec, ["email"]) == "personal"
+
+
+def test_self_service_spec_view_annotates_cached_connection_truth_without_recompile():
+    cached = _spec(
+        scope="business",
+        requirements=[
+            {
+                "key": "whatsapp",
+                "kind": "channel",
+                "status": "connection_required",
+            },
+            {
+                "key": "email_send",
+                "kind": "integration",
+                "status": "connection_required",
+            },
+            {
+                "key": "voice",
+                "kind": "channel",
+                "status": "connection_required",
+            },
+        ],
+    )
+
+    rendered = self_service_spec_view(cached)
+    rows = {item["key"]: item for item in rendered["requirements"]}
+
+    assert rows["whatsapp"]["self_service_connection_status"] == "self_service_available"
+    assert rows["email_send"]["self_service_connection_status"] == "xvond_adapter_required"
+    assert rows["voice"]["self_service_connection_status"] == "xvond_adapter_required"
+    assert "self_service_connection_status" not in cached["requirements"][0]
+
+
+def test_direct_self_service_channel_keeps_normal_connect_blocker():
+    spec = _spec(
+        scope="business",
+        requirements=[
+            {
+                "key": "website",
+                "kind": "channel",
+                "status": "connection_required",
+            }
+        ],
+    )
+    state = evaluate_readiness(
+        subscribed=True,
+        channel_limit=1,
+        requested_channels=["website"],
+        enabled_channels=[],
+        compiled_spec=spec,
+        provisioned=True,
+    )
+    assert "website: setup required" in state["blockers"]
+    assert not any("adapter required" in item for item in state["blockers"])
