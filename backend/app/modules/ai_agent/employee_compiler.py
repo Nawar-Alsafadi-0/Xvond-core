@@ -5,6 +5,7 @@ import json
 import re
 from typing import Any
 
+from backend.app.modules.automation.execution_graph import normalize_execution_graph
 from backend.app.modules.channels.catalog import (
     canonical_channel_type,
     list_customer_channel_capabilities,
@@ -233,6 +234,17 @@ Use this shape:
   "permissions": [
     {"action": "action description", "mode": "automatic|ask_before|never"}
   ],
+  "execution_graph": {
+    "version": 1,
+    "nodes": [
+      {
+        "id": "stable_node_id",
+        "type": "ai|media|action|http_get_json|transform|condition|notify",
+        "depends_on": [],
+        "params": {}
+      }
+    ]
+  },
   "setup_questions": ["only information, account access or credentials genuinely required from the customer"]
 }
 
@@ -245,6 +257,10 @@ Rules:
 - Keep intake field keys stable snake_case identifiers. Labels should be short human-readable labels in the customer's language when practical.
 - intake.known values must be copied from information explicitly present in the Job Brief. Never invent values. Do not place passwords, API keys, access tokens or other credentials in intake.known; credentials belong to protected connection flows.
 - Never use a missing Xvond feature as a reason to reject the job. For a novel digital requirement, return it and give it useful generic primitives so Xvond can compose it.
+- Always describe executable work as execution_graph nodes whenever the job contains more than a single conversational response. The graph is the general execution plan; requirements describe capabilities/connections needed to make that graph runnable.
+- Use generic node types, not use-case names. Examples: ai for reasoning/generation, media for generated visual media, action for a side effect through a requirement/connector, http_get_json for read-only JSON fetches, transform for data shaping, condition for branching gates, notify for an internal owner update.
+- action nodes must reference a requirement key in params.action_type. Do not encode provider-specific logic in the graph.
+- Node dependencies belong in depends_on. Keep the graph acyclic and order nodes so every dependency appears before the node that depends on it.
 - Text/content generation itself is a native employee capability and does not need a fake external action or execution_plan. When generated content must be published, sent, stored or otherwise acted on externally, represent that side effect as its own requirement (for example instagram_publish) and include content_generation in that side-effect requirement's primitives.
 - For recurring pipelines such as "generate and publish every day", attach the schedule to the requirement that performs the real side effect and include every needed primitive there. For Instagram feed publishing, include content_generation + media_generation + scheduler + messaging + workflow_engine so Xvond can create both the caption and publishable media. Do not emit a disconnected standalone scheduling requirement when it would separate one requested pipeline into pieces that cannot execute together.
 - Set requires_connection=true only when the customer explicitly wants to use an existing external account/system, or the requested work inherently depends on one.
@@ -744,6 +760,8 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         if len(setup_questions) >= 30:
             break
 
+    execution_graph = normalize_execution_graph(payload.get("execution_graph"))
+
     return {
         "version": COMPILER_VERSION,
         "job_brief": job_brief.strip(),
@@ -754,6 +772,7 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         "tasks": tasks,
         "requirements": requirements,
         "permissions": permissions,
+        "execution_graph": execution_graph,
         "setup_questions": setup_questions,
         "ready_requirements": [x["key"] for x in requirements if x["status"] == "available"],
         "build_required": [x["key"] for x in requirements if x["status"] == "xvond_build"],
