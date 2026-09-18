@@ -113,6 +113,7 @@ def _snapshot_builder_version(
     builder: dict,
     *,
     reason: str,
+    capabilities: dict | None = None,
 ) -> dict:
     history = list(builder.get("versions") or [])
     snapshot_source = str(builder.get("source_description") or "").strip()
@@ -134,6 +135,7 @@ def _snapshot_builder_version(
             "compiled_at": builder.get("compiled_at"),
             "setup_answers": dict(builder.get("setup_answers") or {}),
             "requested_channels": list(builder.get("requested_channels") or []),
+            "capabilities": dict(capabilities or {}),
         }
     )
     builder["versions"] = history[-BUILDER_HISTORY_LIMIT:]
@@ -1201,6 +1203,11 @@ def revise_self_service_job_brief(
 
         settings = dict(config.settings or {})
         builder = dict(settings.get("employee_builder") or {})
+        builder = _snapshot_builder_version(
+            builder,
+            reason="job_brief_revision",
+            capabilities=dict(config.capabilities or {}),
+        )
         builder.update(
             {
                 "version": 2,
@@ -1216,13 +1223,7 @@ def revise_self_service_job_brief(
                 "compiled_spec": None,
             }
         )
-        for stale_key in (
-            "delivery",
-            "compiled_at",
-            "compiler_provider",
-            "compiler_model",
-        ):
-            builder.pop(stale_key, None)
+        _clear_current_build_evidence(builder)
         settings["employee_builder"] = builder
 
         _clear_generated_self_service_build(
