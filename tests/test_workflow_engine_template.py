@@ -108,33 +108,25 @@ def test_universal_channel_send_is_routed_by_xvond_connection_key():
     assert contracts["policy"]["channel_routes_are_tenant_scoped"] is True
 
 
-def test_inbound_channel_gateway_calls_xvond_then_provider_without_exposing_credentials():
+def test_inbound_channel_gateway_only_normalizes_and_hands_control_to_xvond():
     payload = json.loads(CHANNEL_INBOUND_PATH.read_text(encoding="utf-8"))
     nodes = {node["name"]: node for node in payload["nodes"]}
 
     webhook = nodes["Xvond Channel Inbound"]
     assert webhook["parameters"]["path"] == "xvond-channel-inbound"
     validate = nodes["Validate Normalized Message"]["parameters"]["jsCode"]
-    prepare = nodes["Prepare Channel Reply"]["parameters"]["jsCode"]
 
     assert "N8N_SHARED_SECRET" in validate
     assert "external_contact_id" in validate
     assert "external_message_id" in validate
     assert "XVOND_INTERNAL_CHANNEL_URL" in str(nodes["Run Xvond Employee"]["parameters"])
-    assert "XVOND_CHANNEL_ROUTES_JSON" in prepare
-    assert "channel-reply:" in prepare
-    assert "provider_secret" not in prepare
-    assert "XVOND_CHANNEL_ROUTES_JSON" in str(nodes["Send Channel Reply"]["parameters"])
-    assert "Send Channel Reply" in nodes
-    assert "Provider Delivery Confirmed?" in nodes
-    assert "Confirm Channel Delivery" in nodes
-    assert "XVOND_INTERNAL_CHANNEL_CONFIRM_URL" in str(
-        nodes["Confirm Channel Delivery"]["parameters"]
-    )
-    confirm_body = str(nodes["Confirm Channel Delivery"]["parameters"])
-    assert "conversation_id" in confirm_body
-    assert "response_message_id" in confirm_body
-    assert "provider_message_id" in confirm_body
-    assert "request_id" not in confirm_body
-    gate = str(nodes["Provider Delivery Confirmed?"]["parameters"])
-    assert "provider_message_id" in gate
+    assert "Return Channel Result" in nodes
+
+    # Provider delivery is deliberately NOT performed inside the inbound
+    # workflow. Core first persists durable delivery state, then dispatches the
+    # canonical channel.send action through the master gateway.
+    assert "Prepare Channel Reply" not in nodes
+    assert "Send Channel Reply" not in nodes
+    assert "Provider Delivery Confirmed?" not in nodes
+    assert "Confirm Channel Delivery" not in nodes
+    assert "XVOND_CHANNEL_ROUTES_JSON" not in str(payload)
