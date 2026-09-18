@@ -643,3 +643,50 @@ def test_compiler_normalizes_general_execution_graph():
         graph["nodes"][1]["params"]["arguments"]["body"]
         == "$nodes.draft.ai_response"
     )
+
+
+
+def test_web_research_is_native_browser_ability_without_fake_action_setup():
+    payload = {
+        "role": "Research agent",
+        "scope": "business",
+        "summary": "Research public websites.",
+        "requirements": [
+            {
+                "key": "web_research",
+                "kind": "tool",
+                "purpose": "Research public websites",
+            }
+        ],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "research",
+                    "type": "browser",
+                    "depends_on": [],
+                    "params": {
+                        "url": "https://example.com",
+                        "actions": [
+                            {"op": "extract_text", "selector": "body"}
+                        ],
+                    },
+                }
+            ],
+        },
+    }
+
+    spec = normalize_compiled_spec(
+        payload,
+        job_brief="Research public websites.",
+    )
+    requirement = spec["requirements"][0]
+
+    assert requirement["key"] == "web_research"
+    assert requirement["status"] == "available"
+    assert requirement["delivery_mode"] == "native"
+    assert requirement["primitives"] == ["browser_web"]
+    assert requirement.get("execution_plan") is None
+    assert "web_research" in spec["ready_requirements"]
+    assert "web_research" not in spec["build_required"]
