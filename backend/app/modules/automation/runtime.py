@@ -4,6 +4,10 @@ from backend.app.core.agent_runtime import agent_runtime
 from backend.app.core.config_secrets import reveal_config
 from backend.app.core.http_security import safe_http_request
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
+from backend.app.modules.automation.execution_graph import (
+    normalize_execution_graph,
+    resolve_graph_value,
+)
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.media.generated_media import generate_image_asset
@@ -139,6 +143,129 @@ class AutomationRuntime:
         step_index: int,
     ):
         step_type = str(step.get("type", "")).strip().lower()
+
+        if step_type == "graph":
+            graph = normalize_execution_graph(step.get("graph") or {})
+            nodes = graph.get("nodes") or []
+            if not nodes:
+                raise ValueError("Execution graph has no runnable nodes")
+
+            node_outputs: dict[str, dict] = {}
+            graph_agent_id = step.get("agent_id")
+            for node_index, node in enumerate(nodes):
+                node_id = str(node.get("id") or "").strip()
+                node_type = str(node.get("type") or "").strip().lower()
+                dependencies = list(node.get("depends_on") or [])
+                if any(dep not in node_outputs for dep in dependencies):
+                    raise ValueError(
+                        f"Execution graph dependency is unavailable for node {node_id}"
+                    )
+                params = resolve_graph_value(
+                    node.get("params") or {},
+                    state=state,
+                    node_outputs=node_outputs,
+                )
+                if not isinstance(params, dict):
+                    params = {}
+
+                nested_step: dict = {"type": node_type}
+                if node_type == "ai":
+                    nested_step = {
+                        "type": "ai",
+                        "agent_id": params.get("agent_id") or graph_agent_id,
+                        "prompt": params.get("prompt") or node.get("label"),
+                    }
+                elif node_type == "media":
+                    nested_step = {
+                        "type": "media_generation",
+                        "prompt": params.get("prompt") or node.get("label"),
+                        "model": params.get("model"),
+                        "size": params.get("size") or "1024x1024",
+                    }
+                elif node_type == "action":
+                    nested_step = {
+                        "type": "scheduled_action",
+                        "agent_id": params.get("agent_id") or graph_agent_id,
+                        "action_type": params.get("action_type"),
+                        "arguments": params.get("arguments") or {},
+                    }
+                elif node_type == "http_get_json":
+                    url = str(params.get("url") or "").strip()
+                    if not url:
+                        raise ValueError(f"Execution graph node {node_id} requires url")
+                    result = safe_http_request(
+                        url=url,
+                        method="GET",
+                        headers={"Accept": "application/json"},
+                        timeout=float(params.get("timeout") or 15),
+                        max_response_bytes=500_000,
+                    )
+                    status = int(result.get("status_code") or 0)
+                    if not 200 <= status < 300:
+                        raise ValueError(
+                            f"Execution graph HTTP node {node_id} returned HTTP {status}"
+                        )
+                    import json
+                    try:
+                        body = json.loads(result.get("response") or "{}")
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"Execution graph HTTP node {node_id} returned invalid JSON"
+                        ) from exc
+                    node_result = {"result": body, "status_code": status}
+                    node_outputs[node_id] = node_result
+                    continue
+                elif node_type == "transform":
+                    nested_step = {
+                        "type": "transform",
+                        "values": params.get("values") or params,
+                    }
+                elif node_type == "condition":
+                    nested_step = {
+                        "type": "condition",
+                        "field": params.get("field"),
+                        "equals": params.get("equals"),
+                    }
+                elif node_type == "notify":
+                    message = str(params.get("message") or node.get("label") or "").strip()
+                    if not message:
+                        raise ValueError(
+                            f"Execution graph notify node {node_id} requires message"
+                        )
+                    node_outputs[node_id] = {
+                        "notification": {
+                            "title": str(params.get("title") or "Employee update")[:200],
+                            "message": message[:2000],
+                        }
+                    }
+                    continue
+                else:
+                    raise ValueError(f"Unsupported execution graph node type: {node_type}")
+
+                node_result = self.execute_step(
+                    db,
+                    company_id,
+                    nested_step,
+                    {
+                        **state,
+                        **{
+                            key: value
+                            for output in node_outputs.values()
+                            if isinstance(output, dict)
+                            for key, value in output.items()
+                        },
+                    },
+                    run_id=run_id,
+                    step_index=(step_index * 1000) + node_index + 1,
+                )
+                node_outputs[node_id] = node_result if isinstance(node_result, dict) else {
+                    "result": node_result
+                }
+
+            return {
+                "graph_outputs": node_outputs,
+                "graph_last": node_outputs.get(str(nodes[-1].get("id") or "")),
+            }
 
         if step_type == "transform":
             values = step.get("values") or {}
