@@ -7,6 +7,7 @@ from backend.app.modules.automation.models import AutomationRun, AutomationWorkf
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.tools.executor import tool_executor
+from backend.app.modules.tools.action_request import _integration_call
 from backend.app.modules.tools.generic_capability_runtime import execute_generic_capability
 from backend.app.modules.tools.models import AgentToolAssignment
 
@@ -218,11 +219,6 @@ class AutomationRuntime:
             if not isinstance(action, dict) or not action.get("enabled", True):
                 raise ValueError("Scheduled action is not enabled")
             destination = action.get("destination") or {}
-            if (
-                destination.get("type") != "xvond_internal"
-                or destination.get("adapter") != "generic_capability"
-            ):
-                raise ValueError("Scheduled action does not use the generic capability runtime")
             if action.get("confirmation_required", True):
                 raise ValueError(
                     "Scheduled action requires automatic permission before background execution"
@@ -232,18 +228,59 @@ class AutomationRuntime:
                 key: value
                 for key, value in state.items()
                 if not str(key).startswith("_xvond_")
+                and key != "conversation_id"
             }
             details.update(step.get("arguments") or {})
-            result = execute_generic_capability(
-                db,
-                company_id=company_id,
-                agent_id=int(agent_id),
-                action_type=action_type,
-                action_config=action,
-                details=details,
-                idempotency_key=f"{execution_key}:{step_index}",
+            stable_key = f"{execution_key}:{step_index}"
+
+            if (
+                destination.get("type") == "xvond_internal"
+                and destination.get("adapter") == "generic_capability"
+            ):
+                result = execute_generic_capability(
+                    db,
+                    company_id=company_id,
+                    agent_id=int(agent_id),
+                    action_type=action_type,
+                    action_config=action,
+                    details=details,
+                    idempotency_key=stable_key,
+                )
+                return {"scheduled_action_result": result}
+
+            if destination.get("type") == "integration":
+                result = _integration_call(
+                    db,
+                    {"company_id": company_id, "agent_id": int(agent_id)},
+                    action_type,
+                    action,
+                    {
+                        "operation": "execute",
+                        "action_type": action_type,
+                        "details": details,
+                        "summary": str(
+                            step.get("summary")
+                            or action.get("description")
+                            or action.get("label")
+                            or action_type
+                        )[:2000],
+                    },
+                    "execute",
+                    idempotency_key=stable_key,
+                )
+                if not result.success:
+                    raise ValueError(result.error or "Scheduled integration action failed")
+                return {
+                    "scheduled_action_result": {
+                        "runtime": "connected_integration",
+                        "action_type": action_type,
+                        "result": result.data or {},
+                    }
+                }
+
+            raise ValueError(
+                "Scheduled action destination is not supported for background execution"
             )
-            return {"scheduled_action_result": result}
 
         if step_type == "webhook":
             integration_id = step.get("integration_id")
