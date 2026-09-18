@@ -596,6 +596,24 @@ def test_self_service_job_brief_revision_clears_only_generated_build_artifacts(d
             "destination": {"type": "integration", "integration_id": 99},
         }
         assignment.config = assignment_config
+
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        config.capabilities = {"customer_support": True}
+        db.add_all([
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="human_handoff",
+                config={},
+                enabled=True,
+            ),
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="webhook",
+                config={"url": "https://operator.example.com/hook"},
+                enabled=True,
+            ),
+        ])
+
         generated = AutomationWorkflow(
             company_id=1,
             name="Generated old schedule",
@@ -657,6 +675,20 @@ def test_self_service_job_brief_revision_clears_only_generated_build_artifacts(d
         actions = reveal_config(_assignment(db).config)["actions"]
         assert set(actions) == {"operator_action"}
         assert actions["operator_action"]["destination"]["integration_id"] == 99
+
+        handoff = db.query(AgentToolAssignment).filter_by(
+            agent_id=1, tool_name="human_handoff"
+        ).one()
+        assert handoff.enabled is False
+        handoff_config = reveal_config(handoff.config)
+        assert handoff_config["_xvond_source"] == "employee_builder"
+        assert handoff_config["_xvond_retired_by_revision"] is True
+
+        manual_webhook = db.query(AgentToolAssignment).filter_by(
+            agent_id=1, tool_name="webhook"
+        ).one()
+        assert manual_webhook.enabled is True
+        assert reveal_config(manual_webhook.config)["url"] == "https://operator.example.com/hook"
 
         workflows = {item.name: item for item in db.query(AutomationWorkflow).all()}
         assert set(workflows) == {"Generated old schedule", "Manual schedule"}
