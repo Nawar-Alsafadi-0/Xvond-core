@@ -509,41 +509,81 @@ async function openPage(name, button) {
         await loadConversations();
     }
     if (loader === "usage") await loadUsage();
-    if (loader === "business") await loadCustomerBusiness();
+    if (loader === "business") {
+        await loadCustomerBusiness({
+            pageId: item.id || "business",
+            capabilityModule: item.capability_module || null,
+            includeHandoffs: item.include_handoffs !== false && !item.capability_module,
+            label: item.label || "Operations",
+        });
+    }
     if (loader === "integrations") renderIntegrations();
     if (loader === "billing") renderBilling();
     if (loader === "service") renderServicePage(item.service_code, item.id);
 }
 
-async function loadCustomerBusiness() {
-    const target = document.getElementById("customer-business-content");
+async function loadCustomerBusiness(options = {}) {
+    const pageId = options.pageId || "business";
+    const capabilityModule = String(options.capabilityModule || "").trim();
+    const includeHandoffs = options.includeHandoffs !== false;
+    const label = options.label || (capabilityModule ? capabilityModule.replaceAll("_", " ") : "Operations");
+    const page = document.getElementById(`page-${pageId}`);
+    const target = pageId === "business"
+        ? document.getElementById("customer-business-content")
+        : page?.querySelector(".dynamic-page-content");
+    if (!target) return;
+
     try {
+        const operationPath = capabilityModule
+            ? `/customer/action-requests?module=${encodeURIComponent(capabilityModule)}`
+            : "/customer/action-requests";
         const [operationResult, handoffs] = await Promise.all([
-            api("/customer/action-requests"),
-            api("/customer/business/handoffs")
+            api(operationPath),
+            includeHandoffs ? api("/customer/business/handoffs") : Promise.resolve([])
         ]);
         const operations = operationResult.requests || [];
         const open = operations.filter(x => !["completed", "cancelled"].includes(x.status));
         const completed = operations.filter(x => x.status === "completed");
-        document.getElementById("customer-operations-count").textContent = operations.length;
-        document.getElementById("customer-open-count").textContent = open.length;
-        document.getElementById("customer-completed-count").textContent = completed.length;
-        document.getElementById("customer-handoffs-count").textContent = handoffs.length;
+
+        if (pageId === "business") {
+            const totalEl = document.getElementById("customer-operations-count");
+            const openEl = document.getElementById("customer-open-count");
+            const completedEl = document.getElementById("customer-completed-count");
+            const handoffsEl = document.getElementById("customer-handoffs-count");
+            if (totalEl) totalEl.textContent = operations.length;
+            if (openEl) openEl.textContent = open.length;
+            if (completedEl) completedEl.textContent = completed.length;
+            if (handoffsEl) handoffsEl.textContent = handoffs.length;
+        }
+
+        const metrics = capabilityModule ? `
+            <div class="cards" style="margin-bottom:20px">
+                <div class="card"><span>Total</span><strong>${operations.length}</strong></div>
+                <div class="card"><span>Open</span><strong>${open.length}</strong></div>
+                <div class="card"><span>Completed</span><strong>${completed.length}</strong></div>
+            </div>
+        ` : "";
+
         target.innerHTML = `
-            ${customerBusinessSection("Operations", operations, item => `
-                <strong>${safe((item.action_type || "operation").replaceAll("_", " "))} #${item.id}</strong>
-                <p>Status: ${safe(item.status)}</p>
-                <p>${safe(item.summary || "")}</p>
+            ${metrics}
+            ${customerBusinessSection(label, operations, item => `
+                <div class="service-card-head">
+                    <div>
+                        <strong>${safe(item.action_label || (item.action_type || "operation").replaceAll("_", " "))} #${item.id}</strong>
+                        <p class="muted">${safe(item.summary || "")}</p>
+                    </div>
+                    <span class="pill">${safe(item.status)}</span>
+                </div>
                 ${operationDetails(item.details)}
                 ${operationButtons(item)}
             `)}
-            ${customerBusinessSection("Human Handoffs", handoffs, item => `
+            ${includeHandoffs ? customerBusinessSection("Human Handoffs", handoffs, item => `
                 <strong>Handoff #${item.id}</strong>
                 <p>Reason: ${safe(item.reason || "-")}</p>
                 <p>Department: ${safe(item.department || "-")}</p>
                 <p>Priority: ${safe(item.priority || "-")}</p>
                 <p>Status: ${safe(item.status)}</p>
-            `)}
+            `) : ""}
         `;
     } catch (err) {
         target.innerHTML = `<div class="panel">${safe(err.message)}</div>`;
