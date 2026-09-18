@@ -13,6 +13,9 @@ ALLOWED_GRAPH_NODE_TYPES = {
     "condition",
     "notify",
     "foreach",
+    "select",
+    "filter",
+    "aggregate",
 }
 
 
