@@ -6,6 +6,7 @@ from backend.app.core.http_security import safe_http_request
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.media.generated_media import generate_image_asset
 from backend.app.modules.tools.executor import tool_executor
 from backend.app.modules.tools.action_request import _integration_call
 from backend.app.modules.tools.generic_capability_runtime import execute_generic_capability
@@ -175,6 +176,29 @@ class AutomationRuntime:
             return {
                 "ai_response": response.get("response", {}).get("content", ""),
                 "conversation_id": response.get("conversation_id"),
+            }
+
+        if step_type == "media_generation":
+            prompt = str(
+                step.get("prompt")
+                or state.get("ai_response")
+                or step.get("label")
+                or ""
+            ).strip()
+            if not prompt:
+                raise ValueError("Media generation requires a prompt or prior AI output")
+            asset = generate_image_asset(
+                prompt=prompt,
+                model=str(step.get("model") or "").strip() or None,
+                size=str(step.get("size") or "1024x1024").strip(),
+            )
+            return {
+                "media_url": asset["media_url"],
+                "generated_media": {
+                    "content_type": asset["content_type"],
+                    "bytes": asset["bytes"],
+                    "model": asset["model"],
+                },
             }
 
         if step_type == "tool":
