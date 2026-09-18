@@ -345,6 +345,25 @@ Production deploy additionally:
 - requires the canonical `PUBLIC_BASE_URL/health/ready` to succeed over HTTPS with healthy production JSON
 - supports customer-specific production acceptance after cutover
 
+## Market launch gate
+
+Xvond now has a fail-closed final customer-path gate at `scripts/market_launch_gate.py`. It builds on the production acceptance gate instead of duplicating platform health checks.
+
+For one exact company/employee launch path it requires:
+
+- production post-live readiness and no unresolved external/delivery incidents
+- an eligible real AI provider route and, by default, one live AI health request
+- the requested launch mode to match the company lifecycle source (`managed` vs `self_service`)
+- every explicitly sold channel to be a packaged Xvond provider, configured, enabled and backed by persisted real-customer round-trip evidence
+- WhatsApp Coexistence launches to also have real human-takeover/echo evidence
+- an active AI Employee subscription
+- optional online-billing enforcement for paid Self-Service launch
+- optional same-company/same-checkout signed payment-webhook evidence before declaring the paid path accepted
+
+Production deploy can invoke this gate after cutover using `MARKET_ACCEPTANCE_MODE`, `MARKET_ACCEPTANCE_CHANNELS`, the existing acceptance company/agent ids, and the optional billing evidence flags.
+
+This gate deliberately cannot manufacture provider evidence. Telegram, Meta, WhatsApp, Website, Voice and payment acceptance markers must originate from the actual external/customer path.
+
 ## External validation boundary
 
 Repository CI cannot truthfully prove:
@@ -386,13 +405,14 @@ Repository state through the Self-Service channel-contract work is **code valida
 
 Highest-priority remaining external/product work:
 
-1. Promote and externally validate the packaged Telegram provider path: provision a real bot -> Telegram webhook -> Xvond employee -> durable outbound -> provider message id -> human handoff -> Return to AI.
-2. Configure/approve the production Merchant-of-Record account, recurring prices and signed webhook destination; run sandbox and then real-money payment acceptance.
-3. Validate the packaged Meta Messaging provider path for Instagram/Messenger with real app permissions, webhook subscription, inbound customer messages and provider-confirmed outbound responses; keep Email/SMS/Slack/Teams/Custom labeled as custom Xvond setup until their provider bindings exist.
-4. Deploy the reviewed `main` release to the server using the canonical Nginx + deploy flow.
-5. Run production end-to-end acceptance for Self-Service signup -> Job Brief -> dynamic missing information -> plan/checkout -> build -> required channel setup -> launch -> customer conversation/action -> handoff -> resume.
-6. Run managed-customer acceptance for the same employee runtime through Xvond Admin, proving the Managed and Self-Service provisioning models converge on one runtime without sharing lifecycle UX.
-7. Only after those acceptance gates pass, expose the launch publicly as a globally available Xvond AI Employee product.
+1. Merge and deploy the final Market Launch Gate release on the canonical production server.
+2. Configure production Workflow Engine route registries/secrets and provision one real Telegram bot; prove Telegram inbound -> Xvond employee -> durable provider-confirmed outbound -> handoff -> Return to AI.
+3. Configure Meta Messaging app permissions/subscriptions and real Instagram/Messenger routes; validate raw-body signature handling and one real inbound/outbound round trip for each launch channel.
+4. Configure/approve the production Merchant-of-Record account, recurring prices and signed webhook destination; run sandbox and then one real paid Self-Service checkout so tenant-scoped payment evidence exists.
+5. Run the final Self-Service market gate for signup -> Job Brief -> Smart Intake -> plan/payment -> build -> setup -> launch -> conversation/action -> handoff/resume on the exact channels being sold.
+6. Run one Managed-customer market gate through Xvond Admin to prove operator-built and Self-Service employees converge on the same runtime without sharing lifecycle UX.
+7. After those external gates pass, the reviewed release can be truthfully exposed as the public/global Xvond AI Employee launch. Email/SMS/Slack/Teams/Custom remain custom Xvond setup until packaged provider bindings are intentionally added.
+
 
 ## Branch model
 
