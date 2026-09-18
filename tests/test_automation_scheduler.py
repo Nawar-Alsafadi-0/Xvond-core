@@ -1944,3 +1944,60 @@ def test_graph_side_effect_detection_includes_interactive_browser_and_nested_gra
     assert graph_has_side_effect(read_only) is False
     assert graph_has_side_effect(interactive) is True
     assert graph_has_side_effect(nested) is True
+
+
+
+def test_automation_trace_records_step_lifecycle(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Trace Company", active=True))
+        db.add(
+            AutomationWorkflow(
+                id=1,
+                company_id=1,
+                name="Trace workflow",
+                trigger_type="manual",
+                trigger_config={},
+                steps=[
+                    {
+                        "type": "transform",
+                        "label": "Prepare",
+                        "values": {"prepared": True},
+                    }
+                ],
+                enabled=True,
+            )
+        )
+        db.commit()
+        workflow = db.query(AutomationWorkflow).filter_by(id=1).one()
+
+        run = automation_runtime_module.AutomationRuntime().execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={"source": "test"},
+        )
+
+        trace = run.output_data["trace"]
+        assert trace["version"] == 1
+        assert trace["status"] == "success"
+        assert trace["trigger_type"] == "manual"
+        assert trace["trace_id"].startswith("xvond_trace_")
+        assert trace["finished_at"]
+        assert len(trace["spans"]) == 1
+        span = trace["spans"][0]
+        assert span["step_index"] == 0
+        assert span["step_type"] == "transform"
+        assert span["label"] == "Prepare"
+        assert span["status"] == "success"
+        assert span["phase"] == "execute"
+        assert span["duration_ms"] >= 0
+
+    engine.dispose()
