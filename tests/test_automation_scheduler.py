@@ -323,3 +323,116 @@ def test_scheduled_connected_action_uses_stable_execution_key_and_ai_output(monk
     assert "conversation_id" not in captured["payload"]["details"]
     assert result["scheduled_action_result"]["runtime"] == "connected_integration"
     engine.dispose()
+
+
+
+def test_schedule_validation_accepts_general_graph_unit():
+    trigger = validate_workflow(
+        "schedule",
+        [
+            {
+                "type": "graph",
+                "agent_id": 1,
+                "graph": {
+                    "version": 1,
+                    "nodes": [
+                        {
+                            "id": "draft",
+                            "type": "ai",
+                            "depends_on": [],
+                            "params": {"prompt": "Create content"},
+                        },
+                        {
+                            "id": "publish",
+                            "type": "action",
+                            "depends_on": ["draft"],
+                            "params": {
+                                "action_type": "publish",
+                                "arguments": {
+                                    "body": "$nodes.draft.ai_response"
+                                },
+                            },
+                        },
+                    ],
+                },
+            }
+        ],
+        {"schedule": {"kind": "interval", "every_minutes": 15}},
+    )
+    assert trigger == "schedule"
+
+
+def test_graph_runtime_resolves_node_outputs_into_later_action(monkeypatch):
+    captured = {}
+
+    def fake_step(db, company_id, step, state, *, run_id, step_index):
+        if step["type"] == "ai":
+            return {"ai_response": "Generated result"}
+        if step["type"] == "scheduled_action":
+            captured["arguments"] = dict(step.get("arguments") or {})
+            captured["action_type"] = step.get("action_type")
+            return {"done": True}
+        raise AssertionError(step["type"])
+
+    runtime = automation_runtime_module.AutomationRuntime()
+    original = runtime.execute_step
+
+    def dispatch(db, company_id, step, state, *, run_id, step_index):
+        if step.get("type") == "graph":
+            return original(
+                db,
+                company_id,
+                step,
+                state,
+                run_id=run_id,
+                step_index=step_index,
+            )
+        return fake_step(
+            db,
+            company_id,
+            step,
+            state,
+            run_id=run_id,
+            step_index=step_index,
+        )
+
+    monkeypatch.setattr(runtime, "execute_step", dispatch)
+
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 77,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "draft",
+                        "type": "ai",
+                        "depends_on": [],
+                        "params": {"prompt": "Create the result"},
+                    },
+                    {
+                        "id": "act",
+                        "type": "action",
+                        "depends_on": ["draft"],
+                        "params": {
+                            "action_type": "custom_action",
+                            "arguments": {
+                                "body": "$nodes.draft.ai_response",
+                            },
+                        },
+                    },
+                ],
+            },
+        },
+        state={"_xvond_execution_key": "graph-test"},
+        run_id=1,
+        step_index=0,
+    )
+
+    assert captured["action_type"] == "custom_action"
+    assert captured["arguments"]["body"] == "Generated result"
+    assert result["graph_outputs"]["draft"]["ai_response"] == "Generated result"
+    assert result["graph_outputs"]["act"]["done"] is True
