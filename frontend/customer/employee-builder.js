@@ -1122,7 +1122,8 @@
         document.querySelectorAll("[data-rollback-version]").forEach(button => {
             button.addEventListener("click", async () => {
                 const versionId = String(button.dataset.rollbackVersion || "");
-                const message = employee.enabled ? "Stage this previous version as a pending revision? The live employee will keep running." : "Restore this employee version? The current draft will be saved in history first.";\n                if (!versionId || !confirm(message)) return;
+                const message = employee.enabled ? "Stage this previous version as a pending revision? The live employee will keep running." : "Restore this employee version? The current draft will be saved in history first.";
+                if (!versionId || !confirm(message)) return;
                 button.disabled = true;
                 try {
                     await api(`/customer/employee-builder/${employee.agent_id}/rollback`, {
