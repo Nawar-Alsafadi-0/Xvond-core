@@ -542,3 +542,30 @@ def test_external_booking_action_keeps_real_integration_and_provider_endpoints()
     assert action["destination"]["validation_required"] is True
     assert action["destination"]["operations"]["execute"]["endpoint"] == "/bookings"
     assert action["availability"]["mode"] == "integration"
+
+
+
+def test_content_generation_is_native_and_does_not_create_fake_execution_setup():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Content assistant",
+            "scope": "personal",
+            "requirements": [
+                {
+                    "key": "content_generation",
+                    "kind": "tool",
+                    "purpose": "Draft social content on demand",
+                }
+            ],
+        },
+        job_brief="Draft social content for me inside Xvond.",
+    )
+
+    requirement = spec["requirements"][0]
+    assert requirement["key"] == "content_generation"
+    assert requirement["status"] == "available"
+    assert requirement["delivery_mode"] == "native"
+    assert requirement["primitives"] == ["content_generation"]
+    assert requirement["execution_plan"] == []
+    assert "content_generation" in spec["ready_requirements"]
+    assert "content_generation" not in spec["build_required"]
