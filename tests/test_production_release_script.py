@@ -124,11 +124,18 @@ def test_release_rechecks_workflow_can_reach_new_api_after_cutover():
     assert "Workflow-to-API probe failed" in SOURCE
 
 
-def test_workflow_sync_publishes_and_sets_active_before_restart():
-    publish = WORKFLOW_SYNC.index('publish:workflow --id="$WORKFLOW_ID"')
-    activate = WORKFLOW_SYNC.index('update:workflow --id="$WORKFLOW_ID" --active=true')
+def test_workflow_sync_publishes_both_xvond_gateways_before_restart():
+    sync_function = WORKFLOW_SYNC.index("sync_one_workflow()")
+    publish = WORKFLOW_SYNC.index('publish:workflow --id="$workflow_id"', sync_function)
+    activate = WORKFLOW_SYNC.index('update:workflow --id="$workflow_id" --active=true', publish)
+    action_sync = WORKFLOW_SYNC.index('sync_one_workflow "$ACTION_WORKFLOW_FILE" "$ACTION_WORKFLOW_ID"')
+    channel_sync = WORKFLOW_SYNC.index('sync_one_workflow "$CHANNEL_WORKFLOW_FILE" "$CHANNEL_WORKFLOW_ID"')
     restart = WORKFLOW_SYNC.index("up -d --no-deps workflow-engine")
-    assert publish < activate < restart
+    assert publish < activate < action_sync < channel_sync < restart
+    assert "xvond-actions.workflow.json" in WORKFLOW_SYNC
+    assert "xvond-channels.workflow.json" in WORKFLOW_SYNC
+    assert "77dbf1b8-241b-44ec-b0f8-a16fe415490a" in WORKFLOW_SYNC
+    assert "1ac59a11-41a9-48c0-a67d-9462b5cddc0e" in WORKFLOW_SYNC
 
 
 def test_workflow_sync_retries_transient_runtime_startup_failures():
