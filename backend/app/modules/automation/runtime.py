@@ -1191,7 +1191,17 @@ class AutomationRuntime:
                 raise ValueError("Scheduled action contract is not assigned to this employee")
             config = reveal_config(assignment.config) or {}
             action = (config.get("actions") or {}).get(action_type)
-            if not isinstance(action, dict) or not action.get("enabled", True):
+            if not isinstance(action, dict):
+                raise ValueError("Scheduled action contract is missing")
+            if not action.get("enabled", True):
+                if str(action.get("_xvond_permission_mode") or "").strip().lower() == "never":
+                    return {
+                        "scheduled_action_result": {
+                            "skipped": True,
+                            "reason": "owner_permission_never",
+                            "action_type": action_type,
+                        }
+                    }
                 raise ValueError("Scheduled action is not enabled")
             destination = action.get("destination") or {}
             if action.get("confirmation_required", True):
