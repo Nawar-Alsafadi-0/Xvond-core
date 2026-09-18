@@ -17,6 +17,7 @@ from backend.app.modules.channels.catalog import (
     canonical_channel_type,
     get_channel_capability,
 )
+from backend.app.modules.channels.acceptance import mark_customer_roundtrip
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.tools.business_models import HumanHandoff
 
@@ -24,6 +25,21 @@ from backend.app.modules.tools.business_models import HumanHandoff
 router = APIRouter(prefix="/internal/channels", tags=["Xvond Internal Channels"])
 
 ACTIVE_HANDOFF_STATUSES = {"pending", "in_progress"}
+
+
+class ChannelDeliveryConfirmation(BaseModel):
+    channel_id: int
+    conversation_id: int
+    response_message_id: int
+    provider_message_id: str = Field(min_length=1, max_length=200)
+
+    @field_validator("provider_message_id")
+    @classmethod
+    def clean_provider_message_id(cls, value: str) -> str:
+        clean = str(value or "").strip()
+        if not clean:
+            raise ValueError("Provider message identity cannot be blank")
+        return clean
 
 
 class InternalChannelMessage(BaseModel):
@@ -112,6 +128,7 @@ def _channel_response(
     external_contact_id: str,
     external_message_id: str,
     reply: str | None,
+    response_message_id: int | None = None,
     mode: str,
     duplicate: bool = False,
 ) -> dict:
@@ -126,6 +143,7 @@ def _channel_response(
         "conversation_id": conversation_id,
         "external_contact_id": external_contact_id,
         "external_message_id": external_message_id,
+        "response_message_id": response_message_id,
         "mode": mode,
         "duplicate": duplicate,
         "reply": reply,
@@ -196,6 +214,7 @@ def receive_channel_message(
                     external_contact_id=payload.external_contact_id,
                     external_message_id=payload.external_message_id,
                     reply=existing_reply.content,
+                    response_message_id=existing_reply.id,
                     mode="ai",
                     duplicate=True,
                 )
@@ -293,8 +312,105 @@ def receive_channel_message(
             external_contact_id=payload.external_contact_id,
             external_message_id=payload.external_message_id,
             reply=str((result.get("response") or {}).get("content") or ""),
+            response_message_id=(result.get("response") or {}).get("id"),
             mode="ai",
         )
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+
+@router.post("/delivery-confirmed")
+def confirm_channel_delivery(
+    payload: ChannelDeliveryConfirmation,
+    x_xvond_n8n_secret: str | None = Header(default=None),
+):
+    """Persist proof that a real managed-channel reply reached its provider path."""
+
+    _require_workflow_secret(x_xvond_n8n_secret)
+    db = SessionLocal()
+    try:
+        channel = (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.id == payload.channel_id,
+                AgentChannel.enabled.is_(True),
+            )
+            .with_for_update()
+            .first()
+        )
+        if channel is None:
+            raise HTTPException(404, "Active Xvond channel not found")
+
+        channel_type = canonical_channel_type(channel.channel_type)
+        capability = get_channel_capability(channel_type) or {}
+        if (
+            capability.get("runtime_state") != CHANNEL_RUNTIME_LIVE
+            or capability.get("runtime_adapter") != N8N_CHANNEL_ADAPTER
+        ):
+            raise HTTPException(
+                409,
+                "Channel is not routed through the Xvond channel gateway",
+            )
+
+        conversation = (
+            db.query(AIConversation)
+            .filter(
+                AIConversation.id == payload.conversation_id,
+                AIConversation.company_id == channel.company_id,
+                AIConversation.agent_id == channel.agent_id,
+                AIConversation.channel_id == channel.id,
+            )
+            .first()
+        )
+        if conversation is None:
+            raise HTTPException(404, "Channel conversation not found")
+
+        response_message = (
+            db.query(AIMessage)
+            .filter(
+                AIMessage.id == payload.response_message_id,
+                AIMessage.conversation_id == conversation.id,
+                AIMessage.role == "assistant",
+            )
+            .first()
+        )
+        if response_message is None:
+            raise HTTPException(404, "Channel response message not found")
+
+        first_verified = mark_customer_roundtrip(
+            channel,
+            source=f"xvond_managed:{channel_type}",
+        )
+        audit_service.log(
+            db=db,
+            company_id=channel.company_id,
+            action="channel.delivery_confirmed",
+            resource_type="channel",
+            resource_id=channel.id,
+            details={
+                "agent_id": channel.agent_id,
+                "conversation_id": conversation.id,
+                "response_message_id": response_message.id,
+                "provider_message_id": payload.provider_message_id,
+                "channel_type": channel_type,
+                "first_verified_roundtrip": first_verified,
+            },
+        )
+        db.commit()
+        return {
+            "success": True,
+            "status": "verified",
+            "channel_id": channel.id,
+            "conversation_id": conversation.id,
+            "response_message_id": response_message.id,
+        }
     except HTTPException:
         db.rollback()
         raise
