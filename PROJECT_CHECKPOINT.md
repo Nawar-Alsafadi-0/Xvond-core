@@ -72,7 +72,8 @@ Important Self-Service rules:
 
 - The Customer Portal exposes **Build your employee** as a first-class Self-Service workspace and opens Draft employees there by default.
 - The Builder presents one canonical journey: **Job Brief -> Plan -> Build -> Setup -> Launch**. Runtime readiness remains authoritative; the UI does not infer readiness by parsing blocker text.
-- Owner-provided setup data is collected inside the Builder only for the exact compiled requirement fields. All required fields must be complete before the requirement resolves.
+- Smart Intake separates facts already present in the Job Brief from genuinely missing setup facts. Xvond must not re-ask for a business name, hours, rules or other context already supplied by the customer.
+- Owner-provided setup data is collected inside the Builder only for the exact compiled missing fields. The Builder creates dynamic fields instead of a fixed universal form, and all required fields must be complete before the requirement resolves.
 - Password/token/API-key/credential-shaped requirements never use generic setup fields; they stay on a protected Xvond/provider connection path.
 - A `files` requirement resolves only from an enabled PDF actually attached to that employee; generic text knowledge does not falsely satisfy it.
 - A personal/background employee may legitimately require **zero communication channels**.
@@ -225,11 +226,13 @@ The employee contract may request any registered communication surface. Xvond ke
 - **Website Chat** — Self-Service setup; live Xvond widget runtime.
 - **WhatsApp** — Self-Service setup; live Meta Cloud API runtime.
 - **Voice / Phone** — Xvond-managed setup; live Vapi runtime foundation. It is not service-ready until a real phone/call path passes end-to-end acceptance.
-- **Telegram, Instagram DM, Facebook Messenger, Email, SMS, Slack, Microsoft Teams and Custom/API channels** — valid employee channel requests handled by Xvond Managed delivery, but their channel runtime remains `adapter_required` until a real adapter is implemented and validated.
+- **Telegram, Instagram DM, Facebook Messenger, Email, SMS, Slack, Microsoft Teams and Custom/API channels** — Xvond-managed communication surfaces routed through one generic Xvond/n8n channel bridge. Provider-specific credentials and workflow details stay in the workflow plane rather than Xvond Core.
 
-A requested Managed channel creates a durable, disabled provisioning work item for Xvond Admin. Removing that channel from the current Job Brief cancels/deactivates the request without fabricating a live connection.
+A requested Managed channel creates a durable, disabled provisioning work item for Xvond Admin. Removing that channel from the current Job Brief cancels/deactivates the request without fabricating a live connection. For n8n-backed channels, Admin exposes **Verify Xvond Route**; the channel is marked provisioned only after the workflow gateway confirms that the company/channel route exists.
 
-A channel must never be presented or activated as live merely because configuration values exist. Runtime activation requires a registered live adapter plus channel-specific readiness evidence. Voice specifically requires successful Vapi provisioning evidence before launch.
+The normalized managed-channel flow is: provider-specific n8n adapter -> Xvond internal inbound contract -> persistent Xvond AI Employee/conversation -> normalized reply -> n8n provider delivery -> Xvond delivery confirmation. Duplicate external message IDs are deduplicated before another AI turn, and active human handoff suppresses AI replies while preserving the customer message in the unified conversation.
+
+A channel must never be presented or activated as customer-live merely because a catalog entry or configuration value exists. Runtime activation requires a registered live adapter plus route/readiness evidence; service readiness still requires real provider-specific external acceptance. Voice specifically requires successful Vapi provisioning evidence before launch.
 
 Communication surfaces and action integrations remain distinct. For example:
 
@@ -360,14 +363,14 @@ No live provider, Meta, Workflow Engine, customer-integration or payment secret 
 
 ## Current release status at this checkpoint
 
-Repository state through the Self-Service channel-contract work is **code validated**, but this checkpoint does **not** claim that the reviewed release has been deployed to the production server.
+Repository state through Smart Intake is **code validated and merged**. The generic n8n managed-channel bridge is under review on the current feature branch; this checkpoint does **not** claim that branch is merged or deployed until CI/merge complete.
 
 Highest-priority remaining external/product work:
 
 1. Deploy the reviewed `main` release to the server using the canonical Nginx + deploy flow.
 2. Run real production end-to-end acceptance for Website, WhatsApp/Meta, Workflow Engine and the intended AI provider.
 3. Implement a real payment provider/checkout/webhook/idempotency path before calling paid Self-Service checkout automated.
-4. Implement and externally validate real Email/Instagram provider adapters before selling them as live connectors.
+4. Configure provider-specific n8n channel adapters/routes and run real external acceptance for each managed channel (for example Instagram DM, Telegram or Email) before selling that channel as service-ready.
 
 ## Branch model
 
