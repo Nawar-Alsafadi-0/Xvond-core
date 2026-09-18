@@ -148,15 +148,20 @@ def enabled_channel_types(db, *, company_id: int, agent_id: int) -> list[str]:
     return result
 
 
-def _execution_blockers(spec: dict) -> list[str]:
+def _execution_blockers(spec: dict, *, resolved_channels: list[str]) -> list[str]:
     blockers: list[str] = []
+    resolved = set(communication_channels(resolved_channels))
     for item in spec.get("requirements") or []:
         if not isinstance(item, dict):
             continue
         key = str(item.get("key") or "requirement").strip()
+        kind = str(item.get("kind") or "").strip().lower()
+        channel_key = "xvond" if key == "xvond_workspace" else key.lower()
         status = str(item.get("status") or "").strip().lower()
         execution_status = str(item.get("execution_status") or "").strip().lower()
 
+        if kind == "channel" and channel_key in resolved:
+            continue
         if status in {"connection_required", "customer_input_required", "setup_required"}:
             blockers.append(f"{key}: setup required")
             continue
@@ -214,7 +219,7 @@ def evaluate_readiness(
     for item in missing_channels:
         blockers.append(f"Connect and activate {item} before launch")
 
-    blockers.extend(_execution_blockers(spec))
+    blockers.extend(_execution_blockers(spec, resolved_channels=active))
 
     mode = interaction_mode(spec, slot_channels)
     channels_required = bool(slot_channels)
