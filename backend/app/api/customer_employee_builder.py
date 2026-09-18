@@ -960,7 +960,21 @@ def _self_service_builder_journey(
             elif status == "xvond_managed":
                 execution_status = str(requirement.get("execution_status") or "")
                 schedule_status = str(requirement.get("schedule_status") or "")
-                if execution_status not in {"", "ready"} or schedule_status not in {
+                if schedule_status == "approval_required":
+                    setup_actions.append(
+                        _builder_action(
+                            "set_permission",
+                            f"Choose automation permission for {key.replace('_', ' ')}",
+                            target="builder",
+                            key=key,
+                            detail=(
+                                "Scheduled execution is ready except for owner permission. "
+                                "Choose Automatic to let it run unattended, or change the "
+                                "job so this action does not need background execution."
+                            ),
+                        )
+                    )
+                elif execution_status not in {"", "ready"} or schedule_status not in {
                     "",
                     "ready",
                     "not_required",
