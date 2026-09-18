@@ -45,3 +45,10 @@ def test_self_service_background_runtime_is_subscription_gated():
     assert "assert_self_service_runtime_subscription" in RUNTIME
     assert "service_limits.entitlement" in POLICY
     assert "if not is_self_service_company(company)" in POLICY
+
+
+def test_self_service_connection_ui_does_not_fake_missing_adapters():
+    assert "self_service_connection_status" in POLICY
+    assert "Xvond connection adapter required" in POLICY
+    assert "Xvond connection adapter required" in PORTAL
+    assert "self_service_spec_view" in SELF_SERVICE
