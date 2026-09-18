@@ -63,6 +63,25 @@ fetch(url, {
 });'
 }
 
+probe_workflow_to_app_health() {
+    docker exec xvond-workflow-engine node -e '
+fetch("http://app:8000/health/ready")
+  .then(async response => {
+    const text = await response.text();
+    if (!response.ok) throw new Error(`http_${response.status}:${text.slice(0, 200)}`);
+    let result;
+    try { result = JSON.parse(text); }
+    catch (_error) { throw new Error(`invalid_json_response:${text.slice(0, 200)}`); }
+    if (!result || result.status !== "healthy") {
+      throw new Error(`api_not_ready:${text.slice(0, 200)}`);
+    }
+  })
+  .catch(error => {
+    console.error(`Workflow-to-API probe failed: ${String(error && error.message || "unknown")}`);
+    process.exit(1);
+  });'
+}
+
 env_value() {
     key="$1"
     awk -F= -v wanted="$key" '
@@ -188,6 +207,9 @@ fi
 compose stop whatsapp-worker automation-scheduler >/dev/null 2>&1 || true
 compose up -d --no-deps --force-recreate app
 wait_healthy xvond-core
+if [ "$workflow_enabled" = "true" ]; then
+    probe_workflow_to_app_health
+fi
 compose up -d --no-deps --force-recreate whatsapp-worker automation-scheduler
 wait_healthy xvond-whatsapp-worker
 wait_healthy xvond-automation-scheduler
