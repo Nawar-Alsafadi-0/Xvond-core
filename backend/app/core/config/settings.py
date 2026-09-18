@@ -58,6 +58,7 @@ class Settings:
     BILLING_PROVIDER = os.getenv("BILLING_PROVIDER", "none").strip().lower()
     PADDLE_API_KEY = os.getenv("PADDLE_API_KEY", "").strip()
     PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
+    PADDLE_CLIENT_TOKEN = os.getenv("PADDLE_CLIENT_TOKEN", "").strip()
     PADDLE_ENVIRONMENT = os.getenv("PADDLE_ENVIRONMENT", "sandbox").strip().lower()
     PADDLE_CHECKOUT_URL = os.getenv("PADDLE_CHECKOUT_URL", "").strip()
     PADDLE_PRICE_MAP_JSON = os.getenv("PADDLE_PRICE_MAP_JSON", "{}").strip() or "{}"
@@ -103,8 +104,14 @@ class Settings:
                 errors.append("PADDLE_API_KEY is required when Paddle billing is enabled")
             if not self.PADDLE_WEBHOOK_SECRET:
                 errors.append("PADDLE_WEBHOOK_SECRET is required when Paddle billing is enabled")
+            if not self.PADDLE_CLIENT_TOKEN:
+                errors.append("PADDLE_CLIENT_TOKEN is required when Paddle billing is enabled")
+            if not self.PADDLE_CHECKOUT_URL:
+                errors.append("PADDLE_CHECKOUT_URL is required when Paddle billing is enabled")
             if self.is_production and self.PADDLE_ENVIRONMENT != "live":
                 errors.append("PADDLE_ENVIRONMENT must be live in production when Paddle billing is enabled")
+            if self.is_production and not self.PADDLE_CHECKOUT_URL.startswith("https://"):
+                errors.append("PADDLE_CHECKOUT_URL must use HTTPS in production")
         if self.N8N_ENABLED:
             if not self.N8N_WEBHOOK_URL:
                 errors.append("N8N_WEBHOOK_URL is required when n8n is enabled")
