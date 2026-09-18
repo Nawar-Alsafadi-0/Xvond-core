@@ -2,6 +2,8 @@ INTEGRATION_CATALOG = {
 
     "pos": {
         "name": "POS",
+        "customer_connectable": True,
+        "execution_adapter": "http_api",
         "description": "Point of Sale system",
         "config_fields": [
             {
@@ -21,6 +23,8 @@ INTEGRATION_CATALOG = {
 
     "crm": {
         "name": "CRM",
+        "customer_connectable": True,
+        "execution_adapter": "http_api",
         "description": "Customer Relationship Management system",
         "config_fields": [
             {
@@ -40,6 +44,8 @@ INTEGRATION_CATALOG = {
 
     "erp": {
         "name": "ERP",
+        "customer_connectable": True,
+        "execution_adapter": "http_api",
         "description": "Enterprise Resource Planning system",
         "config_fields": [
             {
@@ -59,6 +65,8 @@ INTEGRATION_CATALOG = {
 
     "calendar": {
         "name": "Calendar",
+        "customer_connectable": False,
+        "execution_adapter": None,
         "description": "External booking/calendar system",
         "config_fields": [
             {
@@ -84,6 +92,8 @@ INTEGRATION_CATALOG = {
 
     "webhook": {
         "name": "Webhook",
+        "customer_connectable": True,
+        "execution_adapter": "webhook",
         "description": "Send business events to an external webhook",
         "config_fields": [
             {
@@ -103,6 +113,8 @@ INTEGRATION_CATALOG = {
 
     "custom_api": {
         "name": "Custom API",
+        "customer_connectable": True,
+        "execution_adapter": "http_api",
         "description": "Connect any external business API",
         "config_fields": [
             {
@@ -179,3 +191,44 @@ def validate_integration_config(
         )
 
     return True
+
+
+SELF_SERVICE_CONNECTABLE_TYPES = frozenset(
+    key
+    for key, value in INTEGRATION_CATALOG.items()
+    if value.get("customer_connectable") is True
+    and value.get("execution_adapter")
+)
+
+EXECUTABLE_HTTP_INTEGRATION_TYPES = frozenset(
+    key
+    for key, value in INTEGRATION_CATALOG.items()
+    if value.get("execution_adapter") == "http_api"
+)
+
+
+def list_customer_connectable_definitions():
+    return [
+        {
+            "type": key,
+            "name": value["name"],
+            "description": value["description"],
+            "config_fields": [
+                {
+                    "name": field["name"],
+                    "label": field["label"],
+                    "required": bool(field.get("required")),
+                    "secret": bool(field.get("secret")),
+                    **(
+                        {"default": field.get("default")}
+                        if field.get("default") is not None
+                        else {}
+                    ),
+                }
+                for field in value.get("config_fields") or []
+            ],
+            "execution_adapter": value.get("execution_adapter"),
+        }
+        for key, value in INTEGRATION_CATALOG.items()
+        if key in SELF_SERVICE_CONNECTABLE_TYPES
+    ]
