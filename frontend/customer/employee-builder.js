@@ -199,6 +199,7 @@
         if (!target) return;
         const lifecycleTone = employee.enabled ? "ready" : "setup";
         const provisioned = employee.compiled_spec?.delivery?.provisioning_version === 1;
+        const subscriptionStatus = String(employee.self_service_readiness?.subscription?.status || "");
         const channels = (employee.requested_channels || []).map(item => badge(labelFor(CHANNELS, item))).join("") || '<span class="muted">No channel selected yet.</span>';
 
         target.innerHTML = `
@@ -257,7 +258,17 @@
                     ` : `
                         <div class="employee-builder-section">
                             <h3>Next step</h3>
-                            <p class="muted">Subscribe to build, test and launch this employee. Saving the Job Brief itself used no paid AI.</p>
+                            ${subscriptionStatus === "pending_payment" ? `
+                                <p class="muted">Your selected plan is pending payment or Xvond approval. AI-backed build, test and launch stay locked until the subscription becomes active.</p>
+                                <div class="employee-builder-missing">${badge("Payment pending", "setup")}</div>
+                            ` : `
+                                <p class="muted">Choose an AI Employee plan to build, test and launch this employee. Saving the Job Brief itself used no paid AI.</p>
+                                <div class="employee-builder-actions">
+                                    <button type="button" id="choose-subscription-btn">Choose plan</button>
+                                </div>
+                                <div id="subscription-plans" class="employee-builder-section hidden"></div>
+                                <div id="subscription-error" class="error"></div>
+                            `}
                         </div>
                     `}
 
@@ -311,6 +322,11 @@
             });
         }
 
+        const chooseSubscriptionButton = document.getElementById("choose-subscription-btn");
+        if (chooseSubscriptionButton) {
+            chooseSubscriptionButton.addEventListener("click", loadSubscriptionPlans);
+        }
+
         const prepareButton = document.getElementById("prepare-employee-btn");
         if (prepareButton) {
             prepareButton.addEventListener("click", () => prepareEmployee(employee.agent_id));
@@ -351,6 +367,64 @@
                     ? `Job Brief saved, but rebuild failed: ${err?.message || "Could not rebuild employee."}`
                     : (err?.message || "Could not update Job Brief.");
             }
+        } finally {
+            if (button) button.disabled = false;
+        }
+    }
+
+    function subscriptionPlanMarkup(plan) {
+        const price = Number(plan?.monthly_price || 0);
+        const amount = Number.isFinite(price) ? price.toFixed(price % 1 ? 3 : 0) : String(plan?.monthly_price || 0);
+        const limits = Object.entries(plan?.limits || {}).map(([key, value]) => `${escapeHtml(key.replaceAll("_", " "))}: ${String(value) === "0" ? "Unlimited" : escapeHtml(value)}`).join(" · ");
+        return `
+            <div class="agent">
+                <h3>${escapeHtml(plan?.name || plan?.tier || "AI Employee")}</h3>
+                <p><strong>${escapeHtml(plan?.currency || "OMR")} ${escapeHtml(amount)} / month</strong></p>
+                <p class="muted">${limits || "Package limits are managed by Xvond."}</p>
+                <button type="button" class="request-subscription-plan" data-plan-id="${Number(plan.id)}">${plan?.free ? "Activate free plan" : "Select plan"}</button>
+            </div>
+        `;
+    }
+
+    async function loadSubscriptionPlans() {
+        const button = document.getElementById("choose-subscription-btn");
+        const box = document.getElementById("subscription-plans");
+        const error = document.getElementById("subscription-error");
+        if (!box) return;
+        if (button) button.disabled = true;
+        if (error) error.textContent = "";
+        try {
+            const result = await api("/customer/subscription/ai-agents/plans");
+            const plans = result.plans || [];
+            box.classList.remove("hidden");
+            box.innerHTML = plans.length
+                ? `<div class="service-grid">${plans.map(subscriptionPlanMarkup).join("")}</div>${result.online_payments_enabled ? "" : '<p class="muted">Online payment is not enabled yet. Paid plans remain pending until payment or Xvond approval is completed.</p>'}`
+                : '<p class="muted">No AI Employee plans are available yet.</p>';
+            box.querySelectorAll(".request-subscription-plan").forEach(planButton => {
+                planButton.addEventListener("click", () => requestSubscriptionPlan(Number(planButton.dataset.planId), planButton));
+            });
+        } catch (err) {
+            if (error) error.textContent = err?.message || "Could not load subscription plans.";
+        } finally {
+            if (button) button.disabled = false;
+        }
+    }
+
+    async function requestSubscriptionPlan(planId, button) {
+        const error = document.getElementById("subscription-error");
+        if (button) button.disabled = true;
+        if (error) error.textContent = "";
+        try {
+            const result = await api("/customer/subscription/ai-agents/request", {
+                method: "POST",
+                body: JSON.stringify({ plan_id: Number(planId) })
+            });
+            if (result.requires_payment) {
+                alert("Plan selected. Payment or Xvond approval is required before AI execution is enabled.");
+            }
+            await loadEmployeeBuilder();
+        } catch (err) {
+            if (error) error.textContent = err?.message || "Could not select subscription plan.";
         } finally {
             if (button) button.disabled = false;
         }
