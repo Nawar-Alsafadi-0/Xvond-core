@@ -92,10 +92,28 @@ def normalize_execution_graph(value: Any) -> dict:
 
 
 def graph_has_side_effect(graph: dict) -> bool:
-    return any(
-        isinstance(node, dict) and node.get("type") == "action"
-        for node in (graph or {}).get("nodes") or []
-    )
+    for node in (graph or {}).get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        node_type = str(node.get("type") or "").strip().lower()
+        if node_type == "action":
+            return True
+        if node_type == "browser":
+            actions = (node.get("params") or {}).get("actions") or []
+            if any(
+                isinstance(action, dict)
+                and str(action.get("op") or "").strip().lower()
+                in {"click", "fill", "press", "select"}
+                for action in actions
+            ):
+                return True
+        if node_type == "foreach":
+            nested = (node.get("params") or {}).get("graph")
+            if isinstance(nested, dict) and graph_has_side_effect(
+                normalize_execution_graph(nested)
+            ):
+                return True
+    return False
 
 
 def graph_node_ids(graph: dict) -> list[str]:
