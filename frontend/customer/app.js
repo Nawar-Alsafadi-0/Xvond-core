@@ -349,7 +349,7 @@ async function renderIntegrations() {
                         <div class="service-card-head">
                             <div>
                                 <strong>${safe(item.name)}</strong>
-                                <p>${safe(item.integration_type)} · ${item.validated ? "Validated" : item.configured ? "Configured · validation required" : "Setup incomplete"}</p>
+                                <p>${safe(item.integration_type)} · ${item.validated ? "Validated" : (item.connection_mode === "oauth" && item.oauth_status === "pending") ? "Authorization pending" : item.configured ? "Configured · validation required" : "Setup incomplete"}</p>
                             </div>
                             <span class="pill">${item.enabled ? "Active" : "Inactive"}</span>
                         </div>
@@ -368,6 +368,13 @@ async function renderIntegrations() {
             const definition = definitions.find(item => item.type === type?.value) || definitions[0];
             const host = document.getElementById("customer-integration-fields");
             if (!host) return;
+            const createButton = document.getElementById("customer-integration-create");
+            if (definition?.connection_mode === "oauth") {
+                host.innerHTML = '<div class="note"><strong>OAuth connection</strong><p class="muted">Xvond will redirect you to the provider to grant access securely. Passwords and manual access tokens are not requested here.</p></div>';
+                if (createButton) createButton.textContent = "Connect " + String(definition.name || "account");
+                return;
+            }
+            if (createButton) createButton.textContent = "Add connected system";
             host.innerHTML = (definition?.config_fields || []).map(field => `
                 <label>
                     ${safe(field.label || field.name)}
@@ -401,6 +408,19 @@ async function renderIntegrations() {
             }
             button.disabled = true;
             try {
+                const definition = definitions.find(item => item.type === integrationType);
+                if (definition?.connection_mode === "oauth") {
+                    if (integrationType !== "google_calendar") {
+                        throw new Error("This OAuth provider is not available yet.");
+                    }
+                    const result = await api("/manage/integrations/google-calendar/oauth/start", {
+                        method: "POST",
+                        body: JSON.stringify({name, calendar_id: "primary"}),
+                    });
+                    if (!result.authorization_url) throw new Error("Authorization URL was not returned.");
+                    window.location.assign(result.authorization_url);
+                    return;
+                }
                 await api("/manage/integrations", {
                     method: "POST",
                     body: JSON.stringify({integration_type: integrationType, name, config}),
