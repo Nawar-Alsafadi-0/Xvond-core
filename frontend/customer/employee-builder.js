@@ -83,6 +83,8 @@
         if (status === "xvond_build") return "Xvond builds this";
         if (status === "connection_required") {
             if (item?.self_service_connection_status === "xvond_adapter_required") return "Xvond connection adapter required";
+            if (item?.self_service_connection_status === "xvond_custom_provider_setup") return "Xvond custom connection setup";
+            if (item?.self_service_connection_status === "xvond_managed_available") return "Xvond managed setup";
             return "connect account";
         }
         if (status === "customer_input_required") return "add required data";
