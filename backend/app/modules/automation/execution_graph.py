@@ -201,3 +201,24 @@ def compare_values(left: Any, operator: str, right: Any) -> bool:
     if op == "in":
         return left in right if right is not None else False
     raise ValueError(f"Unsupported comparison operator: {op}")
+
+
+
+def graph_nested_action_types(graph: dict) -> list[str]:
+    result: list[str] = []
+
+    def visit(current: dict, depth: int) -> None:
+        for node in (current or {}).get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            if node.get("type") == "action" and depth > 0:
+                action_type = str((node.get("params") or {}).get("action_type") or "").strip()
+                if action_type and action_type not in result:
+                    result.append(action_type)
+            elif node.get("type") == "foreach":
+                nested = (node.get("params") or {}).get("graph")
+                if isinstance(nested, dict):
+                    visit(normalize_execution_graph(nested), depth + 1)
+
+    visit(normalize_execution_graph(graph or {}), 0)
+    return result
