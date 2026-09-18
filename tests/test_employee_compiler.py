@@ -570,3 +570,28 @@ def test_content_generation_is_native_and_does_not_create_fake_execution_setup()
     assert requirement["execution_plan"] == []
     assert "content_generation" in spec["ready_requirements"]
     assert "content_generation" not in spec["build_required"]
+
+
+
+def test_instagram_publish_includes_media_generation_primitive():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Social publisher",
+            "requirements": [
+                {
+                    "key": "instagram_publish",
+                    "kind": "integration",
+                    "purpose": "Generate and publish an Instagram post",
+                    "requires_connection": True,
+                }
+            ],
+        },
+        job_brief="Generate and publish an Instagram post every day.",
+    )
+
+    requirement = spec["requirements"][0]
+    assert requirement["key"] == "instagram_publish"
+    assert requirement["status"] == "connection_required"
+    assert "content_generation" in requirement["primitives"]
+    assert "media_generation" in requirement["primitives"]
+    assert "messaging" in requirement["primitives"]
