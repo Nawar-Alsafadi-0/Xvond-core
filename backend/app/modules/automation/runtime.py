@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import UTC, datetime
 
 from backend.app.core.agent_runtime import agent_runtime
@@ -22,6 +23,7 @@ from backend.app.modules.tools.executor import tool_executor
 from backend.app.modules.tools.action_request import _integration_call
 from backend.app.modules.tools.generic_capability_runtime import execute_generic_capability
 from backend.app.modules.tools.models import AgentToolAssignment
+from backend.app.modules.tools.business_models import ActionRequest
 
 
 def _utcnow_naive() -> datetime:
@@ -34,6 +36,47 @@ def _billing_contract(workflow: AutomationWorkflow) -> tuple[str, str]:
     if source == "self_service_employee":
         return "ai_agents", "automation_runs"
     return "automation", "runs"
+
+
+class AutomationApprovalRequired(RuntimeError):
+    def __init__(
+        self,
+        *,
+        agent_id: int,
+        action_type: str,
+        arguments: dict,
+        summary: str,
+        workflow_step_index: int,
+        node_id: str,
+        node_outputs: dict,
+    ):
+        super().__init__(f"Approval required for {action_type}")
+        self.agent_id = int(agent_id)
+        self.action_type = str(action_type)
+        self.arguments = deepcopy(dict(arguments or {}))
+        self.summary = str(summary or action_type)[:2000]
+        self.workflow_step_index = int(workflow_step_index)
+        self.node_id = str(node_id)
+        self.node_outputs = deepcopy(dict(node_outputs or {}))
+
+
+def _graph_action_contract(db, *, agent_id: int, action_type: str) -> dict:
+    assignment = (
+        db.query(AgentToolAssignment)
+        .filter(
+            AgentToolAssignment.agent_id == int(agent_id),
+            AgentToolAssignment.tool_name == "action_request",
+            AgentToolAssignment.enabled.is_(True),
+        )
+        .first()
+    )
+    if assignment is None:
+        raise ValueError("Action contract is not assigned to this employee")
+    config = reveal_config(assignment.config) or {}
+    action = (config.get("actions") or {}).get(str(action_type or "").strip())
+    if not isinstance(action, dict) or not action.get("enabled", True):
+        raise ValueError("Action contract is not enabled")
+    return action
 
 
 class AutomationRuntime:
@@ -72,6 +115,12 @@ class AutomationRuntime:
         run_id = run.id
 
         state = dict(original_input)
+        if not str(state.get("_xvond_execution_key") or "").strip():
+            state["_xvond_execution_key"] = (
+                f"automation:{company_id}:{workflow.id}:run:{run_id}"
+            )
+            original_input = dict(state)
+            run.input_data = dict(original_input)
         step_results = []
 
         try:
@@ -98,6 +147,47 @@ class AutomationRuntime:
             run.status = "success"
             run.output_data = {"state": state, "steps": step_results}
             run.finished_at = _utcnow_naive()
+            db.commit()
+            db.refresh(run)
+            return run
+        except AutomationApprovalRequired as approval:
+            request = ActionRequest(
+                company_id=company_id,
+                agent_id=approval.agent_id,
+                conversation_id=None,
+                action_type=approval.action_type,
+                details={
+                    **approval.arguments,
+                    "_xvond_automation": {
+                        "run_id": run.id,
+                        "workflow_id": workflow.id,
+                        "workflow_step_index": approval.workflow_step_index,
+                        "node_id": approval.node_id,
+                        "execution_key": state.get("_xvond_execution_key"),
+                    },
+                },
+                summary=approval.summary,
+                status="awaiting_confirmation",
+            )
+            db.add(request)
+            db.flush()
+            run.status = "waiting_approval"
+            run.output_data = {
+                "state": state,
+                "steps": step_results,
+                "approval": {
+                    "request_id": request.id,
+                    "agent_id": approval.agent_id,
+                    "action_type": approval.action_type,
+                    "summary": approval.summary,
+                    "workflow_step_index": approval.workflow_step_index,
+                    "node_id": approval.node_id,
+                    "node_outputs": approval.node_outputs,
+                    "status": "awaiting_confirmation",
+                },
+            }
+            run.error_message = None
+            run.finished_at = None
             db.commit()
             db.refresh(run)
             return run
@@ -136,6 +226,105 @@ class AutomationRuntime:
                 finished_at=_utcnow_naive(),
             )
             db.add(failed_run)
+            db.commit()
+            raise
+
+    def resume_approval(
+        self,
+        db,
+        *,
+        company_id: int,
+        workflow: AutomationWorkflow,
+        run: AutomationRun,
+        request: ActionRequest,
+    ) -> AutomationRun:
+        if run.company_id != company_id or workflow.company_id != company_id:
+            raise ValueError("Approval run does not belong to company")
+        if run.workflow_id != workflow.id:
+            raise ValueError("Approval run does not belong to workflow")
+        if run.status != "waiting_approval":
+            raise ValueError("Automation run is not waiting for approval")
+        if request.company_id != company_id:
+            raise ValueError("Approval request does not belong to company")
+        if request.status != "approved":
+            raise ValueError("Approval request has not been approved")
+
+        output = dict(run.output_data or {})
+        approval = output.get("approval")
+        if not isinstance(approval, dict):
+            raise ValueError("Automation approval checkpoint is missing")
+        if int(approval.get("request_id") or 0) != int(request.id):
+            raise ValueError("Approval request does not match run checkpoint")
+
+        step_index = int(approval.get("workflow_step_index") or 0)
+        if not 0 <= step_index < len(workflow.steps or []):
+            raise ValueError("Automation approval step is invalid")
+
+        state = dict(run.input_data or {})
+        saved_state = output.get("state")
+        if isinstance(saved_state, dict):
+            state.update(saved_state)
+        state["_xvond_approved_request_id"] = int(request.id)
+        state["_xvond_graph_resume"] = {
+            "workflow_step_index": step_index,
+            "node_id": str(approval.get("node_id") or ""),
+            "node_outputs": deepcopy(approval.get("node_outputs") or {}),
+        }
+        step_results = list(output.get("steps") or [])
+
+        run.status = "running"
+        run.error_message = None
+        db.flush()
+
+        try:
+            for index in range(step_index, len(workflow.steps or [])):
+                step = (workflow.steps or [])[index]
+                result = self.execute_step(
+                    db,
+                    company_id,
+                    step,
+                    state,
+                    run_id=run.id,
+                    step_index=index,
+                )
+                step_results.append(
+                    {
+                        "index": index,
+                        "type": step.get("type"),
+                        "label": step.get("label"),
+                        "result": result,
+                    }
+                )
+                if isinstance(result, dict):
+                    state.update(result)
+                state.pop("_xvond_graph_resume", None)
+                state.pop("_xvond_approved_request_id", None)
+
+            run.status = "success"
+            run.output_data = {
+                "state": state,
+                "steps": step_results,
+                "approval": {
+                    **approval,
+                    "status": "approved",
+                },
+            }
+            run.finished_at = _utcnow_naive()
+            db.commit()
+            db.refresh(run)
+            return run
+        except Exception as exc:
+            run.status = "failed"
+            run.error_message = str(exc)[:2000]
+            run.output_data = {
+                "state": state,
+                "steps": step_results,
+                "approval": {
+                    **approval,
+                    "status": "approved_execution_failed",
+                },
+            }
+            run.finished_at = _utcnow_naive()
             db.commit()
             raise
 
