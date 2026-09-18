@@ -115,7 +115,9 @@ def test_compiler_cached_channel_view_uses_registry_delivery_truth():
     assert rows["voice"]["self_service_connection_status"] == "xvond_managed_available"
     assert rows["voice"]["channel_delivery"]["runtime_state"] == "live"
     assert rows["telegram"]["self_service_connection_status"] == "xvond_managed_available"
+    assert rows["telegram"]["channel_delivery"]["runtime_adapter"] == "xvond_managed"
     assert rows["instagram_dm"]["channel_delivery"]["type"] == "instagram"
+    assert "n8n" not in str(rendered).lower()
     assert rows["email_send"]["self_service_connection_status"] == "xvond_adapter_required"
 
 
