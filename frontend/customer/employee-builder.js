@@ -121,15 +121,31 @@
 
         if (type === "provide_input") {
             const encodedKey = encodeURIComponent(String(action?.key || ""));
+            const fields = Array.isArray(action?.fields) ? action.fields : [];
             return `
                 <div class="employee-builder-setup-answer">
                     <strong>${escapeHtml(action?.label || "Provide required information")}</strong>
                     ${action?.detail ? `<p class="muted">${escapeHtml(action.detail)}</p>` : ""}
-                    <textarea
-                        rows="3"
-                        data-setup-answer-input="${encodedKey}"
-                        placeholder="Enter the information this employee needs"
-                    ></textarea>
+                    ${fields.length ? fields.map(field => {
+                        const fieldKey = encodeURIComponent(String(field?.key || ""));
+                        return `
+                            <label>
+                                <span>${escapeHtml(field?.label || field?.key || "Required field")}</span>
+                                <input
+                                    type="text"
+                                    data-setup-field="${fieldKey}"
+                                    autocomplete="off"
+                                    placeholder="Enter ${escapeHtml(field?.label || field?.key || "required value")}"
+                                >
+                            </label>
+                        `;
+                    }).join("") : `
+                        <textarea
+                            rows="3"
+                            data-setup-answer-input="${encodedKey}"
+                            placeholder="Enter the information this employee needs"
+                        ></textarea>
+                    `}
                     <button
                         type="button"
                         class="employee-builder-journey-action"
@@ -464,21 +480,34 @@
                 if (button.disabled) return;
                 const encodedKey = String(button.dataset.saveSetupAnswer || "");
                 const key = decodeURIComponent(encodedKey);
-                const input = document.querySelector(`[data-setup-answer-input="${encodedKey}"]`);
-                const error = document.querySelector(`[data-setup-answer-error="${encodedKey}"]`);
-                const value = String(input?.value || "").trim();
+                const wrapper = button.closest(".employee-builder-setup-answer");
+                const input = wrapper?.querySelector(`[data-setup-answer-input="${encodedKey}"]`);
+                const fieldInputs = Array.from(wrapper?.querySelectorAll("[data-setup-field]") || []);
+                const error = wrapper?.querySelector(`[data-setup-answer-error="${encodedKey}"]`);
                 if (error) error.textContent = "";
-                if (!value) {
+
+                const values = {};
+                for (const fieldInput of fieldInputs) {
+                    const fieldKey = decodeURIComponent(String(fieldInput.dataset.setupField || ""));
+                    values[fieldKey] = String(fieldInput.value || "").trim();
+                }
+                const value = String(input?.value || "").trim();
+                if (fieldInputs.length && Object.values(values).some(item => !item)) {
+                    if (error) error.textContent = "Complete every required setup field.";
+                    return;
+                }
+                if (!fieldInputs.length && !value) {
                     if (error) error.textContent = "Enter the required setup information.";
                     return;
                 }
+
                 button.disabled = true;
                 try {
                     await api(
                         `/customer/employee-builder/${Number(employee.agent_id)}/setup/${encodeURIComponent(key)}`,
                         {
                             method: "PUT",
-                            body: JSON.stringify({value})
+                            body: JSON.stringify(fieldInputs.length ? {values} : {value})
                         }
                     );
                     await loadEmployeeBuilder();
