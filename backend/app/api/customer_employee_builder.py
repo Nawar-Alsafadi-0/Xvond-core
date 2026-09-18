@@ -835,7 +835,17 @@ def _self_service_builder_journey(
                 connection_status = str(
                     requirement.get("self_service_connection_status") or ""
                 )
-                if connection_status == "xvond_adapter_required":
+                if connection_status == "self_service_integration_available" and kind != "channel":
+                    setup_actions.append(
+                        _builder_action(
+                            "connect_system",
+                            f"Connect system for {key.replace('_', ' ')}",
+                            target="integrations",
+                            key=key,
+                            detail=str(requirement.get("purpose") or "").strip() or None,
+                        )
+                    )
+                elif connection_status == "xvond_adapter_required":
                     waiting_reasons.append(
                         f"{key.replace('_', ' ').title()} needs an Xvond connection adapter."
                     )
