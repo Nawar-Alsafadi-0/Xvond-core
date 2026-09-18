@@ -202,3 +202,53 @@ def test_channel_activation_failure_rolls_back_entire_self_service_launch(
         assert company.lifecycle_status == "onboarding"
         assert agent.enabled is False
         assert channel.enabled is False
+
+
+def test_future_catalog_channel_does_not_look_launch_ready_before_runtime_support(
+    launch_database,
+):
+    factory = launch_database
+    voice_spec = {
+        "scope": "business",
+        "requirements": [
+            {
+                "key": "voice",
+                "kind": "channel",
+                "status": "connection_required",
+            }
+        ],
+        "delivery": {"provisioning_version": 1},
+    }
+    with factory() as db:
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings = dict(config.settings)
+        builder = dict(settings["employee_builder"])
+        builder["requested_channels"] = ["voice"]
+        builder["compiled_spec"] = voice_spec
+        settings["employee_builder"] = builder
+        config.settings = settings
+        db.add(
+            AgentChannel(
+                company_id=1,
+                agent_id=1,
+                channel_type="voice",
+                config={
+                    "provider": "vapi",
+                    "phone_number": "+10000000000",
+                },
+                enabled=False,
+            )
+        )
+        db.commit()
+
+    with factory() as db:
+        state = self_service_policy.self_service_readiness(
+            db,
+            company=db.get(Company, 1),
+            agent=db.get(AIAgent, 1),
+            config=db.query(AgentConfig).filter_by(agent_id=1).one(),
+        )
+
+    assert state["ready"] is False
+    assert state["prepared_channels"] == []
+    assert state["missing_channels"] == ["voice"]
