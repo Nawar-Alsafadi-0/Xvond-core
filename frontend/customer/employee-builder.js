@@ -137,6 +137,7 @@
                         return `
                             <label>
                                 <span>${escapeHtml(field?.label || field?.key || "Required field")}</span>
+                                ${field?.detail ? `<small class="muted">${escapeHtml(field.detail)}</small>` : ""}
                                 <input
                                     type="text"
                                     data-setup-field="${fieldKey}"
