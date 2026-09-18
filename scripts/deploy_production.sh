@@ -6,6 +6,10 @@ ACCEPTANCE_COMPANY_ID="${ACCEPTANCE_COMPANY_ID:-}"
 ACCEPTANCE_AGENT_ID="${ACCEPTANCE_AGENT_ID:-}"
 ACCEPTANCE_LIVE_AI="${ACCEPTANCE_LIVE_AI:-false}"
 ACCEPTANCE_REQUIRE_LIVE="${ACCEPTANCE_REQUIRE_LIVE:-false}"
+MARKET_ACCEPTANCE_MODE="${MARKET_ACCEPTANCE_MODE:-}"
+MARKET_ACCEPTANCE_CHANNELS="${MARKET_ACCEPTANCE_CHANNELS:-}"
+MARKET_ACCEPTANCE_REQUIRE_ONLINE_BILLING="${MARKET_ACCEPTANCE_REQUIRE_ONLINE_BILLING:-false}"
+MARKET_ACCEPTANCE_REQUIRE_PAYMENT_EVIDENCE="${MARKET_ACCEPTANCE_REQUIRE_PAYMENT_EVIDENCE:-false}"
 
 compose() {
     docker compose -f "$COMPOSE_FILE" "$@"
@@ -273,6 +277,44 @@ if [ -n "$ACCEPTANCE_COMPANY_ID" ]; then
     if [ -n "$ACCEPTANCE_AGENT_ID" ]; then set -- "$@" --agent-id "$ACCEPTANCE_AGENT_ID"; fi
     if [ "$ACCEPTANCE_LIVE_AI" = "true" ]; then set -- "$@" --live-ai; fi
     if [ "$ACCEPTANCE_REQUIRE_LIVE" = "true" ]; then set -- "$@" --require-live; fi
+    compose exec -T app "$@"
+fi
+
+if [ -n "$MARKET_ACCEPTANCE_MODE" ]; then
+    case "$MARKET_ACCEPTANCE_MODE" in
+        managed|self_service) ;;
+        *)
+            echo "Market launch gate rejected: MARKET_ACCEPTANCE_MODE must be managed or self_service" >&2
+            exit 1
+            ;;
+    esac
+    if [ -z "$ACCEPTANCE_COMPANY_ID" ] || [ -z "$ACCEPTANCE_AGENT_ID" ]; then
+        echo "Market launch gate requires ACCEPTANCE_COMPANY_ID and ACCEPTANCE_AGENT_ID" >&2
+        exit 1
+    fi
+    if [ -z "$MARKET_ACCEPTANCE_CHANNELS" ]; then
+        echo "Market launch gate requires MARKET_ACCEPTANCE_CHANNELS" >&2
+        exit 1
+    fi
+
+    set -- python scripts/market_launch_gate.py         --company-id "$ACCEPTANCE_COMPANY_ID"         --agent-id "$ACCEPTANCE_AGENT_ID"         --launch-mode "$MARKET_ACCEPTANCE_MODE"
+
+    old_ifs="$IFS"
+    IFS=','
+    for channel in $MARKET_ACCEPTANCE_CHANNELS; do
+        clean_channel="$(printf '%s' "$channel" | tr -d '[:space:]')"
+        if [ -n "$clean_channel" ]; then
+            set -- "$@" --require-channel "$clean_channel"
+        fi
+    done
+    IFS="$old_ifs"
+
+    if [ "$MARKET_ACCEPTANCE_REQUIRE_ONLINE_BILLING" = "true" ]; then
+        set -- "$@" --require-online-billing
+    fi
+    if [ "$MARKET_ACCEPTANCE_REQUIRE_PAYMENT_EVIDENCE" = "true" ]; then
+        set -- "$@" --require-payment-evidence
+    fi
     compose exec -T app "$@"
 fi
 
