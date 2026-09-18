@@ -200,6 +200,8 @@ do
     require_real_env "$key"
 done
 
+public_base_url="$(env_value PUBLIC_BASE_URL)"
+
 workflow_enabled="$(parse_bool_env N8N_ENABLED)"
 if [ "$workflow_enabled" = "true" ]; then
     for key in \
@@ -264,6 +266,7 @@ fi
 
 compose up -d postgres-backup
 compose exec -T app python -c "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)); assert data.get('status') == 'healthy', data"
+compose exec -T app python scripts/public_origin_probe.py --base-url "$public_base_url"
 
 if [ -n "$ACCEPTANCE_COMPANY_ID" ]; then
     set -- python scripts/production_acceptance.py --company-id "$ACCEPTANCE_COMPANY_ID"
@@ -278,3 +281,4 @@ printf 'API image: %s\n' "$app_image"
 printf 'WhatsApp worker image: %s\n' "$worker_image"
 printf 'Automation scheduler image: %s\n' "$scheduler_image"
 printf 'Workflow engine enabled: %s\n' "$workflow_enabled"
+printf 'Public Core origin: %s\n' "$public_base_url"
