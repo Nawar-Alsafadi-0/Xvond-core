@@ -9,7 +9,7 @@ from backend.app.models.company import Company
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.models import AIAgent, AIConversation, AIUsage
 from backend.app.modules.billing.service_models import ServiceSubscription
-from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.channels.models import AgentChannel, ManagedChannelOutboundDelivery
 from backend.app.modules.channels.whatsapp_models import WhatsAppOutboundDelivery
 from backend.app.modules.tools.business_models import ActionRequest
 
@@ -52,9 +52,18 @@ def _attention_items(db, day_ago: datetime) -> list[dict]:
         .group_by(WhatsAppOutboundDelivery.company_id)
         .all()
     )
+    managed_delivery_rows = (
+        db.query(
+            ManagedChannelOutboundDelivery.company_id,
+            func.count(ManagedChannelOutboundDelivery.id),
+        )
+        .filter(ManagedChannelOutboundDelivery.status.in_(UNRESOLVED_DELIVERY))
+        .group_by(ManagedChannelOutboundDelivery.company_id)
+        .all()
+    )
     company_ids = {
         int(company_id)
-        for company_id, _count in [*failed_rows, *unresolved_rows, *delivery_rows]
+        for company_id, _count in [*failed_rows, *unresolved_rows, *delivery_rows, *managed_delivery_rows]
         if company_id is not None
     }
     names = {}
@@ -87,6 +96,18 @@ def _attention_items(db, day_ago: datetime) -> list[dict]:
                 "count": int(count or 0),
                 "tab": "overview",
                 "title": "WhatsApp deliveries need review",
+            }
+        )
+    for company_id, count in managed_delivery_rows:
+        items.append(
+            {
+                "type": "managed_channel_delivery",
+                "severity": "critical",
+                "company_id": int(company_id),
+                "company_name": names.get(company_id, f"Company #{company_id}"),
+                "count": int(count or 0),
+                "tab": "overview",
+                "title": "Managed channel deliveries need review",
             }
         )
     for company_id, count in failed_rows:
@@ -177,6 +198,12 @@ def summary(current_admin: User = Depends(require_xvond_operator)):
             .scalar()
             or 0
         )
+        unresolved_managed_deliveries = (
+            db.query(func.count(ManagedChannelOutboundDelivery.id))
+            .filter(ManagedChannelOutboundDelivery.status.in_(UNRESOLVED_DELIVERY))
+            .scalar()
+            or 0
+        )
         active_channels = (
             db.query(func.count(AgentChannel.id))
             .filter(AgentChannel.enabled.is_(True))
@@ -213,6 +240,7 @@ def summary(current_admin: User = Depends(require_xvond_operator)):
             "failed_ai_requests_24h": failed_ai_24h,
             "unresolved_external_operations": unresolved_external,
             "unresolved_whatsapp_deliveries": unresolved_deliveries,
+            "unresolved_managed_channel_deliveries": unresolved_managed_deliveries,
             "total_tokens": db.query(
                 func.coalesce(func.sum(AIUsage.total_tokens), 0)
             ).scalar() or 0,
@@ -231,6 +259,7 @@ def summary(current_admin: User = Depends(require_xvond_operator)):
                 "failed_ai_requests_24h": failed_ai_24h,
                 "unresolved_external_operations": unresolved_external,
                 "unresolved_whatsapp_deliveries": unresolved_deliveries,
+                "unresolved_managed_channel_deliveries": unresolved_managed_deliveries,
             },
             "attention_items": _attention_items(db, day_ago),
         }
