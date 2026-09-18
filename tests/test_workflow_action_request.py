@@ -40,7 +40,7 @@ def test_availability_is_sent_to_workflow_engine(monkeypatch):
                 "actions": {
                     "booking": {
                         "enabled": True,
-                        "destination": {"type": "integration", "integration_id": 7},
+                        "destination": {"type": "workflow_engine", "adapter": "booking"},
                         "availability": {"mode": "integration"},
                     }
                 }
