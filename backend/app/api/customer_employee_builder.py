@@ -807,7 +807,9 @@ def _self_service_builder_journey(
                 if kind == "channel" and key in missing_channels:
                     continue
                 connection_status = str(
-                    requirement.get("self_service_connection_status") or ""
+                    requirement.get("self_service_connection_status")
+                    or self_service_connection_status(requirement)
+                    or ""
                 )
                 if connection_status == "self_service_integration_available" and kind != "channel":
                     setup_actions.append(
