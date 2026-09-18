@@ -266,6 +266,50 @@ class AutomationRuntime:
                         }
                     }
                     continue
+                elif node_type == "foreach":
+                    items = params.get("items")
+                    if not isinstance(items, list):
+                        raise ValueError(
+                            f"Execution graph foreach node {node_id} requires a list"
+                        )
+                    if len(items) > 100:
+                        raise ValueError(
+                            f"Execution graph foreach node {node_id} exceeds 100 items"
+                        )
+                    nested_graph = normalize_execution_graph(
+                        params.get("graph") or {}
+                    )
+                    if not nested_graph.get("nodes"):
+                        raise ValueError(
+                            f"Execution graph foreach node {node_id} requires a nested graph"
+                        )
+                    results = []
+                    for loop_index, loop_item in enumerate(items):
+                        nested_result = self.execute_step(
+                            db,
+                            company_id,
+                            {
+                                "type": "graph",
+                                "agent_id": graph_agent_id,
+                                "graph": nested_graph,
+                            },
+                            {
+                                **state,
+                                "_xvond_loop_item": loop_item,
+                                "_xvond_loop_index": loop_index,
+                            },
+                            run_id=run_id,
+                            step_index=(step_index * 100000)
+                            + (node_index * 1000)
+                            + loop_index
+                            + 1,
+                        )
+                        results.append(nested_result)
+                    node_outputs[node_id] = {
+                        "items": results,
+                        "count": len(results),
+                    }
+                    continue
                 else:
                     raise ValueError(f"Unsupported execution graph node type: {node_type}")
 
