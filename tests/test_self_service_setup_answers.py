@@ -13,7 +13,9 @@ from backend.app.core.database.base import Base
 from backend.app.models.company import Company
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.ai_agent.self_service_policy import _resolved_customer_requirement_keys
 from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
+from backend.app.modules.knowledge.models import AgentKnowledge, KnowledgeDocument
 
 
 @pytest.fixture
@@ -188,3 +190,102 @@ def test_setup_answer_rejects_sensitive_credential_keys(setup_answer_database):
         config = db.query(AgentConfig).filter_by(agent_id=1).one()
         builder = dict(config.settings["employee_builder"])
         assert "crm_access_token" not in dict(builder.get("setup_answers") or {})
+
+
+def test_setup_answer_requires_every_compiler_declared_field(setup_answer_database):
+    with setup_answer_database() as db:
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings = dict(config.settings)
+        builder = dict(settings["employee_builder"])
+        spec = dict(builder["compiled_spec"])
+        spec["requirements"] = list(spec["requirements"]) + [
+            {
+                "key": "workspace_context",
+                "kind": "custom",
+                "status": "customer_input_required",
+                "purpose": "Know the target workspace and local timezone",
+                "customer_inputs": ["workspace_id", "timezone"],
+            }
+        ]
+        builder["compiled_spec"] = spec
+        settings["employee_builder"] = builder
+        config.settings = settings
+        db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        api.save_self_service_setup_answer(
+            1,
+            "workspace_context",
+            api.EmployeeBuilderSetupAnswerRequest(
+                values={"workspace_id": "ACME-42"}
+            ),
+            SimpleNamespace(company_id=1, role="owner"),
+        )
+    assert exc.value.status_code == 400
+    assert "timezone" in exc.value.detail["missing_fields"]
+
+    result = api.save_self_service_setup_answer(
+        1,
+        "workspace_context",
+        api.EmployeeBuilderSetupAnswerRequest(
+            values={
+                "workspace_id": "ACME-42",
+                "timezone": "Asia/Muscat",
+            }
+        ),
+        SimpleNamespace(company_id=1, role="owner"),
+    )
+    assert "workspace_context" in result["readiness"]["resolved_requirements"]
+
+    with setup_answer_database() as db:
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        builder = dict(config.settings["employee_builder"])
+        assert builder["setup_answers"]["workspace_context"] == {
+            "workspace_id": "ACME-42",
+            "timezone": "Asia/Muscat",
+        }
+        agent = db.get(AIAgent, 1)
+        assert "workspace id=ACME-42" in agent.system_prompt
+        assert "timezone=Asia/Muscat" in agent.system_prompt
+
+
+def test_files_requirement_resolves_only_from_attached_pdf(setup_answer_database):
+    with setup_answer_database() as db:
+        text_doc = KnowledgeDocument(
+            company_id=1,
+            title="Text notes",
+            source_type="text",
+            content="General notes",
+            enabled=True,
+        )
+        db.add(text_doc)
+        db.flush()
+        db.add(AgentKnowledge(agent_id=1, document_id=text_doc.id, enabled=True))
+        db.commit()
+
+        resolved = _resolved_customer_requirement_keys(
+            db,
+            company_id=1,
+            agent_id=1,
+        )
+        assert "knowledge" in resolved
+        assert "files" not in resolved
+
+        pdf_doc = KnowledgeDocument(
+            company_id=1,
+            title="PDF: requirements.pdf",
+            source_type="pdf",
+            content="PDF content",
+            enabled=True,
+        )
+        db.add(pdf_doc)
+        db.flush()
+        db.add(AgentKnowledge(agent_id=1, document_id=pdf_doc.id, enabled=True))
+        db.commit()
+
+        resolved = _resolved_customer_requirement_keys(
+            db,
+            company_id=1,
+            agent_id=1,
+        )
+        assert "files" in resolved
