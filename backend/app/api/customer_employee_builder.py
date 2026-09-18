@@ -47,6 +47,14 @@ from backend.app.modules.ai_agent.self_service_policy import (
 from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
+from backend.app.modules.channels.catalog import (
+    CHANNEL_RUNTIME_LIVE,
+    CHANNEL_SETUP_INTERNAL,
+    CHANNEL_SETUP_MANAGED,
+    CHANNEL_SETUP_SELF_SERVICE,
+    canonical_channel_type,
+    get_channel_capability,
+)
 from backend.app.modules.channels.delivery import reconcile_managed_channel_requests
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord, CompanyAIProfile
@@ -548,11 +556,16 @@ def _self_service_builder_journey(
     waiting_reasons: list[str] = []
     if compiled:
         missing_channels = {
-            str(item or "").strip().lower()
+            canonical_channel_type(item)
             for item in (state.get("missing_channels") or [])
-            if str(item or "").strip()
+            if canonical_channel_type(item)
         }
         for channel in sorted(missing_channels):
+            capability = get_channel_capability(channel) or {}
+            channel_name = str(capability.get("name") or channel.replace("_", " ").title())
+            setup_mode = capability.get("setup_mode")
+            runtime_state = capability.get("runtime_state")
+
             if channel == "website":
                 setup_actions.append(
                     _builder_action(
@@ -571,9 +584,15 @@ def _self_service_builder_journey(
                         key="whatsapp",
                     )
                 )
-            elif channel != "xvond":
+            elif setup_mode == CHANNEL_SETUP_INTERNAL:
+                continue
+            elif runtime_state == CHANNEL_RUNTIME_LIVE and setup_mode == CHANNEL_SETUP_MANAGED:
                 waiting_reasons.append(
-                    f"{channel.replace('_', ' ').title()} needs an Xvond/provider adapter."
+                    f"{channel_name}: Xvond managed provisioning is required before launch."
+                )
+            else:
+                waiting_reasons.append(
+                    f"{channel_name}: requested as an Xvond-managed channel; a runtime adapter must be provisioned before launch."
                 )
 
         resolved = {
@@ -583,7 +602,11 @@ def _self_service_builder_journey(
         for requirement in compiled_spec.get("requirements") or []:
             if not isinstance(requirement, dict):
                 continue
-            key = str(requirement.get("key") or "requirement").strip().lower()
+            key = (
+                canonical_channel_type(requirement.get("key"))
+                if str(requirement.get("kind") or "").strip().lower() == "channel"
+                else str(requirement.get("key") or "requirement").strip().lower()
+            )
             kind = str(requirement.get("kind") or "").strip().lower()
             status = str(requirement.get("status") or "").strip().lower()
             if status == "customer_input_required" and key not in resolved:
@@ -637,6 +660,10 @@ def _self_service_builder_journey(
                 if connection_status == "xvond_adapter_required":
                     waiting_reasons.append(
                         f"{key.replace('_', ' ').title()} needs an Xvond connection adapter."
+                    )
+                elif connection_status == "xvond_managed_available":
+                    waiting_reasons.append(
+                        f"{key.replace('_', ' ').title()} will be provisioned by Xvond."
                     )
                 elif kind != "channel":
                     waiting_reasons.append(
