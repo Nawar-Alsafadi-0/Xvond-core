@@ -177,6 +177,11 @@ def serialize_channel(
         "setup_mode": capability.get("setup_mode"),
         "runtime_state": capability.get("runtime_state"),
         "runtime_adapter": capability.get("runtime_adapter"),
+        "managed_route_key": (
+            f"{channel.company_id}:{channel.id}"
+            if capability.get("runtime_adapter") == N8N_CHANNEL_RUNTIME_ADAPTER
+            else None
+        ),
         "config": public_config(channel.config),
         "configured_secret_fields": configured_secret_fields(channel.config),
         "configured": configured,
