@@ -10,7 +10,7 @@ from backend.app.modules.ai_agent.employee_builder import (
 
 def test_arabic_business_description_builds_expected_blueprint():
     blueprint = build_employee_blueprint(
-        "بدي موظف يرد على العملاء على واتساب وانستا، يبيع ويتابع العملاء ويحجز مواعيد"
+        "بدي موظف يرد على العملاء على واتساب ورسائل انستا، يبيع ويتابع العملاء ويحجز مواعيد"
     )
 
     assert blueprint.name == "My AI Employee"
@@ -95,3 +95,22 @@ def test_setup_requirements_follow_final_user_selections():
     assert missing == ("automation", "connect_email")
     assert "knowledge" not in missing
     assert "business_actions" not in missing
+
+
+def test_email_and_instagram_actions_do_not_implicitly_become_conversation_channels():
+    email_worker = build_employee_blueprint(
+        "بدي مساعد يقرأ إيميلاتي كل صباح ويلخص المهم ويجهز ردود بعد موافقتي"
+    )
+    assert "email" in email_worker.capabilities
+    assert "email" not in email_worker.channels
+
+    publisher = build_employee_blueprint(
+        "بدي موظف يولد محتوى وينشره على انستغرام كل يوم"
+    )
+    assert "content" in publisher.capabilities
+    assert "instagram" not in publisher.channels
+
+    inbox = build_employee_blueprint(
+        "بدي موظف يرد على العملاء من خلال رسائل انستا"
+    )
+    assert "instagram" in inbox.channels
