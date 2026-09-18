@@ -154,6 +154,70 @@ def build_internal_booking_action_config(*, requirement: dict, spec: dict) -> di
     return action
 
 
+def build_internal_record_action_config(*, requirement: dict, spec: dict) -> dict:
+    key = str(requirement.get("key") or "business_request").strip()
+    purpose = str(requirement.get("purpose") or key.replace("_", " ")).strip()
+    definitions = {
+        "lead_management": {
+            "module": "lead_management",
+            "fields": [
+                {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
+                {"key": "phone", "label": "Phone", "required": False, "type": "phone"},
+                {"key": "email", "label": "Email", "required": False, "type": "email"},
+                {"key": "interest", "label": "Interest", "required": True, "type": "text"},
+                {"key": "notes", "label": "Notes", "required": False, "type": "text"},
+            ],
+        },
+        "orders": {
+            "module": "orders",
+            "fields": [
+                {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
+                {"key": "phone", "label": "Phone", "required": True, "type": "phone"},
+                {"key": "items", "label": "Order items", "required": True, "type": "text"},
+                {"key": "address", "label": "Delivery / pickup details", "required": False, "type": "text"},
+                {"key": "notes", "label": "Notes", "required": False, "type": "text"},
+            ],
+        },
+        "quotation": {
+            "module": "quotation",
+            "fields": [
+                {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
+                {"key": "contact", "label": "Contact", "required": True, "type": "text"},
+                {"key": "request", "label": "Quotation request", "required": True, "type": "text"},
+                {"key": "notes", "label": "Notes", "required": False, "type": "text"},
+            ],
+        },
+        "customer_support": {
+            "module": "customer_support",
+            "fields": [
+                {"key": "customer_name", "label": "Customer name", "required": False, "type": "text"},
+                {"key": "contact", "label": "Contact", "required": False, "type": "text"},
+                {"key": "issue", "label": "Issue", "required": True, "type": "text"},
+                {"key": "priority", "label": "Priority", "required": False, "type": "text"},
+            ],
+        },
+    }
+    definition = definitions.get(key)
+    if definition is None:
+        raise ValueError(f"No Xvond-native record definition for {key}")
+    return {
+        "enabled": _permission_mode(spec, requirement) != "never",
+        "label": purpose[:200] or key,
+        "description": purpose[:1000],
+        "module": definition["module"],
+        "fields": definition["fields"],
+        "confirmation_required": _permission_mode(spec, requirement) != "automatic",
+        "destination": {
+            "type": "xvond_internal",
+            "adapter": "business_record",
+            "record_type": key,
+            "delivery_mode": "native",
+        },
+        "availability": {"mode": "none"},
+        "xvond_generated": True,
+    }
+
+
 def build_external_integration_action_config(*, requirement: dict, spec: dict) -> dict:
     key = str(requirement.get("key") or "connected_action").strip()
     purpose = str(requirement.get("purpose") or key.replace("_", " ")).strip()
@@ -254,6 +318,8 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
     fulfillment_mode = str(requirement.get("fulfillment_mode") or "")
     if key == "booking" and fulfillment_mode == "xvond_internal":
         return build_internal_booking_action_config(requirement=requirement, spec=spec)
+    if key in {"lead_management", "orders", "quotation", "customer_support"} and fulfillment_mode == "xvond_internal":
+        return build_internal_record_action_config(requirement=requirement, spec=spec)
     if fulfillment_mode == "external_connection" and requirement.get("integration_id"):
         return build_external_integration_action_config(requirement=requirement, spec=spec)
 
@@ -533,6 +599,8 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                     .first()
                 )
             execution_status = "ready" if integration is not None else "setup_required"
+        elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "business_record":
+            execution_status = "ready"
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "generic_capability":
             plan = destination.get("execution_plan") or []
             needs_http = any(
