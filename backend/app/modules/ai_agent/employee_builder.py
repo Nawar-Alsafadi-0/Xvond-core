@@ -126,6 +126,7 @@ CHANNEL_KEYWORDS = {
         "reply to customers by email", "email conversations",
         "قناة ايميل", "قناة إيميل", "محادثات البريد",
         "الرد على العملاء بالايميل", "الرد على العملاء بالإيميل",
+        "يرد على العملاء بالايميل", "يرد على العملاء بالإيميل",
     ),
     "sms": ("sms", "text message", "text messages", "رسائل نصية", "رسالة نصية"),
     "slack": ("slack", "سلاك"),
