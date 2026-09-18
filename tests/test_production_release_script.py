@@ -234,7 +234,7 @@ def test_release_can_run_fail_closed_market_launch_gate_after_cutover():
     public_probe = SOURCE.index(
         'python3 scripts/public_origin_probe.py --base-url "$public_base_url"'
     )
-    market_gate = SOURCE.index("python scripts/market_launch_gate.py")
+    market_gate = SOURCE.index("python -m scripts.market_launch_gate")
     assert public_probe < market_gate
     assert 'MARKET_ACCEPTANCE_MODE="${MARKET_ACCEPTANCE_MODE:-}"' in SOURCE
     assert 'MARKET_ACCEPTANCE_CHANNELS="${MARKET_ACCEPTANCE_CHANNELS:-}"' in SOURCE
