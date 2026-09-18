@@ -69,9 +69,12 @@ services:
     environment:
       APP_ENV: production
       DATABASE_URL: ${DATABASE_URL_DOCKER:?DATABASE_URL_DOCKER is required}
+      REDIS_URL: redis://redis:6379/0
       AUTOMATION_SCHEDULER_POLL_SECONDS: ${AUTOMATION_SCHEDULER_POLL_SECONDS:-30}
     depends_on:
       app:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   postgres:
