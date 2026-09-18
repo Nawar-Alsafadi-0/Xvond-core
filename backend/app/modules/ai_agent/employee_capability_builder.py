@@ -810,8 +810,21 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
         if not isinstance(actions.get(key), dict):
             actions[key] = build_managed_action_config(requirement=item, spec=prepared)
             changed = True
-        # Existing operator configuration, permissions and disable switches win.
+        # Existing operator configuration and destination setup win, but
+        # Xvond-generated policy flags must follow the owner's latest permission.
         action = actions[key]
+        if action.get("xvond_generated") is True:
+            permission_mode = _permission_mode(prepared, item)
+            desired_enabled = permission_mode != "never"
+            desired_confirmation = permission_mode != "automatic"
+            if (
+                action.get("enabled", True) != desired_enabled
+                or action.get("confirmation_required", True) != desired_confirmation
+            ):
+                action["enabled"] = desired_enabled
+                action["confirmation_required"] = desired_confirmation
+                actions[key] = action
+                changed = True
         destination = action.get("destination") or {}
         if not action.get("enabled", True) or (assignment is not None and not assignment.enabled):
             execution_status = "disabled"
