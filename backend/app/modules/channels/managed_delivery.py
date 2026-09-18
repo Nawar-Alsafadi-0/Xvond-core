@@ -166,7 +166,7 @@ def attempt_delivery(db, *, delivery_id: int) -> dict:
         row.last_error_code = "channel_unavailable"
         row.failed_at = _now()
         db.commit()
-        return {"success": False, "permanent": True, **delivery_payload(row)}
+        return {"success": False, "retryable": True, **delivery_payload(row)}
 
     capability = get_channel_capability(channel.channel_type) or {}
     config = reveal_config(channel.config) or {}
@@ -182,12 +182,13 @@ def attempt_delivery(db, *, delivery_id: int) -> dict:
         row.last_error_code = "managed_channel_not_ready"
         row.failed_at = _now()
         db.commit()
-        return {"success": False, "permanent": True, **delivery_payload(row)}
+        return {"success": False, "retryable": True, **delivery_payload(row)}
 
     row.status = "sending"
     row.retryable = False
     row.attempts = int(row.attempts or 0) + 1
     row.last_error_code = None
+    row.failed_at = None
     row.updated_at = _now()
     db.commit()
 
@@ -246,4 +247,4 @@ def attempt_delivery(db, *, delivery_id: int) -> dict:
     row.last_error_code = str(result.get("error_code") or "provider_rejected")[:160]
     row.failed_at = _now()
     db.commit()
-    return {"success": False, "permanent": True, **delivery_payload(row)}
+    return {"success": False, "retryable": True, **delivery_payload(row)}
