@@ -43,6 +43,7 @@ from backend.app.api.internal_workflow_actions import router as internal_workflo
 from backend.app.api.internal_channel_gateway import router as internal_channel_gateway_router
 from backend.app.api.public_channels import router as public_channels_router
 from backend.app.api.public_employee_builder import router as public_employee_builder_router
+from backend.app.api.public_billing import router as public_billing_router
 from backend.app.api.voice_llm import router as voice_llm_router
 from backend.app.api.website_widget import router as website_widget_router
 from backend.app.api.ai_agents import router as ai_agents_router
@@ -231,6 +232,7 @@ for r in [
     ai_agents_router,
     public_channels_router,
     public_employee_builder_router,
+    public_billing_router,
     voice_llm_router,
     website_widget_router,
     modules_router,
@@ -312,6 +314,11 @@ def public_employee_builder():
     return RedirectResponse(
         url=f"/static/public/employee-builder.html?v={CUSTOMER_PORTAL_VERSION}"
     )
+
+
+@app.get("/checkout")
+def checkout():
+    return RedirectResponse(url=f"/static/public/checkout.html?v={CUSTOMER_PORTAL_VERSION}")
 
 
 @app.get("/privacy")
