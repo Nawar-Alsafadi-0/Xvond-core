@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from backend.app.core.config_secrets import reveal_config
 from backend.app.core.config.settings import settings
+from backend.app.core.execution_claims import execution_claims
 from backend.app.core.http_security import safe_http_request, validate_public_http_url
 from backend.app.modules.ai_agent.models import AIMessage
 from backend.app.modules.channels.handoff import activate_human_handoff
@@ -276,6 +277,7 @@ def _instagram_publish_call(
     config: dict,
     payload: dict,
     operation: str,
+    idempotency_key: str | None = None,
 ) -> ToolResult:
     if operation != "execute":
         return ToolResult(
@@ -310,6 +312,19 @@ def _instagram_publish_call(
             success=False,
             error="Instagram publishing requires image_url or media_url",
         )
+    stable_key = str(idempotency_key or "").strip()
+    if not stable_key:
+        return ToolResult(
+            success=False,
+            error="Instagram publishing requires a stable idempotency key",
+        )
+    claim_key = f"instagram_publish:{stable_key}"
+    if not execution_claims.claim(claim_key, ttl_seconds=86400):
+        return ToolResult(
+            success=False,
+            data={"reconciliation_required": True},
+            error="Instagram publish is already claimed; manual reconciliation is required",
+        )
 
     try:
         validate_public_http_url(image_url)
@@ -325,10 +340,12 @@ def _instagram_publish_call(
             max_response_bytes=128_000,
         )
     except Exception as exc:
+        execution_claims.release(claim_key)
         return ToolResult(success=False, error=str(exc))
 
     container_status = int(container.get("status_code") or 0)
     if not 200 <= container_status < 300:
+        execution_claims.release(claim_key)
         return ToolResult(
             success=False,
             data={"container_http": container},
@@ -337,6 +354,7 @@ def _instagram_publish_call(
     try:
         container_body = json.loads(container.get("response") or "{}")
     except ValueError:
+        execution_claims.release(claim_key)
         return ToolResult(
             success=False,
             data={"container_http": container},
@@ -344,6 +362,7 @@ def _instagram_publish_call(
         )
     creation_id = str(container_body.get("id") or "").strip()
     if not creation_id:
+        execution_claims.release(claim_key)
         return ToolResult(
             success=False,
             data={"container_http": container},
@@ -449,6 +468,7 @@ def _integration_call(
             config=config,
             payload=payload,
             operation=operation,
+            idempotency_key=idempotency_key,
         )
 
     if integration_type == "webhook":
