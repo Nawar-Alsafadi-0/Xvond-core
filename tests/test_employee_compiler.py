@@ -21,7 +21,7 @@ def test_compiler_turns_unknown_digital_requirement_into_xvond_build_work():
       "summary": "Monitor a specialist platform and apply a custom rule.",
       "tasks": [{"name":"Monitor","description":"Watch the platform","trigger":"daily"}],
       "requirements": [
-        {"key":"specialist_platform_monitor","kind":"custom","purpose":"Read the platform and apply the rule","requires_connection":false,"primitives":["browser_web","workflow_engine"]},
+        {"key":"specialist_platform_monitor","kind":"custom","purpose":"Read the platform and apply the rule","requires_connection":false,"primitives":["http_api","workflow_engine"],"execution_plan":[{"id":"fetch","op":"http_get_json","url_field":"url"},{"id":"value","op":"extract","source":"fetch","path":"value"},{"id":"matched","op":"compare","source":"value","operator":"gte","value_field":"threshold"},{"id":"notify","op":"notify","when":"matched","title":"Monitor alert","message":"Condition matched."}]},
         {"key":"scheduling","kind":"automation","purpose":"Run daily","requires_connection":false,"primitives":["scheduler","workflow_engine"]}
       ],
       "permissions": [{"action":"send a notification","mode":"automatic"}],
@@ -34,6 +34,12 @@ def test_compiler_turns_unknown_digital_requirement_into_xvond_build_work():
     assert novel["known_to_xvond"] is False
     assert novel["status"] == "xvond_build"
     assert "workflow_engine" in novel["primitives"]
+    assert [step["op"] for step in novel["execution_plan"]] == [
+        "http_get_json",
+        "extract",
+        "compare",
+        "notify",
+    ]
     scheduling = next(x for x in spec["requirements"] if x["key"] == "scheduling")
     assert scheduling["known_to_xvond"] is True
     assert scheduling["status"] == "xvond_build"
@@ -85,22 +91,62 @@ def test_compiler_maps_email_and_instagram_to_real_connection_requirements():
 
 def test_managed_capability_compiles_to_generic_workflow_action():
     spec = {
-        "job_brief": "راقب الأسعار وابعتلي تنبيه",
+        "job_brief": "راقب الأسعار من https://prices.example.com وابعتلي تنبيه",
         "summary": "Monitor prices and notify the owner.",
         "permissions": [{"action": "send a notification", "mode": "automatic"}],
     }
     requirement = {
         "key": "competitor_price_monitor",
         "purpose": "Monitor competitor prices and send a notification",
-        "primitives": ["browser_web", "scheduler", "workflow_engine"],
+        "primitives": ["http_api", "scheduler", "workflow_engine"],
+        "execution_plan": [
+            {"id": "fetch", "op": "http_get_json", "url_field": "url"},
+            {"id": "price", "op": "extract", "source": "fetch", "path": "price"},
+            {"id": "matched", "op": "compare", "source": "price", "operator": "lte", "value_field": "target_price"},
+            {"id": "notify", "op": "notify", "when": "matched", "title": "Price alert", "message": "Target reached."},
+        ],
     }
     action = build_managed_action_config(requirement=requirement, spec=spec)
 
-    assert action["destination"]["type"] == "workflow_engine"
+    assert action["destination"]["type"] == "xvond_internal"
+    assert action["destination"]["adapter"] == "generic_capability"
     assert action["destination"]["capability_key"] == "competitor_price_monitor"
     assert action["destination"]["delivery_mode"] == "compose"
     assert "workflow_engine" in action["destination"]["primitives"]
+    assert action["destination"]["allowed_hosts"] == ["prices.example.com"]
+    assert action["destination"]["execution_plan"][0]["op"] == "http_get_json"
     assert action["xvond_generated"] is True
+
+
+def test_compiler_drops_free_form_or_unknown_runtime_ops():
+    response = """{
+      "role": "Safe worker",
+      "scope": "personal",
+      "summary": "Do a safe task.",
+      "tasks": [],
+      "requirements": [
+        {
+          "key":"safe_task",
+          "kind":"custom",
+          "purpose":"Do a safe task",
+          "execution_plan":[
+            {"id":"hack","op":"shell","code":"rm -rf /"},
+            {"id":"notify","op":"notify","title":"Done","message":"Finished"}
+          ]
+        }
+      ],
+      "permissions": [],
+      "setup_questions": []
+    }"""
+    spec = parse_compiler_response(response, job_brief="نفذ مهمة آمنة")
+    assert spec["requirements"][0]["execution_plan"] == [
+        {
+            "id": "notify",
+            "op": "notify",
+            "title": "Done",
+            "message": "Finished",
+        }
+    ]
 
 
 def test_compiler_prompt_keeps_full_job_and_selected_channels():
