@@ -500,7 +500,7 @@ def _self_service_builder_journey(
             "plan",
             "Plan",
             "waiting",
-            "The selected paid plan is waiting for payment or Xvond approval.",
+            "Payment pending. The selected paid plan is waiting for payment or Xvond approval.",
         )
     else:
         add_stage(
