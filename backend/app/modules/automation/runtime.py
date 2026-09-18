@@ -38,6 +38,7 @@ def _utcnow_naive() -> datetime:
 
 
 MAX_AI_STEP_MESSAGE_CHARS = 12000
+MAX_NESTED_GRAPH_DEPTH = 2
 
 
 def _render_step_context(value) -> str:
@@ -146,6 +147,45 @@ def _append_step_span(
     )
 
 
+def _checkpoint_fingerprint(value) -> str:
+    import json
+
+    try:
+        payload = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Automation checkpoint data is not serializable") from exc
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _approval_checkpoint_matches(
+    request: ActionRequest,
+    *,
+    node_id: str,
+    approval_scope: str,
+) -> bool:
+    details = request.details if isinstance(request.details, dict) else {}
+    meta = details.get("_xvond_automation")
+    if not isinstance(meta, dict):
+        return False
+
+    expected_node = str(node_id or "").strip()
+    expected_scope = str(approval_scope or expected_node).strip()
+    recorded_scope = str(meta.get("approval_scope") or "").strip()
+    if expected_scope:
+        if recorded_scope:
+            return recorded_scope == expected_scope
+        # Backward compatibility is safe only for old top-level checkpoints.
+        if expected_scope != expected_node:
+            return False
+    return str(meta.get("node_id") or "").strip() == expected_node
+
+
 class AutomationApprovalRequired(RuntimeError):
     def __init__(
         self,
@@ -157,6 +197,8 @@ class AutomationApprovalRequired(RuntimeError):
         workflow_step_index: int,
         node_id: str,
         node_outputs: dict,
+        approval_scope: str | None = None,
+        graph_resume: dict | None = None,
     ):
         super().__init__(f"Approval required for {action_type}")
         self.agent_id = int(agent_id)
@@ -166,6 +208,15 @@ class AutomationApprovalRequired(RuntimeError):
         self.workflow_step_index = int(workflow_step_index)
         self.node_id = str(node_id)
         self.node_outputs = deepcopy(dict(node_outputs or {}))
+        self.approval_scope = str(approval_scope or node_id or "")
+        self.graph_resume = deepcopy(
+            graph_resume
+            if isinstance(graph_resume, dict)
+            else {
+                "node_id": self.node_id,
+                "node_outputs": self.node_outputs,
+            }
+        )
 
 
 class AutomationRuntime:
@@ -293,6 +344,10 @@ class AutomationRuntime:
                         "workflow_id": workflow.id,
                         "workflow_step_index": approval.workflow_step_index,
                         "node_id": approval.node_id,
+                        "approval_scope": approval.approval_scope,
+                        "workflow_fingerprint": _checkpoint_fingerprint(
+                            workflow.steps or []
+                        ),
                         "execution_key": state.get("_xvond_execution_key"),
                     },
                 },
@@ -314,7 +369,12 @@ class AutomationRuntime:
                     "summary": approval.summary,
                     "workflow_step_index": approval.workflow_step_index,
                     "node_id": approval.node_id,
+                    "approval_scope": approval.approval_scope,
+                    "workflow_fingerprint": _checkpoint_fingerprint(
+                        workflow.steps or []
+                    ),
                     "node_outputs": approval.node_outputs,
+                    "graph_resume": approval.graph_resume,
                     "status": "awaiting_confirmation",
                 },
             }
@@ -390,6 +450,18 @@ class AutomationRuntime:
         if int(approval.get("request_id") or 0) != int(request.id):
             raise ValueError("Approval request does not match run checkpoint")
 
+        saved_workflow_fingerprint = str(
+            approval.get("workflow_fingerprint") or ""
+        ).strip()
+        if (
+            saved_workflow_fingerprint
+            and saved_workflow_fingerprint
+            != _checkpoint_fingerprint(workflow.steps or [])
+        ):
+            raise ValueError(
+                "Automation workflow changed after the approval checkpoint"
+            )
+
         step_index = int(approval.get("workflow_step_index") or 0)
         if not 0 <= step_index < len(workflow.steps or []):
             raise ValueError("Automation approval step is invalid")
@@ -399,11 +471,18 @@ class AutomationRuntime:
         if isinstance(saved_state, dict):
             state.update(saved_state)
         state["_xvond_approved_request_id"] = int(request.id)
-        state["_xvond_graph_resume"] = {
-            "workflow_step_index": step_index,
-            "node_id": str(approval.get("node_id") or ""),
-            "node_outputs": deepcopy(approval.get("node_outputs") or {}),
-        }
+        saved_graph_resume = approval.get("graph_resume")
+        if isinstance(saved_graph_resume, dict):
+            state["_xvond_graph_resume"] = {
+                "workflow_step_index": step_index,
+                **deepcopy(saved_graph_resume),
+            }
+        else:
+            state["_xvond_graph_resume"] = {
+                "workflow_step_index": step_index,
+                "node_id": str(approval.get("node_id") or ""),
+                "node_outputs": deepcopy(approval.get("node_outputs") or {}),
+            }
         step_results = list(output.get("steps") or [])
         execution_key = str(state.get("_xvond_execution_key") or "")
         trace = deepcopy(output.get("trace") or {})
@@ -509,6 +588,10 @@ class AutomationRuntime:
                         "workflow_id": workflow.id,
                         "workflow_step_index": next_approval.workflow_step_index,
                         "node_id": next_approval.node_id,
+                        "approval_scope": next_approval.approval_scope,
+                        "workflow_fingerprint": _checkpoint_fingerprint(
+                            workflow.steps or []
+                        ),
                         "execution_key": state.get("_xvond_execution_key"),
                     },
                 },
@@ -534,7 +617,12 @@ class AutomationRuntime:
                     "summary": next_approval.summary,
                     "workflow_step_index": next_approval.workflow_step_index,
                     "node_id": next_approval.node_id,
+                    "approval_scope": next_approval.approval_scope,
+                    "workflow_fingerprint": _checkpoint_fingerprint(
+                        workflow.steps or []
+                    ),
                     "node_outputs": next_approval.node_outputs,
+                    "graph_resume": next_approval.graph_resume,
                     "status": "awaiting_confirmation",
                 },
             }
@@ -595,12 +683,24 @@ class AutomationRuntime:
             resume_node_id = str(resume.get("node_id") or "").strip() if resume_for_step else ""
             waiting_for_resume_node = bool(resume_node_id)
             graph_agent_id = step.get("agent_id")
+            graph_path = str(state.get("_xvond_graph_path") or "").strip()
             for node_index, node in enumerate(nodes):
                 node_id = str(node.get("id") or "").strip()
-                if waiting_for_resume_node and node_id != resume_node_id:
+                is_resume_node = bool(
+                    resume_for_step
+                    and resume_node_id
+                    and node_id == resume_node_id
+                )
+                if waiting_for_resume_node and not is_resume_node:
                     continue
-                if waiting_for_resume_node and node_id == resume_node_id:
+                if waiting_for_resume_node and is_resume_node:
                     waiting_for_resume_node = False
+                node_resume = resume if is_resume_node else {}
+                node_scope = (
+                    f"{graph_path}/{node_id}"
+                    if graph_path
+                    else node_id
+                )
                 node_type = str(node.get("type") or "").strip().lower()
                 dependencies = list(node.get("depends_on") or [])
                 if any(dep not in node_outputs for dep in dependencies):
@@ -666,6 +766,7 @@ class AutomationRuntime:
                             int(state.get("_xvond_approved_request_id") or 0) or None
                         ),
                         "approval_node_id": node_id,
+                        "approval_scope": node_scope,
                         "_xvond_graph_action": True,
                     }
                 elif node_type == "http_get_json":
@@ -757,17 +858,12 @@ class AutomationRuntime:
                                 )
                                 .first()
                             )
-                            if approval is not None:
-                                meta = (
-                                    (approval.details or {}).get("_xvond_automation")
-                                    if isinstance(approval.details, dict)
-                                    else None
-                                )
-                                if (
-                                    not isinstance(meta, dict)
-                                    or str(meta.get("node_id") or "").strip() != node_id
-                                ):
-                                    approval = None
+                            if approval is not None and not _approval_checkpoint_matches(
+                                approval,
+                                node_id=node_id,
+                                approval_scope=node_scope,
+                            ):
+                                approval = None
                         if approval is None:
                             raise AutomationApprovalRequired(
                                 agent_id=browser_agent_id,
@@ -784,6 +880,7 @@ class AutomationRuntime:
                                 workflow_step_index=step_index,
                                 node_id=node_id,
                                 node_outputs=node_outputs,
+                                approval_scope=node_scope,
                             )
                         allow_interactions = True
 
@@ -1007,6 +1104,12 @@ class AutomationRuntime:
                         raise ValueError(
                             f"Execution graph foreach node {node_id} exceeds 100 items"
                         )
+                    nested_depth = int(state.get("_xvond_nested_graph_depth") or 0) + 1
+                    if nested_depth > MAX_NESTED_GRAPH_DEPTH:
+                        raise ValueError(
+                            f"Execution graph foreach node {node_id} exceeds nested depth "
+                            f"{MAX_NESTED_GRAPH_DEPTH}"
+                        )
                     nested_graph = normalize_execution_graph(
                         params.get("graph") or {}
                     )
@@ -1014,8 +1117,74 @@ class AutomationRuntime:
                         raise ValueError(
                             f"Execution graph foreach node {node_id} requires a nested graph"
                         )
+
+                    foreach_resume = (
+                        node_resume.get("foreach")
+                        if isinstance(node_resume, dict)
+                        and isinstance(node_resume.get("foreach"), dict)
+                        else None
+                    )
                     results = []
-                    for loop_index, loop_item in enumerate(items):
+                    start_index = 0
+                    child_resume = None
+                    if foreach_resume is not None:
+                        saved_items_fingerprint = str(
+                            foreach_resume.get("items_fingerprint") or ""
+                        ).strip()
+                        if (
+                            not saved_items_fingerprint
+                            or saved_items_fingerprint
+                            != _checkpoint_fingerprint(items)
+                        ):
+                            raise ValueError(
+                                f"Execution graph foreach node {node_id} items changed after approval checkpoint"
+                            )
+                        try:
+                            start_index = int(foreach_resume.get("loop_index"))
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError(
+                                f"Execution graph foreach node {node_id} has an invalid resume index"
+                            ) from exc
+                        saved_results = foreach_resume.get("completed_results")
+                        if not isinstance(saved_results, list):
+                            raise ValueError(
+                                f"Execution graph foreach node {node_id} has invalid resume results"
+                            )
+                        if start_index < 0 or start_index >= len(items):
+                            raise ValueError(
+                                f"Execution graph foreach node {node_id} resume index is out of range"
+                            )
+                        if len(saved_results) != start_index:
+                            raise ValueError(
+                                f"Execution graph foreach node {node_id} resume results do not match its index"
+                            )
+                        results = deepcopy(saved_results)
+                        child_resume = foreach_resume.get("child_resume")
+                        if not isinstance(child_resume, dict):
+                            raise ValueError(
+                                f"Execution graph foreach node {node_id} is missing its child checkpoint"
+                            )
+
+                    for loop_index in range(start_index, len(items)):
+                        loop_item = items[loop_index]
+                        nested_step_index = (
+                            (step_index * 100000)
+                            + (node_index * 1000)
+                            + loop_index
+                            + 1
+                        )
+                        nested_state = {
+                            **state,
+                            "_xvond_loop_item": loop_item,
+                            "_xvond_loop_index": loop_index,
+                            "_xvond_nested_graph_depth": nested_depth,
+                            "_xvond_graph_path": f"{node_scope}[{loop_index}]",
+                        }
+                        if child_resume is not None and loop_index == start_index:
+                            nested_state["_xvond_graph_resume"] = {
+                                "workflow_step_index": nested_step_index,
+                                **deepcopy(child_resume),
+                            }
                         try:
                             nested_result = self.execute_step(
                                 db,
@@ -1025,29 +1194,38 @@ class AutomationRuntime:
                                     "agent_id": graph_agent_id,
                                     "graph": nested_graph,
                                 },
-                                {
-                                    **state,
-                                    "_xvond_loop_item": loop_item,
-                                    "_xvond_loop_index": loop_index,
-                                    "_xvond_nested_graph_depth": (
-                                        int(state.get("_xvond_nested_graph_depth") or 0) + 1
-                                    ),
-                                },
+                                nested_state,
                                 run_id=run_id,
-                                step_index=(step_index * 100000)
-                                + (node_index * 1000)
-                                + loop_index
-                                + 1,
+                                step_index=nested_step_index,
                             )
-                        except AutomationApprovalRequired:
-                            raise ValueError(
-                                "Approval-required actions inside foreach are not supported yet"
+                        except AutomationApprovalRequired as approval:
+                            child_checkpoint = deepcopy(
+                                approval.graph_resume
+                                if isinstance(approval.graph_resume, dict)
+                                else {
+                                    "node_id": approval.node_id,
+                                    "node_outputs": approval.node_outputs,
+                                }
                             )
+                            approval.workflow_step_index = int(step_index)
+                            approval.node_outputs = deepcopy(node_outputs)
+                            approval.graph_resume = {
+                                "node_id": node_id,
+                                "node_outputs": deepcopy(node_outputs),
+                                "foreach": {
+                                    "loop_index": loop_index,
+                                    "items_fingerprint": _checkpoint_fingerprint(items),
+                                    "completed_results": deepcopy(results),
+                                    "child_resume": child_checkpoint,
+                                },
+                            }
+                            raise
                         except Exception as exc:
                             raise ValueError(
                                 f"Execution graph foreach node {node_id} failed at item {loop_index}: {exc}"
                             ) from exc
                         results.append(nested_result)
+                        child_resume = None
                     node_outputs[node_id] = {
                         "items": results,
                         "count": len(results),
@@ -1077,6 +1255,12 @@ class AutomationRuntime:
                     approval.workflow_step_index = int(step_index)
                     approval.node_id = node_id
                     approval.node_outputs = deepcopy(node_outputs)
+                    if not approval.approval_scope:
+                        approval.approval_scope = node_scope
+                    approval.graph_resume = {
+                        "node_id": node_id,
+                        "node_outputs": deepcopy(node_outputs),
+                    }
                     raise
                 except Exception as exc:
                     raise ValueError(
@@ -1086,6 +1270,10 @@ class AutomationRuntime:
                     "result": node_result
                 }
 
+            if waiting_for_resume_node:
+                raise ValueError(
+                    f"Execution graph resume node {resume_node_id} is unavailable"
+                )
             return {
                 "graph_outputs": node_outputs,
                 "graph_last": node_outputs.get(str(nodes[-1].get("id") or "")),
@@ -1210,28 +1398,20 @@ class AutomationRuntime:
                         .first()
                     )
                     if approval is not None:
-                        meta = (
-                            (approval.details or {}).get("_xvond_automation")
-                            if isinstance(approval.details, dict)
-                            else None
-                        )
                         expected_node_id = str(step.get("approval_node_id") or "").strip()
-                        if (
-                            expected_node_id
-                            and (
-                                not isinstance(meta, dict)
-                                or str(meta.get("node_id") or "").strip() != expected_node_id
-                            )
+                        expected_scope = str(
+                            step.get("approval_scope") or expected_node_id
+                        ).strip()
+                        if not _approval_checkpoint_matches(
+                            approval,
+                            node_id=expected_node_id,
+                            approval_scope=expected_scope,
                         ):
                             approval = None
                 if approval is None:
                     if not step.get("_xvond_graph_action"):
                         raise ValueError(
                             "Scheduled action requires automatic permission or a graph approval checkpoint"
-                        )
-                    if int(state.get("_xvond_nested_graph_depth") or 0) > 0:
-                        raise ValueError(
-                            "Approval-required actions inside foreach are not supported yet"
                         )
                     raise AutomationApprovalRequired(
                         agent_id=int(agent_id),
@@ -1244,8 +1424,13 @@ class AutomationRuntime:
                             or action_type
                         ),
                         workflow_step_index=-1,
-                        node_id="",
+                        node_id=str(step.get("approval_node_id") or ""),
                         node_outputs={},
+                        approval_scope=str(
+                            step.get("approval_scope")
+                            or step.get("approval_node_id")
+                            or ""
+                        ),
                     )
 
             details = {

@@ -804,7 +804,7 @@ def test_self_service_direct_approval_graph_is_provisioned(database):
     assert trigger["workflow_id"]
 
 
-def test_self_service_nested_approval_graph_is_blocked(database):
+def test_self_service_nested_approval_graph_is_provisioned(database):
     factory, _ = database
     brief = "For every lead, ask me before sending the message."
     payload = {
@@ -866,8 +866,8 @@ def test_self_service_nested_approval_graph_is_blocked(database):
     result = api.compile_employee(1, USER)
 
     trigger = result["spec"]["delivery"]["graph_trigger"]
-    assert trigger["status"] == "nested_approval_not_ready"
-    assert trigger["workflow_id"] is None
+    assert trigger["status"] == "ready"
+    assert trigger["workflow_id"]
 
 
 def test_self_service_webhook_graph_is_provisioned_when_actions_are_ready(database):
