@@ -1305,6 +1305,246 @@ def revise_self_service_job_brief(
         db.close()
 
 
+@router.post("/{agent_id}/refine")
+def refine_self_service_employee(
+    agent_id: int,
+    data: EmployeeBuilderRefineRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Apply a concise owner instruction to the same draft employee.
+
+    The source Job Brief remains auditable. Later OWNER REFINEMENT sections are
+    compiled as authoritative overrides without silently discarding unrelated
+    requirements.
+    """
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Natural-language refinement is available only for Self-Service employees")
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == agent_id,
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        if agent.enabled:
+            raise HTTPException(409, "Deactivate this employee before refining it")
+        config = _employee_config_or_404(db, agent)
+        builder = dict((config.settings or {}).get("employee_builder") or {})
+        current_brief = str(builder.get("source_description") or agent.description or "").strip()
+        if not current_brief:
+            raise HTTPException(409, "Current Job Brief is unavailable")
+        instruction = " ".join(str(data.instruction or "").strip().split())
+        if not instruction:
+            raise HTTPException(400, "Refinement instruction is required")
+        revised = (
+            current_brief
+            + "\n\nOWNER REFINEMENT "
+            + datetime.utcnow().isoformat(timespec="seconds")
+            + "Z:\n"
+            + instruction
+        )
+        if len(revised) > 12000:
+            raise HTTPException(
+                409,
+                "This employee has accumulated too many refinements. Consolidate the Job Brief before continuing.",
+            )
+    finally:
+        db.close()
+
+    result = revise_self_service_job_brief(
+        agent_id,
+        EmployeeBuilderReviseRequest(description=revised),
+        current_user,
+    )
+    if _has_ai_agents_entitlement_for_user(current_user):
+        try:
+            compile_employee(agent_id, current_user)
+            result["compiled"] = True
+            result["status"] = "refined_and_rebuilt"
+        except HTTPException:
+            # The refinement itself is durable. The normal journey will surface
+            # the build blocker rather than losing the owner's instruction.
+            result["status"] = "refined"
+    return result
+
+
+def _has_ai_agents_entitlement_for_user(current_user: User) -> bool:
+    db = SessionLocal()
+    try:
+        return _has_ai_agents_entitlement(db, current_user.company_id)
+    finally:
+        db.close()
+
+
+@router.get("/{agent_id}/versions")
+def self_service_employee_versions(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Version history is available only for Self-Service employees")
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == agent_id,
+            AIAgent.company_id == company.id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+        builder = dict((config.settings or {}).get("employee_builder") or {})
+        return {
+            "agent_id": agent.id,
+            "versions": _builder_versions_view(builder),
+        }
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/rollback")
+def rollback_self_service_employee(
+    agent_id: int,
+    data: EmployeeBuilderRollbackRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Rollback is available only for Self-Service employees")
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == agent_id,
+            AIAgent.company_id == company.id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+        if agent.enabled:
+            raise HTTPException(409, "Deactivate this employee before rolling it back")
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        versions = list(builder.get("versions") or [])
+        selected = next(
+            (
+                item for item in versions
+                if isinstance(item, dict)
+                and str(item.get("id") or "") == str(data.version_id)
+            ),
+            None,
+        )
+        if selected is None:
+            raise HTTPException(404, "Employee version not found")
+
+        builder = _snapshot_builder_version(
+            builder,
+            reason="before_rollback",
+            capabilities=dict(config.capabilities or {}),
+        )
+        restored_brief = str(selected.get("source_description") or "").strip()
+        if not restored_brief:
+            raise HTTPException(409, "Selected version has no Job Brief")
+
+        _clear_generated_self_service_build(
+            db,
+            company_id=company.id,
+            agent_id=agent.id,
+        )
+
+        restored_spec = selected.get("compiled_spec")
+        restored_channels = communication_channels(selected.get("requested_channels") or [])
+        restored_capabilities = dict(selected.get("capabilities") or {})
+        builder["source_description"] = restored_brief
+        builder["job_brief"] = restored_brief
+        builder["requested_channels"] = restored_channels
+        builder["setup_answers"] = dict(selected.get("setup_answers") or {})
+        _clear_current_build_evidence(builder)
+
+        if isinstance(restored_spec, dict):
+            restored_spec = dict(restored_spec)
+            restored_spec, delivery = provision_compiled_capabilities(
+                db,
+                agent_id=agent.id,
+                spec=restored_spec,
+            )
+            restored_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            builder["compiled_spec"] = restored_spec
+            builder["delivery"] = delivery
+            builder["compiled_at"] = restored_at
+            builder["missing_information"] = list(restored_spec.get("setup_required") or [])
+            agent.system_prompt = build_compiled_employee_system_prompt(
+                owner_name=company.name,
+                spec=restored_spec,
+            )
+        else:
+            blueprint = _build_final_blueprint(
+                EmployeeBuilderCreateRequest(
+                    description=restored_brief,
+                    name=agent.name,
+                )
+            )
+            restored_capabilities = {item: True for item in blueprint.capabilities}
+            builder["audience"] = blueprint.audience
+            builder["permissions"] = dict(blueprint.permissions)
+            builder["missing_information"] = list(blueprint.missing_information)
+            agent.system_prompt = build_employee_system_prompt(
+                owner_name=company.name,
+                blueprint=blueprint,
+            )
+
+        config.capabilities = restored_capabilities
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        agent.description = restored_brief
+
+        reconcile_managed_channel_requests(
+            db,
+            company_id=company.id,
+            agent_id=agent.id,
+            desired_channel_types=restored_channels,
+            request_source="version_rollback",
+        )
+        for channel in (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.company_id == company.id,
+                AgentChannel.agent_id == agent.id,
+                AgentChannel.enabled.is_(True),
+            )
+            .with_for_update()
+            .all()
+        ):
+            channel_type = canonical_channel_type(channel.channel_type)
+            if communication_channels([channel_type]) and channel_type not in restored_channels:
+                channel.enabled = False
+
+        db.commit()
+        return {
+            "status": "rolled_back",
+            "agent_id": agent.id,
+            "version_id": data.version_id,
+            "compiled": isinstance(builder.get("compiled_spec"), dict),
+            "current_build_tested": False,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @router.put("/{agent_id}/setup/{requirement_key}")
 def save_self_service_setup_answer(
     agent_id: int,
