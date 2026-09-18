@@ -212,6 +212,7 @@
             "manage_integrations",
             "setup_website",
             "setup_whatsapp",
+            "setup_webhook",
             "test_employee",
             "launch_employee",
         ]).has(type);
@@ -269,6 +270,14 @@
                 <div id="subscription-plans" class="employee-builder-section hidden"></div>
                 <div id="subscription-error" class="error"></div>
                 <div id="prepare-employee-error" class="error"></div>
+                <div id="employee-builder-webhook-panel" class="employee-builder-section hidden">
+                    <h3>Webhook trigger</h3>
+                    <p class="muted">Send JSON to this URL and include both headers below. Reuse a stable Idempotency-Key for retries of the same external event.</p>
+                    <label><span>Webhook URL</span><input id="employee-builder-webhook-url" type="text" readonly></label>
+                    <label><span>X-Xvond-Webhook-Key</span><input id="employee-builder-webhook-key" type="text" readonly></label>
+                    <label><span>Idempotency header</span><input id="employee-builder-webhook-idempotency" type="text" readonly></label>
+                    <div id="employee-builder-webhook-error" class="error"></div>
+                </div>
                 <div id="employee-builder-test-panel" class="employee-builder-section hidden">
                     <h3>Preview & Test</h3>
                     <p class="muted">Talk to the current draft. Xvond will not use live channels or execute business actions in this preview.</p>
@@ -544,6 +553,26 @@
             }
             if (actionType === "manage_integrations") {
                 await openJourneyPage("integrations");
+                return;
+            }
+            if (actionType === "setup_webhook") {
+                const panel = document.getElementById("employee-builder-webhook-panel");
+                const error = document.getElementById("employee-builder-webhook-error");
+                if (error) error.textContent = "";
+                try {
+                    const result = await api(`/customer/employee-builder/${Number(employee.agent_id)}/webhook`);
+                    const url = document.getElementById("employee-builder-webhook-url");
+                    const key = document.getElementById("employee-builder-webhook-key");
+                    const idempotency = document.getElementById("employee-builder-webhook-idempotency");
+                    if (url) url.value = String(result.url || "");
+                    if (key) key.value = String(result.key || "");
+                    if (idempotency) idempotency.value = String(result.idempotency_header || "Idempotency-Key");
+                    panel?.classList.remove("hidden");
+                    panel?.scrollIntoView({behavior: "smooth", block: "center"});
+                } catch (err) {
+                    panel?.classList.remove("hidden");
+                    if (error) error.textContent = err?.message || "Could not load webhook setup.";
+                }
                 return;
             }
             if (actionType === "setup_website" || actionType === "setup_whatsapp") {
