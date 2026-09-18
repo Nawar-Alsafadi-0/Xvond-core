@@ -3,6 +3,7 @@ from backend.app.modules.integrations.catalog import (
     executable_integration_types,
     integration_packaged_operations,
     integration_requires_operation_endpoints,
+    validate_integration_config,
 )
 
 
@@ -41,3 +42,51 @@ def test_registry_declares_real_execution_and_endpoint_contracts():
     assert integration_requires_operation_endpoints("email_imap") is False
     assert integration_requires_operation_endpoints("instagram_publish") is False
     assert integration_requires_operation_endpoints("calendar") is False
+
+
+def test_calendar_configuration_requires_supported_provider_and_durable_auth():
+    assert validate_integration_config(
+        "calendar",
+        {
+            "provider": "google",
+            "timezone": "Asia/Muscat",
+            "access_token": "token",
+        },
+    ) is True
+    assert validate_integration_config(
+        "calendar",
+        {
+            "provider": "google",
+            "timezone": "Asia/Muscat",
+            "refresh_token": "refresh",
+            "client_id": "client",
+            "client_secret": "secret",
+        },
+    ) is True
+
+    try:
+        validate_integration_config(
+            "calendar",
+            {
+                "provider": "microsoft",
+                "timezone": "Asia/Muscat",
+                "access_token": "token",
+            },
+        )
+    except ValueError as exc:
+        assert "provider" in str(exc)
+    else:
+        raise AssertionError("Unsupported calendar provider must be rejected")
+
+    try:
+        validate_integration_config(
+            "calendar",
+            {
+                "provider": "google",
+                "timezone": "Asia/Muscat",
+            },
+        )
+    except ValueError as exc:
+        assert "OAuth" in str(exc)
+    else:
+        raise AssertionError("Calendar auth must be required")
