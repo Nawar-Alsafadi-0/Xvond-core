@@ -378,7 +378,6 @@ async function startPortal() {
             : null;
         const selfServiceDraft = (
             portalOverview?.company?.onboarding_source === "self_service"
-            && Number(portalOverview?.summary?.agents || 0) > 0
             && Number(portalOverview?.summary?.active_agents || 0) === 0
             && portalNavigation.some(item => item.id === "employee-builder")
         );
