@@ -11,6 +11,7 @@ from backend.app.models.user import User
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.tools.business_models import ActionRequest
 from backend.app.modules.tools.models import AgentToolAssignment
+from backend.app.modules.tools.generic_capability_runtime import generic_capability_readiness
 
 router = APIRouter(prefix="/admin/agent-actions", tags=["Xvond Admin - Agent Actions"])
 
@@ -601,7 +602,17 @@ def _readiness(action: dict, enabled_modules: set[str] | None = None) -> list[st
         issues.append(f"Enable {BUSINESS_MODULES.get(module, module)} for this company")
 
     destination = action.get("destination") or {}
-    if destination.get("type") == "workflow_engine":
+    if destination.get("type") == "xvond_internal" and destination.get("adapter") == "generic_capability":
+        runtime_state = generic_capability_readiness(action)
+        if not runtime_state.get("ready"):
+            reason = str(runtime_state.get("reason") or "runtime_setup_required")
+            messages = {
+                "execution_plan_required": "Xvond must finish the generated execution plan",
+                "execution_plan_too_large": "Generated execution plan is too large",
+                "approved_https_host_required": "Xvond needs an approved HTTPS host from the Job Brief",
+            }
+            issues.append(messages.get(reason, f"Generic runtime setup is incomplete: {reason}"))
+    elif destination.get("type") == "workflow_engine":
         issues.append("Xvond must configure an execution adapter for this generated action contract")
     if destination.get("type") == "unconfigured":
         issues.append("Choose a real destination")
