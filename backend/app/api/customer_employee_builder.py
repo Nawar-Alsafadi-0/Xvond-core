@@ -71,6 +71,10 @@ class EmployeeBuilderReviseRequest(BaseModel):
     description: str = Field(min_length=8, max_length=4000)
 
 
+class EmployeeBuilderSetupAnswerRequest(BaseModel):
+    value: str = Field(min_length=1, max_length=8000)
+
+
 DEFAULT_CUSTOMER_CONTROLS = {
     "can_enable_disable": True,
     "can_view_conversations": True,
@@ -800,6 +804,7 @@ def create_employee(
                 "requested_channels": requested_channels,
                 "permissions": dict(blueprint.permissions),
                 "missing_information": list(blueprint.missing_information),
+                "setup_answers": {},
                 "onboarding_source": company.onboarding_source,
                 "delivery_mode": (
                     "self_service"
@@ -938,6 +943,7 @@ def revise_self_service_job_brief(
                 "requested_channels": communication_channels(blueprint.channels),
                 "permissions": dict(blueprint.permissions),
                 "missing_information": list(blueprint.missing_information),
+                "setup_answers": {},
                 "onboarding_source": company.onboarding_source,
                 "delivery_mode": "self_service",
                 "compiled_spec": None,
@@ -1012,6 +1018,107 @@ def revise_self_service_job_brief(
             "requested_channels": list(communication_channels(blueprint.channels)),
             "deactivated_channels": deactivated_channels,
             "missing_information": list(blueprint.missing_information),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.put("/{agent_id}/setup/{requirement_key}")
+def save_self_service_setup_answer(
+    agent_id: int,
+    requirement_key: str,
+    data: EmployeeBuilderSetupAnswerRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Save owner-provided setup data required by the compiled employee contract."""
+
+    key = requirement_key.strip().lower()
+    if not key or len(key) > 100:
+        raise HTTPException(400, "Setup requirement key is invalid")
+    if key in {"knowledge", "files"}:
+        raise HTTPException(
+            409,
+            "Knowledge and files must be added through the employee Knowledge workspace",
+        )
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Setup answers are available only for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == agent_id,
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+        if agent.enabled:
+            raise HTTPException(409, "Deactivate this employee before changing setup data")
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        compiled_spec = builder.get("compiled_spec")
+        if not isinstance(compiled_spec, dict):
+            raise HTTPException(409, "Build the employee before providing setup data")
+
+        requirement = next(
+            (
+                item
+                for item in (compiled_spec.get("requirements") or [])
+                if isinstance(item, dict)
+                and str(item.get("key") or "").strip().lower() == key
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HTTPException(404, "Setup requirement not found in the current Job Brief")
+        if str(requirement.get("status") or "").strip().lower() != "customer_input_required":
+            raise HTTPException(409, "This requirement does not accept customer setup data")
+
+        value = data.value.strip()
+        answers = dict(builder.get("setup_answers") or {})
+        answers[key] = value
+        builder["setup_answers"] = answers
+
+        compiled_value = dict(compiled_spec)
+        customer_inputs = dict(compiled_value.get("customer_inputs") or {})
+        customer_inputs[key] = value
+        compiled_value["customer_inputs"] = customer_inputs
+        builder["compiled_spec"] = compiled_value
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+
+        agent.system_prompt = build_compiled_employee_system_prompt(
+            owner_name=company.name,
+            spec=compiled_value,
+        )
+
+        db.commit()
+        return {
+            "status": "saved",
+            "agent_id": agent.id,
+            "requirement_key": key,
+            "readiness": self_service_readiness(
+                db,
+                company=company,
+                agent=agent,
+                config=config,
+            ),
         }
     except HTTPException:
         db.rollback()
