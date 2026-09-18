@@ -2,6 +2,7 @@ from pathlib import Path
 
 from backend.app.modules.ai_agent.employee_capability_builder import (
     build_internal_booking_action_config,
+    build_internal_record_action_config,
     build_managed_action_config,
 )
 from backend.app.modules.ai_agent.employee_compiler import (
@@ -494,3 +495,43 @@ def test_internal_booking_action_builds_real_schedule_from_customer_setup():
         "capacity": 1,
     }
     assert action["_xvond_booking_setup_ready"] is True
+
+
+def test_xvond_native_business_records_are_real_portal_capabilities():
+    spec = {
+        "permissions": [{"action": "lead_management", "mode": "automatic"}],
+    }
+    requirement = {
+        "key": "lead_management",
+        "purpose": "Capture and follow up sales leads",
+        "fulfillment_mode": "xvond_internal",
+    }
+    action = build_internal_record_action_config(requirement=requirement, spec=spec)
+
+    assert action["module"] == "lead_management"
+    assert action["destination"]["type"] == "xvond_internal"
+    assert action["destination"]["adapter"] == "business_record"
+    assert action["destination"]["record_type"] == "lead_management"
+    assert any(field["key"] == "interest" and field["required"] for field in action["fields"])
+    assert action["confirmation_required"] is False
+
+
+def test_external_booking_action_keeps_real_integration_and_provider_endpoints():
+    spec = {"permissions": [{"action": "booking", "mode": "ask_before"}]}
+    requirement = {
+        "key": "booking",
+        "purpose": "Use existing booking system",
+        "fulfillment_mode": "external_connection",
+        "integration_id": 41,
+        "integration_operations": {
+            "availability": {"method": "POST", "endpoint": "/availability"},
+            "execute": {"method": "POST", "endpoint": "/bookings"},
+        },
+    }
+    action = build_managed_action_config(requirement=requirement, spec=spec)
+
+    assert action["module"] == "booking"
+    assert action["destination"]["type"] == "integration"
+    assert action["destination"]["integration_id"] == 41
+    assert action["destination"]["operations"]["execute"]["endpoint"] == "/bookings"
+    assert action["availability"]["mode"] == "integration"
