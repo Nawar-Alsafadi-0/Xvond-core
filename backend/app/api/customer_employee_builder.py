@@ -2603,6 +2603,8 @@ def customer_employee_run_graph(
         )
         if agent is None:
             raise HTTPException(404, "Employee not found")
+        if not agent.enabled:
+            raise HTTPException(409, "Launch this employee before running its live execution graph")
 
         workflow = None
         for row in (
