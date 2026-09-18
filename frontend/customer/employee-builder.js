@@ -648,6 +648,10 @@
                 method: "POST",
                 body: JSON.stringify({ plan_id: Number(planId) })
             });
+            if (result.requires_payment && result?.checkout?.checkout_url) {
+                window.location.assign(result.checkout.checkout_url);
+                return;
+            }
             if (result.requires_payment) {
                 alert("Plan selected. Payment or Xvond approval is required before AI execution is enabled.");
             }
