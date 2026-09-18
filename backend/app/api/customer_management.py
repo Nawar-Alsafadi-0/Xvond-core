@@ -21,6 +21,7 @@ from backend.app.api.admin_company_profile import (
     update_company_profile,
 )
 from backend.app.core.dependencies import require_customer_manager
+from backend.app.core.config.settings import settings
 from backend.app.core.config_secrets import (
     configured_secret_fields,
     merge_config,
@@ -80,7 +81,7 @@ def _validate_live_connection(item: CompanyIntegration) -> dict:
                 "Instagram User ID and access token are required before validation",
             )
         url = validate_public_http_url(
-            f"https://graph.facebook.com/{instagram_user_id}?fields=id,username"
+            f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}/{instagram_user_id}?fields=id,username"
         )
         try:
             result = safe_http_request(
