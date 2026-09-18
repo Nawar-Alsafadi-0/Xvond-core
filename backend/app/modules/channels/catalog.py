@@ -5,6 +5,8 @@ CHANNEL_SETUP_SELF_SERVICE = "self_service"
 CHANNEL_SETUP_MANAGED = "managed"
 CHANNEL_SETUP_INTERNAL = "internal"
 
+N8N_CHANNEL_RUNTIME_ADAPTER = "n8n_channel_bridge"
+
 
 CHANNEL_ALIASES = {
     "instagram_dm": "instagram",
@@ -91,20 +93,19 @@ CHANNEL_CATALOG = {
         "name": "Telegram",
         "description": "Telegram bot messaging",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_RUNTIME_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
-        "config_fields": [
-            {"name": "bot_token", "label": "Bot Token", "required": True, "secret": True},
-        ],
+        # Provider credentials live in n8n, not Xvond Core.
+        "config_fields": [],
     },
     "instagram": {
         "name": "Instagram DM",
         "description": "Instagram direct-message channel",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_RUNTIME_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
         "config_fields": [],
@@ -113,8 +114,8 @@ CHANNEL_CATALOG = {
         "name": "Facebook Messenger",
         "description": "Facebook Page Messenger channel",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_RUNTIME_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
         "config_fields": [],
@@ -123,8 +124,8 @@ CHANNEL_CATALOG = {
         "name": "Email",
         "description": "Inbound and outbound employee email channel",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_RUNTIME_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
         "config_fields": [],
@@ -133,8 +134,8 @@ CHANNEL_CATALOG = {
         "name": "SMS",
         "description": "SMS messaging channel",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_RUNTIME_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
         "config_fields": [],
@@ -143,8 +144,8 @@ CHANNEL_CATALOG = {
         "name": "Slack",
         "description": "Slack workspace messaging channel",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_RUNTIME_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
         "config_fields": [],
@@ -153,8 +154,8 @@ CHANNEL_CATALOG = {
         "name": "Microsoft Teams",
         "description": "Microsoft Teams messaging channel",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_RUNTIME_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
         "config_fields": [],
@@ -163,14 +164,12 @@ CHANNEL_CATALOG = {
         "name": "Custom / API Channel",
         "description": "Custom customer communication surface",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_RUNTIME_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
-        "config_fields": [
-            {"name": "endpoint", "label": "Endpoint", "required": True, "secret": False},
-            {"name": "api_key", "label": "API Key", "required": False, "secret": True},
-        ],
+        # Provider endpoint/credentials live in the managed n8n route.
+        "config_fields": [],
     },
 }
 
