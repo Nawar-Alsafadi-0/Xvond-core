@@ -14,6 +14,8 @@ from backend.app.modules.billing.payment_gateway import payment_gateway
 from backend.app.modules.billing.service_models import (
     ServiceCheckout,
     ServicePaymentEvent,
+    ServicePaymentProfile,
+    ServiceRenewalAttempt,
     ServiceSubscription,
 )
 from backend.app.modules.channels.acceptance import customer_roundtrip_verified
@@ -225,6 +227,35 @@ def _billing_gate(
             > 0
         )
 
+    recurring_profile_ready = True
+    unresolved_renewals = 0
+    if (
+        provider == "tap"
+        and settings.TAP_RECURRING_ENABLED
+        and subscription is not None
+    ):
+        profile = (
+            db.query(ServicePaymentProfile)
+            .filter(
+                ServicePaymentProfile.company_id == company_id,
+                ServicePaymentProfile.service_subscription_id == subscription.id,
+                ServicePaymentProfile.provider == "tap",
+                ServicePaymentProfile.status == "active",
+            )
+            .first()
+        )
+        recurring_profile_ready = profile is not None
+        unresolved_renewals = (
+            db.query(ServiceRenewalAttempt)
+            .filter(
+                ServiceRenewalAttempt.company_id == company_id,
+                ServiceRenewalAttempt.service_subscription_id == subscription.id,
+                ServiceRenewalAttempt.provider == "tap",
+                ServiceRenewalAttempt.status.in_(("sending", "unknown", "failed")),
+            )
+            .count()
+        )
+
     blockers = []
     if not active_subscription:
         blockers.append("active_ai_employee_subscription_required")
@@ -251,6 +282,13 @@ def _billing_gate(
         blockers.append("completed_checkout_evidence_missing")
     if require_payment_evidence and not payment_event:
         blockers.append("signed_payment_webhook_evidence_missing")
+    if provider == "tap" and settings.TAP_RECURRING_ENABLED:
+        if not settings.TAP_SAVE_CARD_FOR_RECURRING:
+            blockers.append("tap_saved_card_recurring_not_enabled")
+        if not recurring_profile_ready:
+            blockers.append("tap_recurring_payment_profile_missing")
+        if unresolved_renewals:
+            blockers.append("tap_unresolved_renewal_attempts")
 
     return {
         "ok": not blockers,
@@ -261,6 +299,11 @@ def _billing_gate(
         "payment_evidence_required": require_payment_evidence,
         "completed_checkout_evidence": completed_transaction,
         "signed_payment_webhook_evidence": payment_event,
+        "tap_recurring_enabled": bool(
+            provider == "tap" and settings.TAP_RECURRING_ENABLED
+        ),
+        "tap_recurring_profile_ready": recurring_profile_ready,
+        "unresolved_renewal_attempts": int(unresolved_renewals),
         "blockers": blockers,
     }
 
