@@ -561,6 +561,104 @@ def test_self_service_content_generation_schedule_builds_ai_then_action(database
         assert nodes[1]["params"]["arguments"]["caption"] == "$nodes.generate_content.ai_response"
 
 
+def test_self_service_graph_schedule_owns_the_full_pipeline(database):
+    factory, _ = database
+    brief = "Every 60 minutes generate a summary and save the result automatically."
+    payload = {
+        "role": "Scheduled graph worker",
+        "scope": "business",
+        "requirements": [
+            {
+                "key": KEY,
+                "kind": "custom",
+                "purpose": "Save the generated summary",
+                "primitives": [
+                    "content_generation",
+                    "scheduler",
+                    "workflow_engine",
+                ],
+                "schedule": {
+                    "kind": "interval",
+                    "every_minutes": 60,
+                    "source_text": "Every 60 minutes",
+                },
+                "execution_plan": [
+                    {
+                        "id": "notify",
+                        "op": "notify",
+                        "title": "Saved",
+                        "message": "Summary saved.",
+                    }
+                ],
+            }
+        ],
+        "permissions": [
+            {"action": "Save the generated summary", "mode": "automatic"}
+        ],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {
+                "type": "schedule",
+                "schedule": {
+                    "kind": "interval",
+                    "every_minutes": 60,
+                },
+            },
+            "nodes": [
+                {
+                    "id": "draft",
+                    "type": "ai",
+                    "depends_on": [],
+                    "params": {"prompt": "Generate the scheduled summary."},
+                },
+                {
+                    "id": "save",
+                    "type": "action",
+                    "depends_on": ["draft"],
+                    "params": {
+                        "action_type": KEY,
+                        "arguments": {
+                            "body": "$nodes.draft.ai_response"
+                        },
+                    },
+                },
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "ready"
+    assert trigger["trigger_type"] == "schedule"
+    assert trigger["workflow_id"]
+
+    requirement = result["spec"]["requirements"][0]
+    assert requirement.get("schedule_workflow_id") is None
+
+    with factory() as db:
+        workflows = db.query(AutomationWorkflow).all()
+        assert len(workflows) == 1
+        workflow = workflows[0]
+        assert workflow.trigger_type == "schedule"
+        assert workflow.trigger_config["schedule"] == {
+            "kind": "interval",
+            "every_minutes": 60,
+        }
+        assert workflow.trigger_config["_xvond_graph_trigger"] is True
+        assert workflow.steps[0]["type"] == "graph"
+        assert [node["id"] for node in workflow.steps[0]["graph"]["nodes"]] == [
+            "draft",
+            "save",
+        ]
+
+
 def test_self_service_media_generation_schedule_builds_ai_media_then_action(database):
     factory, _ = database
     brief, payload = _scheduled_payload()
