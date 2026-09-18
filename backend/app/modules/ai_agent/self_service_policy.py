@@ -364,6 +364,22 @@ def _resolved_customer_requirement_keys(
     )
     if knowledge_count > 0:
         resolved.add("knowledge")
+
+    config = (
+        db.query(AgentConfig)
+        .filter(AgentConfig.agent_id == agent_id)
+        .first()
+    )
+    if config is not None:
+        builder = dict((config.settings or {}).get("employee_builder") or {})
+        answers = builder.get("setup_answers") or {}
+        if isinstance(answers, dict):
+            for key, value in answers.items():
+                normalized = str(key or "").strip().lower()
+                if not normalized:
+                    continue
+                if isinstance(value, str) and value.strip():
+                    resolved.add(normalized)
     return resolved
 
 
