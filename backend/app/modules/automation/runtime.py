@@ -346,10 +346,23 @@ class AutomationRuntime:
             if not nodes:
                 raise ValueError("Execution graph has no runnable nodes")
 
-            node_outputs: dict[str, dict] = {}
+            resume = state.get("_xvond_graph_resume")
+            resume = resume if isinstance(resume, dict) else {}
+            resume_for_step = int(resume.get("workflow_step_index") or -1) == int(step_index)
+            node_outputs: dict[str, dict] = (
+                deepcopy(resume.get("node_outputs") or {})
+                if resume_for_step
+                else {}
+            )
+            resume_node_id = str(resume.get("node_id") or "").strip() if resume_for_step else ""
+            waiting_for_resume_node = bool(resume_node_id)
             graph_agent_id = step.get("agent_id")
             for node_index, node in enumerate(nodes):
                 node_id = str(node.get("id") or "").strip()
+                if waiting_for_resume_node and node_id != resume_node_id:
+                    continue
+                if waiting_for_resume_node and node_id == resume_node_id:
+                    waiting_for_resume_node = False
                 node_type = str(node.get("type") or "").strip().lower()
                 dependencies = list(node.get("depends_on") or [])
                 if any(dep not in node_outputs for dep in dependencies):
@@ -398,11 +411,57 @@ class AutomationRuntime:
                         "size": params.get("size") or "1024x1024",
                     }
                 elif node_type == "action":
+                    action_agent_id = int(params.get("agent_id") or graph_agent_id or 0)
+                    action_type = str(params.get("action_type") or "").strip()
+                    if not action_agent_id or not action_type:
+                        raise ValueError(
+                            f"Execution graph action node {node_id} requires agent_id and action_type"
+                        )
+                    action_contract = _graph_action_contract(
+                        db,
+                        agent_id=action_agent_id,
+                        action_type=action_type,
+                    )
+                    approval_request_id = int(state.get("_xvond_approved_request_id") or 0)
+                    if action_contract.get("confirmation_required", True):
+                        if int(state.get("_xvond_nested_graph_depth") or 0) > 0:
+                            raise ValueError(
+                                "Approval-required actions inside foreach are not supported yet"
+                            )
+                        approved = None
+                        if approval_request_id:
+                            approved = (
+                                db.query(ActionRequest)
+                                .filter(
+                                    ActionRequest.id == approval_request_id,
+                                    ActionRequest.company_id == company_id,
+                                    ActionRequest.agent_id == action_agent_id,
+                                    ActionRequest.action_type == action_type,
+                                    ActionRequest.status == "approved",
+                                )
+                                .first()
+                            )
+                        if approved is None:
+                            raise AutomationApprovalRequired(
+                                agent_id=action_agent_id,
+                                action_type=action_type,
+                                arguments=params.get("arguments") or {},
+                                summary=str(
+                                    params.get("summary")
+                                    or action_contract.get("description")
+                                    or action_contract.get("label")
+                                    or action_type
+                                ),
+                                workflow_step_index=step_index,
+                                node_id=node_id,
+                                node_outputs=node_outputs,
+                            )
                     nested_step = {
                         "type": "scheduled_action",
-                        "agent_id": params.get("agent_id") or graph_agent_id,
-                        "action_type": params.get("action_type"),
+                        "agent_id": action_agent_id,
+                        "action_type": action_type,
                         "arguments": params.get("arguments") or {},
+                        "approval_request_id": approval_request_id or None,
                     }
                 elif node_type == "http_get_json":
                     url = str(params.get("url") or "").strip()
