@@ -909,7 +909,9 @@
                     const requirementKey = decodeURIComponent(String(select.dataset.integrationSelect || ""));
                     const allowedTypes = requirementKey === "instagram_publish"
                         ? new Set(["instagram_publish"])
-                        : null;
+                        : (requirementKey === "email_send"
+                            ? new Set(["email_smtp"])
+                            : null);
                     const compatible = allowedTypes
                         ? integrations.filter(item => allowedTypes.has(String(item.integration_type || "")))
                         : integrations;
