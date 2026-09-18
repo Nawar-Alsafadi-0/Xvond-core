@@ -77,6 +77,18 @@
     min-width: 180px;
 }
 
+.employee-builder-revision {
+    display: grid;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.employee-builder-revision textarea {
+    width: 100%;
+    min-height: 180px;
+    resize: vertical;
+}
+
 .employee-builder-principles {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
