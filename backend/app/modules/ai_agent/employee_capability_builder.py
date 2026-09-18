@@ -494,9 +494,35 @@ def _provision_self_service_schedule(
     if workflow is not None and not workflow.enabled:
         return "disabled", workflow.id
     if workflow is None:
+        task_purpose = (
+            str(requirement.get("purpose") or key.replace("_", " ")).strip()
+            or "Scheduled employee task"
+        )
+        workflow_steps: list[dict] = []
+        if "content_generation" in (requirement.get("primitives") or []):
+            workflow_steps.append(
+                {
+                    "type": "ai",
+                    "agent_id": agent_id,
+                    "prompt": (
+                        "Perform this scheduled employee task now. "
+                        f"Task: {task_purpose}. "
+                        "Use the employee's current instructions, knowledge and supplied runtime data. "
+                        "Return only the final content or result that should be passed to the configured action."
+                    )[:2000],
+                }
+            )
+        workflow_steps.append(
+            {
+                "type": "scheduled_action",
+                "agent_id": agent_id,
+                "action_type": key,
+                "summary": task_purpose[:2000],
+            }
+        )
         workflow = AutomationWorkflow(
             company_id=company.id,
-            name=(str(requirement.get("purpose") or key.replace("_", " ")) or "Scheduled employee task")[:200],
+            name=task_purpose[:200],
             trigger_type="schedule",
             trigger_config={
                 "_xvond_source": "self_service_employee",
@@ -506,13 +532,7 @@ def _provision_self_service_schedule(
                 "schedule": schedule,
                 "input_data": runtime_inputs,
             },
-            steps=[
-                {
-                    "type": "scheduled_action",
-                    "agent_id": agent_id,
-                    "action_type": key,
-                }
-            ],
+            steps=workflow_steps,
             enabled=True,
         )
         db.add(workflow)
