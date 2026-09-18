@@ -6,6 +6,7 @@ WORKFLOW_PATH = Path("ops/n8n/xvond-actions.workflow.json")
 CONTRACTS_PATH = Path("ops/n8n/action-contracts.json")
 CHANNEL_INBOUND_PATH = Path("ops/n8n/xvond-channel-inbound.workflow.json")
 TELEGRAM_PROVIDER_PATH = Path("ops/n8n/xvond-telegram-provider.workflow.json")
+META_PROVIDER_PATH = Path("ops/n8n/xvond-meta-messaging-provider.workflow.json")
 
 
 def _workflow_code() -> str:
@@ -187,3 +188,68 @@ def test_telegram_provider_route_credentials_are_not_written_into_workflow_execu
     send_url = nodes["Telegram sendMessage"]["parameters"]["url"]
     assert "XVOND_TELEGRAM_ROUTES_JSON" in send_url
     assert ".bot_token" in send_url
+
+
+def test_meta_messaging_provider_verifies_raw_body_signature_and_normalizes_messages():
+    payload = json.loads(META_PROVIDER_PATH.read_text(encoding="utf-8"))
+    nodes = {node["name"]: node for node in payload["nodes"]}
+
+    assert nodes["Meta Verify"]["parameters"]["path"] == "xvond-meta-messaging"
+    assert nodes["Meta Messaging Inbound"]["parameters"]["path"] == "xvond-meta-messaging"
+    assert nodes["Meta Messaging Inbound"]["parameters"]["options"]["rawBody"] is True
+    assert nodes["Meta Messaging Provider"]["parameters"]["path"] == "xvond-meta-messaging-provider"
+
+    code = nodes["Validate and Normalize Meta"]["parameters"]["jsCode"]
+    assert "require('crypto')" in code
+    assert "x-hub-signature-256" in code.lower()
+    assert "createHmac('sha256'" in code
+    assert "timingSafeEqual" in code
+    assert "XVOND_META_MESSAGING_ROUTES_JSON" in code
+    assert "message?.mid" in code
+    assert "event?.sender?.id" in code
+    assert "message.is_echo === true" in code
+    assert "external_contact_id" in code
+    assert "external_message_id" in code
+    assert "channel_type:expectedChannel" in code
+
+    reject = nodes["Reject Meta Inbound"]
+    assert reject["parameters"]["options"]["responseCode"] == 403
+
+
+def test_meta_messaging_provider_sends_instagram_and_messenger_without_secret_propagation():
+    payload = json.loads(META_PROVIDER_PATH.read_text(encoding="utf-8"))
+    nodes = {node["name"]: node for node in payload["nodes"]}
+
+    outbound = nodes["Validate Meta Send"]["parameters"]["jsCode"]
+    assert "channel.send" in outbound
+    assert "route.access_token" in outbound
+    assert "route.provider_secret" in outbound
+    emitted = outbound.split("return [{json:{", 1)[-1]
+    assert "access_token:" not in emitted
+    assert "app_secret:" not in emitted
+    assert "provider_secret:" not in emitted
+    assert "route_key:routeKey" in emitted
+
+    send = str(nodes["Send Meta Message"]["parameters"])
+    assert "graph.instagram.com" in send
+    assert "graph.facebook.com" in send
+    assert "XVOND_META_MESSAGING_ROUTES_JSON" in send
+    assert "Authorization" in send
+    assert "Bearer" in send
+    assert "messaging_type" in send
+    assert "RESPONSE" in send
+
+    normalized = nodes["Normalize Meta Send Result"]["parameters"]["jsCode"]
+    assert "message_id" in normalized
+    assert "provider_message_id" in normalized
+
+
+def test_meta_messaging_verification_uses_dedicated_verify_token():
+    payload = json.loads(META_PROVIDER_PATH.read_text(encoding="utf-8"))
+    nodes = {node["name"]: node for node in payload["nodes"]}
+    code = nodes["Validate Meta Verification"]["parameters"]["jsCode"]
+
+    assert "hub.verify_token" in code
+    assert "hub.challenge" in code
+    assert "XVOND_META_MESSAGING_VERIFY_TOKEN" in code
+    assert nodes["Reject Meta Verification"]["parameters"]["options"]["responseCode"] == 403
