@@ -178,7 +178,13 @@ def _billing_gate(
     )
 
     gateway = payment_gateway()
+    provider = str(getattr(gateway, "provider", None) or settings.BILLING_PROVIDER or "none")
     online_configured = bool(gateway is not None and gateway.configured())
+
+    success_event_types = {
+        "paddle": {"transaction.completed"},
+        "tap": {"charge.captured"},
+    }.get(provider, set())
 
     checkouts = []
     completed_transaction = False
@@ -194,24 +200,26 @@ def _billing_gate(
             .all()
         )
         completed_transaction = any(
-            str(item.status or "").lower() in {"completed", "active"}
+            str(item.provider or "").lower() == provider
+            and str(item.status or "").lower() in {"completed", "active"}
             and bool(str(item.provider_transaction_id or "").strip())
             for item in checkouts
         )
 
-    if completed_transaction:
+    if completed_transaction and success_event_types:
         checkout_ids = {
             int(item.id)
             for item in checkouts
-            if str(item.status or "").lower() in {"completed", "active"}
+            if str(item.provider or "").lower() == provider
+            and str(item.status or "").lower() in {"completed", "active"}
         }
         payment_event = (
             db.query(ServicePaymentEvent)
             .filter(
                 ServicePaymentEvent.company_id == company_id,
                 ServicePaymentEvent.service_checkout_id.in_(checkout_ids),
-                ServicePaymentEvent.provider == "paddle",
-                ServicePaymentEvent.event_type == "transaction.completed",
+                ServicePaymentEvent.provider == provider,
+                ServicePaymentEvent.event_type.in_(success_event_types),
             )
             .count()
             > 0
@@ -222,11 +230,23 @@ def _billing_gate(
         blockers.append("active_ai_employee_subscription_required")
     if require_online_billing and not online_configured:
         blockers.append("online_billing_not_configured")
-    if require_online_billing and settings.BILLING_PROVIDER == "paddle":
+    if require_online_billing and provider == "paddle":
         if settings.PADDLE_ENVIRONMENT != "live":
             blockers.append("paddle_environment_not_live")
         if not str(settings.PADDLE_CHECKOUT_URL or "").startswith("https://"):
             blockers.append("paddle_checkout_url_not_https")
+    if require_online_billing and provider == "tap":
+        if not str(settings.TAP_SECRET_KEY or "").startswith("sk_live_"):
+            blockers.append("tap_secret_key_not_live")
+        if not str(settings.TAP_MERCHANT_ID or "").strip():
+            blockers.append("tap_merchant_id_missing")
+        tap_redirect = settings.TAP_REDIRECT_URL or (
+            f"{settings.PUBLIC_BASE_URL}/billing/return"
+            if settings.PUBLIC_BASE_URL
+            else ""
+        )
+        if not str(tap_redirect).startswith("https://"):
+            blockers.append("tap_redirect_url_not_https")
     if require_payment_evidence and not completed_transaction:
         blockers.append("completed_checkout_evidence_missing")
     if require_payment_evidence and not payment_event:
@@ -237,7 +257,7 @@ def _billing_gate(
         "active_subscription": active_subscription,
         "online_billing_required": require_online_billing,
         "online_billing_configured": online_configured,
-        "payment_provider": settings.BILLING_PROVIDER or None,
+        "payment_provider": provider if provider != "none" else None,
         "payment_evidence_required": require_payment_evidence,
         "completed_checkout_evidence": completed_transaction,
         "signed_payment_webhook_evidence": payment_event,
