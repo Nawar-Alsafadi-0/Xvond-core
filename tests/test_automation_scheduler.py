@@ -889,3 +889,51 @@ def test_graph_runtime_filter_handles_missing_fields_without_failing():
     assert result["graph_outputs"]["filtered"]["items"] == [
         {"nested": {"value": "yes"}}
     ]
+
+
+
+def test_graph_runtime_supports_safe_public_web_fetch(monkeypatch):
+    runtime = automation_runtime_module.AutomationRuntime()
+    captured = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status_code": 200,
+            "response": "<html><body>Competitor offer</body></html>",
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "page",
+                        "type": "web_fetch",
+                        "depends_on": [],
+                        "params": {"url": "https://example.com/offers"},
+                    }
+                ],
+            },
+        },
+        state={"_xvond_execution_key": "web-fetch-test"},
+        run_id=1,
+        step_index=0,
+    )
+
+    assert captured["method"] == "GET"
+    assert captured["url"] == "https://example.com/offers"
+    assert captured["max_response_bytes"] == 500_000
+    assert result["graph_outputs"]["page"]["content"].endswith("</html>")
+    assert result["graph_outputs"]["page"]["truncated"] is False
