@@ -34,6 +34,7 @@ from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
 from backend.app.modules.ai_agent.profile_models import AIAgentProfile
 from backend.app.modules.ai_agent.self_service_policy import (
+    communication_channels,
     is_self_service_company,
     self_service_readiness,
 )
@@ -229,6 +230,9 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
     if not job_brief:
         raise HTTPException(400, "Employee job brief is missing")
     requested_channels = list(builder.get("requested_channels") or [])
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if is_self_service_company(company):
+        requested_channels = communication_channels(requested_channels)
 
     selections = runtime_selections(
         db,
@@ -307,6 +311,9 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
                 agent=agent,
                 config=config,
             )
+        display_channels = list(builder.get("requested_channels", []))
+        if is_self_service_company(company):
+            display_channels = communication_channels(display_channels)
         return {
             "employee": {
                 "agent_id": agent.id,
@@ -315,7 +322,7 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
                 "enabled": agent.enabled,
                 "lifecycle": "live" if agent.enabled else "draft",
                 "capabilities": [key for key, value in (config.capabilities or {}).items() if value],
-                "requested_channels": builder.get("requested_channels", []),
+                "requested_channels": display_channels,
                 "permissions": builder.get("permissions", {}),
                 "missing_information": builder.get("missing_information", []),
                 "compiled": isinstance(compiled_spec, dict),
@@ -370,13 +377,18 @@ def create_employee(
             _ensure_module(db, company.id, module_name)
 
         provider, model = _select_model(db, company.id)
+        requested_channels = (
+            communication_channels(blueprint.channels)
+            if is_self_service
+            else list(blueprint.channels)
+        )
         settings = {
             "employee_builder": {
                 "version": 2,
                 "source_description": blueprint.description,
                 "job_brief": blueprint.description,
                 "audience": blueprint.audience,
-                "requested_channels": list(blueprint.channels),
+                "requested_channels": requested_channels,
                 "permissions": dict(blueprint.permissions),
                 "missing_information": list(blueprint.missing_information),
                 "onboarding_source": company.onboarding_source,
