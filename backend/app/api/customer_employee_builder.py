@@ -2029,7 +2029,7 @@ def bind_self_service_integration(
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
         pending = (
-            builder.get("pending_revision")
+            deepcopy(builder.get("pending_revision"))
             if agent.enabled and isinstance(builder.get("pending_revision"), dict)
             else None
         )
@@ -2252,7 +2252,7 @@ def save_self_service_setup_answer(
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
         pending = (
-            builder.get("pending_revision")
+            deepcopy(builder.get("pending_revision"))
             if agent.enabled and isinstance(builder.get("pending_revision"), dict)
             else None
         )
@@ -2730,7 +2730,7 @@ def test_draft_employee(
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
         pending = (
-            builder.get("pending_revision")
+            deepcopy(builder.get("pending_revision"))
             if agent.enabled and isinstance(builder.get("pending_revision"), dict)
             else None
         )
@@ -2943,7 +2943,7 @@ def build_pending_live_revision(
         db.refresh(config, with_for_update=True)
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
-        pending = builder.get("pending_revision")
+        pending = deepcopy(builder.get("pending_revision"))
         if not isinstance(pending, dict):
             raise HTTPException(404, "No staged revision is available")
         job_brief = str(pending.get("source_description") or "").strip()
@@ -3069,7 +3069,7 @@ def apply_pending_live_revision(
 
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
-        pending = builder.get("pending_revision")
+        pending = deepcopy(builder.get("pending_revision"))
         if not isinstance(pending, dict):
             raise HTTPException(404, "No staged revision is available")
         pending_spec = pending.get("compiled_spec")
