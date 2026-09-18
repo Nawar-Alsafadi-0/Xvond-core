@@ -26,6 +26,7 @@ from backend.app.modules.audit.service import audit_service
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.channels.behavior import build_text_channel_behavior_prompt
+from backend.app.modules.channels.catalog import N8N_CHANNEL_RUNTIME_ADAPTER, get_channel_capability
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.customer_ops.memory import build_customer_memory
 from backend.app.modules.knowledge.service import knowledge_service
@@ -233,7 +234,14 @@ class AgentRuntime:
         conversation: AIConversation,
     ) -> str:
         base = str(agent.system_prompt or "").strip()
-        if str(conversation.channel_type or "").lower() != "whatsapp":
+        channel_type = str(conversation.channel_type or "").strip().lower()
+        if not channel_type or conversation.channel_id is None:
+            return base
+        capability = get_channel_capability(channel_type) or {}
+        if (
+            channel_type != "whatsapp"
+            and capability.get("runtime_adapter") != N8N_CHANNEL_RUNTIME_ADAPTER
+        ):
             return base
         channel = (
             db.query(AgentChannel)
@@ -241,7 +249,7 @@ class AgentRuntime:
                 AgentChannel.company_id == conversation.company_id,
                 AgentChannel.id == conversation.channel_id,
                 AgentChannel.agent_id == conversation.agent_id,
-                AgentChannel.channel_type == "whatsapp",
+                AgentChannel.channel_type == channel_type,
                 AgentChannel.enabled.is_(True),
             )
             .first()
@@ -249,7 +257,7 @@ class AgentRuntime:
         if channel is None:
             return base
         behavior = build_text_channel_behavior_prompt(
-            "whatsapp",
+            channel_type,
             reveal_config(channel.config) or {},
         )
         return (base + "\n\n" + behavior).strip()
