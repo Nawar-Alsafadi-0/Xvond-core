@@ -253,11 +253,12 @@ def _activation_blockers(db, channel: AgentChannel) -> list[str]:
 
     channel_config = reveal_config(channel.config)
     configured = _channel_configured(channel, channel_config)
+    channel_type = canonical_channel_type(channel.channel_type)
     if not configured:
         blockers.append(
-            f"{channel.channel_type.title()} channel configuration is incomplete"
+            f"{capability.get('name') or channel_type.title()} channel configuration is incomplete"
         )
-    elif channel.channel_type == "whatsapp":
+    elif channel_type == "whatsapp":
         connection = whatsapp_connection_state(
             channel_config,
             verify_remote=True,
@@ -267,6 +268,17 @@ def _activation_blockers(db, channel: AgentChannel) -> list[str]:
                 connection.get("connection_issue")
                 or "WhatsApp must be connected and verified with Meta"
             )
+    elif channel_type == "voice":
+        required = (
+            "vapi_assistant_id",
+            "vapi_phone_number_id",
+            "vapi_llm_credential_id",
+            "llm_api_key",
+        )
+        if str(channel_config.get("provisioning_state") or "").strip().lower() != "connected":
+            blockers.append("Voice: Xvond managed provisioning is not complete")
+        elif any(not str(channel_config.get(item) or "").strip() for item in required):
+            blockers.append("Voice: Vapi provisioning evidence is incomplete")
 
     docs = (
         db.query(KnowledgeDocument)
