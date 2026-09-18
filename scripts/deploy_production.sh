@@ -63,6 +63,47 @@ wait_scheduler_heartbeat() {
     return 1
 }
 
+probe_public_api_route() {
+    base_url="$1"
+    attempts="${2:-20}"
+    count=0
+    while [ "$count" -lt "$attempts" ]; do
+        if python3 -c '
+import json
+import sys
+import urllib.request
+
+url = sys.argv[1].rstrip("/") + "/health/ready"
+try:
+    with urllib.request.urlopen(url, timeout=5) as response:
+        payload = json.load(response)
+    raise SystemExit(0 if payload.get("status") == "healthy" else 1)
+except Exception:
+    raise SystemExit(1)
+' "$base_url" >/dev/null 2>&1; then
+            return 0
+        fi
+        count=$((count + 1))
+        sleep 2
+    done
+
+    echo "Public API route did not become healthy: ${base_url%/}/health/ready" >&2
+    python3 -c '
+import json
+import sys
+import urllib.request
+
+url = sys.argv[1].rstrip("/") + "/health/ready"
+try:
+    with urllib.request.urlopen(url, timeout=5) as response:
+        payload = json.load(response)
+    print(f"Public route response: status={payload.get('status')!r}", file=sys.stderr)
+except Exception as exc:
+    print(f"Public route probe error: {type(exc).__name__}: {exc}", file=sys.stderr)
+' "$base_url" >&2 || true
+    return 1
+}
+
 probe_workflow_contract() {
     docker exec xvond-workflow-engine node -e '
 const url = "http://127.0.0.1:5678/webhook/xvond-actions";
@@ -264,6 +305,8 @@ fi
 
 compose up -d postgres-backup
 compose exec -T app python -c "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)); assert data.get('status') == 'healthy', data"
+public_base_url="$(env_value PUBLIC_BASE_URL)"
+probe_public_api_route "$public_base_url"
 
 if [ -n "$ACCEPTANCE_COMPANY_ID" ]; then
     set -- python scripts/production_acceptance.py --company-id "$ACCEPTANCE_COMPANY_ID"
