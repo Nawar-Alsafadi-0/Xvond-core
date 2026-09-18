@@ -5,12 +5,17 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from backend.app.core.ai.provider_policy import runtime_selections
 from backend.app.core.config.settings import settings
+from backend.app.core.config_secrets import reveal_config
 from backend.app.models.company import Company
+from backend.app.models.company_module import CompanyModule
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.billing.service_limits import service_limits
+from backend.app.modules.channels.catalog import validate_channel_config
 from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
 
 
 SELF_SERVICE_SOURCE = "self_service"
@@ -29,6 +34,7 @@ COMMUNICATION_CHANNELS = frozenset(
 )
 
 EXTERNAL_COMMUNICATION_CHANNELS = COMMUNICATION_CHANNELS - {"xvond"}
+SELF_SERVICE_LIVE_EXTERNAL_CHANNELS = frozenset({"whatsapp", "website"})
 
 
 def is_self_service_company(company: Company | None) -> bool:
@@ -146,6 +152,101 @@ def enabled_channel_types(db, *, company_id: int, agent_id: int) -> list[str]:
         if key in EXTERNAL_COMMUNICATION_CHANNELS and key not in result:
             result.append(key)
     return result
+
+
+def configured_channel_types(db, *, company_id: int, agent_id: int) -> list[str]:
+    """Communication channels with complete stored config, regardless of live state."""
+    rows = (
+        db.query(AgentChannel)
+        .filter(
+            AgentChannel.company_id == company_id,
+            AgentChannel.agent_id == agent_id,
+        )
+        .all()
+    )
+    result: list[str] = []
+    for row in rows:
+        key = str(row.channel_type or "").strip().lower()
+        if key not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS or key in result:
+            continue
+        try:
+            validate_channel_config(key, reveal_config(row.config) or {})
+        except ValueError:
+            continue
+        result.append(key)
+    return result
+
+
+def self_service_channel_activation_blockers(
+    db,
+    *,
+    company: Company,
+    agent: AIAgent,
+    channel: AgentChannel,
+) -> list[str]:
+    """Live activation checks for Self-Service communication channels only."""
+    blockers: list[str] = []
+    channel_type = str(channel.channel_type or "").strip().lower()
+
+    if channel.company_id != company.id or channel.agent_id != agent.id:
+        return ["Communication channel ownership does not match this employee"]
+    if channel_type not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS:
+        return [f"{channel_type or 'channel'} is not available for Self-Service launch"]
+
+    if not company.active:
+        blockers.append("Company must be active")
+    if not agent.enabled:
+        blockers.append("AI employee must be active")
+
+    channels_module = (
+        db.query(CompanyModule)
+        .filter(
+            CompanyModule.company_id == company.id,
+            CompanyModule.module_name == "channels",
+            CompanyModule.enabled.is_(True),
+        )
+        .first()
+    )
+    if channels_module is None:
+        blockers.append("Channels module is not enabled")
+
+    if settings.is_production:
+        try:
+            selections = runtime_selections(
+                db,
+                company.id,
+                agent.provider,
+                agent.model,
+            )
+        except Exception:
+            selections = []
+        if not any(item.provider != "mock" for item in selections):
+            blockers.append("At least one real AI provider/model must be available")
+
+    channel_config = reveal_config(channel.config) or {}
+    try:
+        validate_channel_config(channel_type, channel_config)
+    except ValueError:
+        blockers.append(f"{channel_type.title()} channel configuration is incomplete")
+        return blockers
+
+    if channel_type == "whatsapp":
+        connection = whatsapp_connection_state(
+            channel_config,
+            verify_remote=True,
+        )
+        if connection.get("connected") is not True:
+            blockers.append(
+                connection.get("connection_issue")
+                or "WhatsApp must be connected and verified with Meta"
+            )
+    elif channel_type == "website":
+        if not str(channel_config.get("widget_key") or "").strip():
+            blockers.append("Website widget key is missing")
+        if settings.is_production and not settings.PUBLIC_BASE_URL:
+            blockers.append("Xvond public API URL is not configured")
+
+    return blockers
 
 
 def _execution_blockers(spec: dict, *, resolved_channels: list[str]) -> list[str]:
@@ -290,14 +391,33 @@ def self_service_readiness(
         company_id=company.id,
         agent_id=agent.id,
     )
+    requested_channels = list(builder.get("requested_channels") or [])
+    resolved_channels = active_channels
+    prepared_channels: list[str] = []
+    if not agent.enabled:
+        desired = set(communication_channels(requested_channels))
+        desired.update(_requirement_channel_keys(spec or {}))
+        prepared_channels = [
+            item
+            for item in configured_channel_types(
+                db,
+                company_id=company.id,
+                agent_id=agent.id,
+            )
+            if item in desired
+        ]
+        resolved_channels = prepared_channels
+
     state = evaluate_readiness(
         subscribed=bool(billing["active"]),
         channel_limit=billing["channel_limit"],
-        requested_channels=list(builder.get("requested_channels") or []),
-        enabled_channels=active_channels,
+        requested_channels=requested_channels,
+        enabled_channels=resolved_channels,
         compiled_spec=spec,
         provisioned=provisioned,
     )
+    state["active_channels"] = active_channels
+    state["prepared_channels"] = prepared_channels
     state["subscription"] = {
         "active": bool(billing["active"]),
         "plan_name": billing["plan_name"],

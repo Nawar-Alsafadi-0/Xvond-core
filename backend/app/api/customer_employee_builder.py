@@ -37,6 +37,7 @@ from backend.app.modules.ai_agent.profile_models import AIAgentProfile
 from backend.app.modules.ai_agent.self_service_policy import (
     communication_channels,
     is_self_service_company,
+    self_service_channel_activation_blockers,
     self_service_readiness,
 )
 from backend.app.modules.automation.models import AutomationWorkflow
@@ -834,11 +835,69 @@ def launch_self_service_employee(
         # workspace currently owns one employee, so its active subscription is
         # the commercial entitlement for this employee.
         limits_service.check_agent_limit(db, company.id)
+
+        target_channel_types = [
+            item for item in (state.get("slot_channels") or []) if item != "xvond"
+        ]
+        channel_rows = (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.company_id == company.id,
+                AgentChannel.agent_id == agent.id,
+                AgentChannel.channel_type.in_(target_channel_types),
+            )
+            .with_for_update()
+            .all()
+            if target_channel_types
+            else []
+        )
+        channels_by_type = {
+            str(row.channel_type or "").strip().lower(): row
+            for row in channel_rows
+        }
+        missing_rows = [
+            item for item in target_channel_types if item not in channels_by_type
+        ]
+        if missing_rows:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "Self-service communication channel setup is incomplete",
+                    "blockers": [
+                        f"Configure {item} before launch" for item in missing_rows
+                    ],
+                },
+            )
+
+        # Activate the employee and its selected communication surfaces in one
+        # transaction. Channel readiness can now evaluate the live agent without
+        # creating a Draft employee <-> inactive channel dependency cycle.
         agent.enabled = True
         company.active = True
         company.lifecycle_status = "live"
         company.lifecycle_updated_at = datetime.utcnow()
-        db.commit()
+        db.flush()
+
+        for channel_type in target_channel_types:
+            channel = channels_by_type[channel_type]
+            channel_blockers = self_service_channel_activation_blockers(
+                db,
+                company=company,
+                agent=agent,
+                channel=channel,
+            )
+            if channel_blockers:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "message": f"{channel_type} is not ready for launch",
+                        "blockers": channel_blockers,
+                    },
+                )
+            if not channel.enabled:
+                limits_service.check_channel_limit(db, company.id)
+                channel.enabled = True
+                db.flush()
 
         live = self_service_readiness(
             db,
@@ -846,6 +905,16 @@ def launch_self_service_employee(
             agent=agent,
             config=config,
         )
+        if not live["ready"]:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "Self-service employee failed final launch readiness",
+                    "blockers": live["blockers"],
+                },
+            )
+
+        db.commit()
         return {
             **live,
             "status": "live",
@@ -880,13 +949,39 @@ def deactivate_self_service_employee(
         ).first()
         if agent is None:
             raise HTTPException(404, "AI employee not found")
-        _employee_config_or_404(db, agent)
+        config = _employee_config_or_404(db, agent)
+        # Keep the same mutation lock order as launch/revision.
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+
+        channel_rows = (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.company_id == company.id,
+                AgentChannel.agent_id == agent.id,
+                AgentChannel.enabled.is_(True),
+            )
+            .with_for_update()
+            .all()
+        )
+        deactivated_channels = []
+        for channel in channel_rows:
+            channel_type = str(channel.channel_type or "").strip().lower()
+            if communication_channels([channel_type]):
+                channel.enabled = False
+                deactivated_channels.append(channel_type)
+
         agent.enabled = False
+        company.active = False
+        company.lifecycle_status = "paused"
+        company.lifecycle_updated_at = datetime.utcnow()
         db.commit()
         return {
             "status": "draft",
             "agent_id": agent.id,
             "lifecycle": "draft",
+            "company_lifecycle": "paused",
+            "deactivated_channels": deactivated_channels,
         }
     except HTTPException:
         db.rollback()
