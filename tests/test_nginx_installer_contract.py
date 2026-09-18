@@ -28,8 +28,10 @@ def test_public_base_host_rejects_unsafe_values(monkeypatch, value):
 def test_domain_matching_targets_requested_api_vhost_only():
     api = "server { server_name api.xvond.com; location / {} }"
     root = "server { server_name xvond.com www.xvond.com; location / {} }"
+    nested = "server { server_name foo.api.xvond.com; location / {} }"
     assert installer._contains_domain_server(api, "api.xvond.com") is True
     assert installer._contains_domain_server(root, "api.xvond.com") is False
+    assert installer._contains_domain_server(nested, "api.xvond.com") is False
     assert installer._contains_domain_server(root, "xvond.com") is True
 
 
