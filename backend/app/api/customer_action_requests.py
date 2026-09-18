@@ -209,6 +209,11 @@ def update_status(
             raise HTTPException(404, "Operation not found")
         if item.status == "awaiting_confirmation":
             raise HTTPException(409, "Customer confirmation is still pending")
+        if item.status in UNRESOLVED_EXTERNAL_STATUSES:
+            raise HTTPException(
+                409,
+                "This external operation must be reconciled before its status can change",
+            )
         item.status = status
         db.commit()
         db.refresh(item)
