@@ -14,6 +14,8 @@ def test_acceptance_is_pre_live_by_default_and_has_explicit_post_live_mode():
 
 def test_acceptance_checks_platform_operations_health():
     assert 'checks["whatsapp_worker"]' in SOURCE
+    assert 'checks["automation_scheduler"]' in SOURCE
+    assert "automation_scheduler_health.status()" in SOURCE
     assert 'checks["backups"]' in SOURCE
     assert 'checks["open_incidents"]' in SOURCE
     assert "UNRESOLVED_EXTERNAL" in SOURCE

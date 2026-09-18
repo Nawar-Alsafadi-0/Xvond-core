@@ -12,6 +12,15 @@ def test_release_refuses_dirty_tree_and_validates_compose():
     assert "compose config" in SOURCE
 
 
+def test_release_requires_canonical_release_branch_by_default():
+    dirty_check = SOURCE.index("git status --porcelain")
+    branch_check = SOURCE.index('required_release_branch="${DEPLOY_RELEASE_BRANCH:-main}"')
+    env_check = SOURCE.index('if [ ! -f .env ]')
+    assert dirty_check < branch_check < env_check
+    assert "git symbolic-ref --quiet --short HEAD" in SOURCE
+    assert "Refusing production deploy: current branch" in SOURCE
+
+
 def test_release_rejects_missing_or_placeholder_environment_before_compose():
     env_check = SOURCE.index('if [ ! -f .env ]')
     required_core = SOURCE.index('for key in \\\n    DATABASE_URL')
@@ -49,12 +58,30 @@ def test_release_takes_backup_before_recreating_application():
     assert backup < build < recreate
 
 
-def test_release_stops_worker_before_app_and_recreates_same_image_afterwards():
-    stop_worker = SOURCE.index("compose stop whatsapp-worker")
+def test_release_stops_workers_before_app_and_recreates_same_image_afterwards():
+    stop_workers = SOURCE.index("compose stop whatsapp-worker automation-scheduler")
     recreate_app = SOURCE.index("--force-recreate app")
-    recreate_worker = SOURCE.index("--force-recreate whatsapp-worker")
-    image_check = SOURCE.index('if [ -z "$app_image" ] || [ "$app_image" != "$worker_image" ]')
-    assert stop_worker < recreate_app < recreate_worker < image_check
+    recreate_workers = SOURCE.index("--force-recreate whatsapp-worker automation-scheduler")
+    worker_ready = SOURCE.index("wait_healthy xvond-whatsapp-worker")
+    scheduler_ready = SOURCE.index("wait_healthy xvond-automation-scheduler")
+    worker_lease = SOURCE.index("wait_whatsapp_worker_lease", worker_ready)
+    scheduler_heartbeat = SOURCE.index("wait_scheduler_heartbeat", scheduler_ready)
+    scheduler_image = SOURCE.index("scheduler_image=")
+    image_check = SOURCE.index(
+        'if [ -z "$app_image" ] || [ "$app_image" != "$worker_image" ] || [ "$app_image" != "$scheduler_image" ]'
+    )
+    assert (
+        stop_workers
+        < recreate_app
+        < recreate_workers
+        < worker_ready
+        < scheduler_ready
+        < worker_lease
+        < scheduler_heartbeat
+        < scheduler_image
+        < image_check
+    )
+    assert "API, WhatsApp worker and automation scheduler are not running the same image" in SOURCE
 
 
 def test_release_preflights_workflow_before_runtime_cutover_when_required():
@@ -82,6 +109,19 @@ def test_release_preflights_workflow_before_runtime_cutover_when_required():
     )
     assert "Workflow contract probe failed" in SOURCE
     assert 'action: "health_check"' in SOURCE
+
+
+def test_release_rechecks_workflow_can_reach_new_api_after_cutover():
+    recreate_app = SOURCE.index("--force-recreate app")
+    app_ready = SOURCE.index("wait_healthy xvond-core", recreate_app)
+    post_cutover_probe = SOURCE.index("probe_workflow_to_app_health", app_ready)
+    recreate_workers = SOURCE.index(
+        "--force-recreate whatsapp-worker automation-scheduler",
+        post_cutover_probe,
+    )
+    assert recreate_app < app_ready < post_cutover_probe < recreate_workers
+    assert 'fetch("http://app:8000/health/ready")' in SOURCE
+    assert "Workflow-to-API probe failed" in SOURCE
 
 
 def test_workflow_sync_publishes_and_sets_active_before_restart():
@@ -114,3 +154,26 @@ def test_release_has_mandatory_health_and_optional_customer_acceptance():
     assert '"$@" --agent-id' in SOURCE
     assert '"$@" --live-ai' in SOURCE
     assert '"$@" --require-live' in SOURCE
+
+
+def test_release_reports_scheduler_image_for_operator_verification():
+    assert "Automation scheduler image:" in SOURCE
+    assert "xvond-automation-scheduler" in SOURCE
+
+
+def test_release_requires_scheduler_heartbeat_before_completion():
+    assert "Automation scheduler did not publish a healthy heartbeat" in SOURCE
+    assert "automation_scheduler_health.status()" in SOURCE
+    scheduler_service = COMPOSE.split("  automation-scheduler:", 1)[1].split("\n  postgres:", 1)[0]
+    assert "REDIS_URL: redis://redis:6379/0" in scheduler_service
+    assert "redis:" in scheduler_service
+    assert "condition: service_healthy" in scheduler_service
+
+
+def test_release_requires_whatsapp_worker_lease_before_completion():
+    assert "WhatsApp worker did not acquire its Redis lease" in SOURCE
+    assert "whatsapp_job_queue.stats()" in SOURCE
+    worker_ready = SOURCE.index("wait_healthy xvond-whatsapp-worker")
+    worker_lease = SOURCE.index("wait_whatsapp_worker_lease", worker_ready)
+    scheduler_image = SOURCE.index("scheduler_image=")
+    assert worker_ready < worker_lease < scheduler_image

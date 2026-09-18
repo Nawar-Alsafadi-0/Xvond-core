@@ -4,6 +4,7 @@ import signal
 import time
 
 from backend.app.modules.automation.scheduler import run_due_schedules_once
+from backend.app.modules.automation.scheduler_health import automation_scheduler_health
 
 
 logging.basicConfig(
@@ -36,6 +37,10 @@ def main():
     logger.info("Automation scheduler worker started; poll_seconds=%s", poll)
     while running:
         started = time.monotonic()
+        try:
+            automation_scheduler_health.beat(poll)
+        except Exception:
+            logger.exception("Automation scheduler heartbeat failed")
         try:
             summary = run_due_schedules_once()
             if summary["executed"] or summary["failed"]:
