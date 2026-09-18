@@ -175,6 +175,10 @@ def _process_subscription(
         db.commit()
         return "unknown"
 
+    # The verified provider webhook can race the synchronous API response in
+    # another DB session. Expire the identity map so we never overwrite a
+    # webhook-confirmed `captured` state with stale local `sending` state.
+    db.expire_all()
     attempt = db.get(ServiceRenewalAttempt, attempt.id)
     if not attempt.provider_transaction_id:
         attempt.provider_transaction_id = transaction_id
