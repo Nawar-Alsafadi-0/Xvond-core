@@ -18,6 +18,10 @@ from backend.app.modules.integrations.email_smtp import (
     EmailConnectorError,
     send_smtp_email,
 )
+from backend.app.modules.integrations.email_imap import (
+    EmailReadConnectorError,
+    read_imap_messages,
+)
 from backend.app.modules.automation.event_outbox import enqueue_automation_event
 from backend.app.modules.tools.base import AgentTool, ToolResult
 from backend.app.modules.tools.business_models import ActionRequest, HumanHandoff
@@ -483,6 +487,40 @@ def _email_send_call(
     )
 
 
+def _email_read_call(
+    *,
+    config: dict,
+    payload: dict,
+    operation: str,
+) -> ToolResult:
+    if operation != "execute":
+        return ToolResult(
+            success=False,
+            error="Email IMAP currently supports execute only",
+        )
+    details = payload.get("details") if isinstance(payload, dict) else {}
+    if not isinstance(details, dict):
+        details = {}
+    raw_unread = details.get("unread_only", True)
+    if isinstance(raw_unread, str):
+        unread_only = raw_unread.strip().lower() not in {"0", "false", "no", "all"}
+    else:
+        unread_only = bool(raw_unread)
+    try:
+        limit = int(details.get("limit") or 10)
+    except (TypeError, ValueError):
+        return ToolResult(success=False, error="Email read limit must be a number")
+    try:
+        result = read_imap_messages(
+            config=config,
+            unread_only=unread_only,
+            limit=limit,
+        )
+    except EmailReadConnectorError as exc:
+        return ToolResult(success=False, error=str(exc))
+    return ToolResult(success=True, data=result)
+
+
 def _integration_call(
     db,
     context: dict,
@@ -553,6 +591,13 @@ def _integration_call(
             payload=payload,
             operation=operation,
             idempotency_key=idempotency_key,
+        )
+
+    if integration_type == "email_imap":
+        return _email_read_call(
+            config=config,
+            payload=payload,
+            operation=operation,
         )
 
     if integration_type == "webhook":
