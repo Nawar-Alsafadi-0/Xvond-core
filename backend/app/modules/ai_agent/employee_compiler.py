@@ -121,9 +121,9 @@ REQUIREMENT_CATALOG: dict[str, dict[str, Any]] = {
     },
     "content_generation": {
         "kind": "tool",
-        "status": "xvond_build",
-        "delivery_mode": "compose",
-        "primitives": ["content_generation", "workflow_engine"],
+        "status": "available",
+        "delivery_mode": "native",
+        "primitives": ["content_generation"],
     },
 }
 
@@ -245,6 +245,8 @@ Rules:
 - Keep intake field keys stable snake_case identifiers. Labels should be short human-readable labels in the customer's language when practical.
 - intake.known values must be copied from information explicitly present in the Job Brief. Never invent values. Do not place passwords, API keys, access tokens or other credentials in intake.known; credentials belong to protected connection flows.
 - Never use a missing Xvond feature as a reason to reject the job. For a novel digital requirement, return it and give it useful generic primitives so Xvond can compose it.
+- Text/content generation itself is a native employee capability and does not need a fake external action or execution_plan. When generated content must be published, sent, stored or otherwise acted on externally, represent that side effect as its own requirement (for example instagram_publish) and include content_generation in that side-effect requirement's primitives.
+- For recurring pipelines such as "generate and publish every day", attach the schedule to the requirement that performs the real side effect and include every needed primitive there (for example content_generation + scheduler + messaging + workflow_engine). Do not emit a disconnected standalone scheduling requirement when it would separate one requested pipeline into pieces that cannot execute together.
 - Set requires_connection=true only when the customer explicitly wants to use an existing external account/system, or the requested work inherently depends on one.
 - For capabilities Xvond can provide internally (for example booking/reservations, simple lead capture, forms, lightweight records or schedules), prefer fulfillment_mode=xvond_internal when no external system is explicitly required. Do not force the customer to buy or connect a third-party system merely because one exists.
 - For booking/reservations specifically: if the Job Brief names an existing booking/calendar/provider that must be used, set requires_connection=true and fulfillment_mode=external_connection. Otherwise use fulfillment_mode=xvond_internal and let Xvond provide the booking capability. For internal booking, require only missing operational facts needed to make real slots: working_days, opening_time, closing_time and slot_minutes. Put explicitly stated values in runtime_inputs and only absent values in customer_inputs.
