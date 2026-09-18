@@ -401,6 +401,7 @@ def test_verified_recurring_webhook_advances_period_and_captures_attempt(
 ):
     factory, now = renewal_database
     _add_profile(factory)
+    monkeypatch.setattr(billing_webhooks, "_utcnow_naive", lambda: now)
     monkeypatch.setattr(
         renewal.tap_gateway,
         "create_recurring_charge",
@@ -450,6 +451,7 @@ def test_early_verified_webhook_wins_race_with_scheduler_response(
     factory, now = renewal_database
     _add_profile(factory)
     old_end = now + timedelta(hours=1)
+    monkeypatch.setattr(billing_webhooks, "_utcnow_naive", lambda: now)
 
     def provider_with_early_webhook(**kwargs):
         with factory() as webhook_db:
