@@ -130,7 +130,7 @@ class WorkflowActionRequestTool(ActionRequestTool):
         # Xvond-native capabilities (for example the built-in booking system)
         # stay inside the Core control/runtime path. Existing external systems
         # continue through the workflow engine.
-        if str(destination.get("type") or "").strip() == "xvond_internal":
+        if str(destination.get("type") or "").strip() in {"xvond_internal", "integration"}:
             return super().execute(arguments, context)
 
         if operation == "check_availability":
