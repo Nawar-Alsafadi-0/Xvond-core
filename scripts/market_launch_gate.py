@@ -172,16 +172,16 @@ def _billing_gate(
         )
 
     if completed_transaction:
-        transaction_ids = {
-            str(item.provider_transaction_id)
+        checkout_ids = {
+            int(item.id)
             for item in checkouts
             if str(item.status or "").lower() in {"completed", "active"}
         }
-        # ServicePaymentEvent intentionally stores no payment/customer payload.
-        # A transaction.completed event proves the signed provider lifecycle ran.
         payment_event = (
             db.query(ServicePaymentEvent)
             .filter(
+                ServicePaymentEvent.company_id == company_id,
+                ServicePaymentEvent.service_checkout_id.in_(checkout_ids),
                 ServicePaymentEvent.provider == "paddle",
                 ServicePaymentEvent.event_type == "transaction.completed",
             )
