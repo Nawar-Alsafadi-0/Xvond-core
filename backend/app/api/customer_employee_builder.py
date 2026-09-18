@@ -28,6 +28,7 @@ from backend.app.modules.ai_agent.employee_compiler import (
     build_compiled_employee_system_prompt,
     build_compiler_user_message,
     is_sensitive_requirement_key,
+    normalize_requirement_key,
     parse_compiler_response,
 )
 from backend.app.modules.ai_agent.employee_capability_builder import provision_compiled_capabilities
@@ -73,7 +74,8 @@ class EmployeeBuilderReviseRequest(BaseModel):
 
 
 class EmployeeBuilderSetupAnswerRequest(BaseModel):
-    value: str = Field(min_length=1, max_length=8000)
+    value: str | None = Field(default=None, max_length=8000)
+    values: dict[str, str] = Field(default_factory=dict)
 
 
 DEFAULT_CUSTOMER_CONTROLS = {
@@ -424,6 +426,7 @@ def _builder_action(
     target: str | None = None,
     key: str | None = None,
     detail: str | None = None,
+    fields: list[dict] | None = None,
 ) -> dict:
     value = {"type": action_type, "label": label}
     if target:
@@ -432,6 +435,8 @@ def _builder_action(
         value["key"] = key
     if detail:
         value["detail"] = detail
+    if fields:
+        value["fields"] = list(fields)
     return value
 
 
@@ -582,20 +587,37 @@ def _self_service_builder_journey(
                                 key=key,
                             )
                         )
-                elif is_sensitive_requirement_key(key):
-                    waiting_reasons.append(
-                        f"{key.replace('_', ' ').title()} must use a protected connection or credential setup path."
-                    )
                 else:
-                    setup_actions.append(
-                        _builder_action(
-                            "provide_input",
-                            f"Provide {key.replace('_', ' ')}",
-                            target="builder",
-                            key=key,
-                            detail=str(requirement.get("purpose") or "").strip() or None,
+                    input_fields: list[dict] = []
+                    sensitive_input = is_sensitive_requirement_key(key)
+                    for raw_field in requirement.get("customer_inputs") or []:
+                        field_key = normalize_requirement_key(raw_field)
+                        if not field_key:
+                            continue
+                        if is_sensitive_requirement_key(field_key):
+                            sensitive_input = True
+                        if not any(item["key"] == field_key for item in input_fields):
+                            input_fields.append(
+                                {
+                                    "key": field_key,
+                                    "label": str(raw_field).strip() or field_key.replace("_", " "),
+                                }
+                            )
+                    if sensitive_input:
+                        waiting_reasons.append(
+                            f"{key.replace('_', ' ').title()} must use a protected connection or credential setup path."
                         )
-                    )
+                    else:
+                        setup_actions.append(
+                            _builder_action(
+                                "provide_input",
+                                f"Provide {key.replace('_', ' ')}",
+                                target="builder",
+                                key=key,
+                                detail=str(requirement.get("purpose") or "").strip() or None,
+                                fields=input_fields,
+                            )
+                        )
             elif status == "connection_required":
                 if kind == "channel" and key in missing_channels:
                     continue
@@ -1110,14 +1132,56 @@ def save_self_service_setup_answer(
         if str(requirement.get("status") or "").strip().lower() != "customer_input_required":
             raise HTTPException(409, "This requirement does not accept customer setup data")
 
-        value = data.value.strip()
+        declared_fields: list[str] = []
+        for raw_field in requirement.get("customer_inputs") or []:
+            field_key = normalize_requirement_key(raw_field)
+            if not field_key or field_key in declared_fields:
+                continue
+            if is_sensitive_requirement_key(field_key):
+                raise HTTPException(
+                    409,
+                    "Sensitive credentials must use a protected Xvond connection path",
+                )
+            declared_fields.append(field_key)
+
+        if declared_fields:
+            if len(data.values) > 30:
+                raise HTTPException(400, "Too many setup fields")
+            normalized_values = {
+                normalize_requirement_key(raw_key): str(raw_value or "").strip()
+                for raw_key, raw_value in data.values.items()
+                if normalize_requirement_key(raw_key)
+            }
+            missing_fields = [
+                field for field in declared_fields
+                if not normalized_values.get(field)
+            ]
+            if missing_fields:
+                raise HTTPException(
+                    400,
+                    detail={
+                        "message": "Complete all required setup fields",
+                        "missing_fields": missing_fields,
+                    },
+                )
+            if any(len(normalized_values[field]) > 8000 for field in declared_fields):
+                raise HTTPException(400, "Setup field is too long")
+            answer_value: str | dict = {
+                field: normalized_values[field] for field in declared_fields
+            }
+        else:
+            value = str(data.value or "").strip()
+            if not value:
+                raise HTTPException(400, "Setup value is required")
+            answer_value = value
+
         answers = dict(builder.get("setup_answers") or {})
-        answers[key] = value
+        answers[key] = answer_value
         builder["setup_answers"] = answers
 
         compiled_value = dict(compiled_spec)
         customer_inputs = dict(compiled_value.get("customer_inputs") or {})
-        customer_inputs[key] = value
+        customer_inputs[key] = answer_value
         compiled_value["customer_inputs"] = customer_inputs
         builder["compiled_spec"] = compiled_value
         settings_value["employee_builder"] = builder
