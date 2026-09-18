@@ -293,7 +293,12 @@ def self_service_channel_activation_blockers(
     return blockers
 
 
-def _resolved_customer_requirement_keys(db, *, agent_id: int) -> set[str]:
+def _resolved_customer_requirement_keys(
+    db,
+    *,
+    company_id: int,
+    agent_id: int,
+) -> set[str]:
     resolved: set[str] = set()
     knowledge_count = (
         db.query(AgentKnowledge)
@@ -301,6 +306,7 @@ def _resolved_customer_requirement_keys(db, *, agent_id: int) -> set[str]:
         .filter(
             AgentKnowledge.agent_id == agent_id,
             AgentKnowledge.enabled.is_(True),
+            KnowledgeDocument.company_id == company_id,
             KnowledgeDocument.enabled.is_(True),
         )
         .count()
@@ -508,6 +514,7 @@ def self_service_readiness(
 
     resolved_requirements = _resolved_customer_requirement_keys(
         db,
+        company_id=company.id,
         agent_id=agent.id,
     )
     state = evaluate_readiness(
