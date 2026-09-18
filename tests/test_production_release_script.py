@@ -98,6 +98,19 @@ def test_release_preflights_workflow_before_runtime_cutover_when_required():
     assert 'action: "health_check"' in SOURCE
 
 
+def test_release_rechecks_workflow_can_reach_new_api_after_cutover():
+    recreate_app = SOURCE.index("--force-recreate app")
+    app_ready = SOURCE.index("wait_healthy xvond-core", recreate_app)
+    post_cutover_probe = SOURCE.index("probe_workflow_to_app_health", app_ready)
+    recreate_workers = SOURCE.index(
+        "--force-recreate whatsapp-worker automation-scheduler",
+        post_cutover_probe,
+    )
+    assert recreate_app < app_ready < post_cutover_probe < recreate_workers
+    assert 'fetch("http://app:8000/health/ready")' in SOURCE
+    assert "Workflow-to-API probe failed" in SOURCE
+
+
 def test_workflow_sync_publishes_and_sets_active_before_restart():
     publish = WORKFLOW_SYNC.index('publish:workflow --id="$WORKFLOW_ID"')
     activate = WORKFLOW_SYNC.index('update:workflow --id="$WORKFLOW_ID" --active=true')
