@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
+from urllib.parse import urlparse
 
 from backend.app.core.config_secrets import reveal_config
 from backend.app.modules.ai_agent.employee_compiler import normalize_requirement_key
@@ -33,6 +35,20 @@ def _permission_mode(spec: dict, requirement: dict) -> str:
     return "automatic" if modes and all(mode == "automatic" for mode in modes) else "ask_before"
 
 
+def _grounded_https_hosts(spec: dict) -> list[str]:
+    """Extract only HTTPS hosts that the customer actually wrote in the Job Brief."""
+    text = str(spec.get("job_brief") or "")
+    hosts: list[str] = []
+    for raw in re.findall(r"https://[^\\s<>'\\\"]+", text, flags=re.IGNORECASE):
+        parsed = urlparse(raw.rstrip(".,);]}"))
+        host = str(parsed.hostname or "").rstrip(".").lower()
+        if host and host not in hosts:
+            hosts.append(host)
+        if len(hosts) >= 20:
+            break
+    return hosts
+
+
 def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
     """Compile one novel capability into Xvond's generic workflow action contract.
 
@@ -54,10 +70,17 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
         "fields": [],
         "confirmation_required": _permission_mode(spec, requirement) != "automatic",
         "destination": {
-            "type": "workflow_engine",
+            "type": "xvond_internal",
+            "adapter": "generic_capability",
             "capability_key": key,
             "delivery_mode": "compose",
             "primitives": primitives,
+            "execution_plan": [
+                dict(step)
+                for step in (requirement.get("execution_plan") or [])
+                if isinstance(step, dict)
+            ][:20],
+            "allowed_hosts": _grounded_https_hosts(spec),
             "job_summary": str(spec.get("summary") or "")[:1000],
             "job_brief": str(spec.get("job_brief") or "")[:2000],
         },
@@ -129,11 +152,24 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             changed = True
         # Existing operator configuration, permissions and disable switches win.
         action = actions[key]
-        execution_status = (
-            "disabled" if not action.get("enabled", True) or (assignment is not None and not assignment.enabled)
-            else "adapter_required" if (action.get("destination") or {}).get("type") == "workflow_engine"
-            else "runtime_validation_required"
-        )
+        destination = action.get("destination") or {}
+        if not action.get("enabled", True) or (assignment is not None and not assignment.enabled):
+            execution_status = "disabled"
+        elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "generic_capability":
+            plan = destination.get("execution_plan") or []
+            needs_http = any(
+                isinstance(step, dict) and step.get("op") == "http_get_json"
+                for step in plan
+            )
+            execution_status = (
+                "ready"
+                if plan and (not needs_http or destination.get("allowed_hosts"))
+                else "setup_required"
+            )
+        elif destination.get("type") == "workflow_engine":
+            execution_status = "adapter_required"
+        else:
+            execution_status = "runtime_validation_required"
         item["status"] = MANAGED_STATUS
         item["provisioned"] = True
         item["delivery_mode"] = "compose"
