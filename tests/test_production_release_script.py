@@ -49,12 +49,26 @@ def test_release_takes_backup_before_recreating_application():
     assert backup < build < recreate
 
 
-def test_release_stops_worker_before_app_and_recreates_same_image_afterwards():
-    stop_worker = SOURCE.index("compose stop whatsapp-worker")
+def test_release_stops_workers_before_app_and_recreates_same_image_afterwards():
+    stop_workers = SOURCE.index("compose stop whatsapp-worker automation-scheduler")
     recreate_app = SOURCE.index("--force-recreate app")
-    recreate_worker = SOURCE.index("--force-recreate whatsapp-worker")
-    image_check = SOURCE.index('if [ -z "$app_image" ] || [ "$app_image" != "$worker_image" ]')
-    assert stop_worker < recreate_app < recreate_worker < image_check
+    recreate_workers = SOURCE.index("--force-recreate whatsapp-worker automation-scheduler")
+    worker_ready = SOURCE.index("wait_healthy xvond-whatsapp-worker")
+    scheduler_ready = SOURCE.index("wait_healthy xvond-automation-scheduler")
+    scheduler_image = SOURCE.index("scheduler_image=")
+    image_check = SOURCE.index(
+        'if [ -z "$app_image" ] || [ "$app_image" != "$worker_image" ] || [ "$app_image" != "$scheduler_image" ]'
+    )
+    assert (
+        stop_workers
+        < recreate_app
+        < recreate_workers
+        < worker_ready
+        < scheduler_ready
+        < scheduler_image
+        < image_check
+    )
+    assert "API, WhatsApp worker and automation scheduler are not running the same image" in SOURCE
 
 
 def test_release_preflights_workflow_before_runtime_cutover_when_required():
@@ -114,3 +128,8 @@ def test_release_has_mandatory_health_and_optional_customer_acceptance():
     assert '"$@" --agent-id' in SOURCE
     assert '"$@" --live-ai' in SOURCE
     assert '"$@" --require-live' in SOURCE
+
+
+def test_release_reports_scheduler_image_for_operator_verification():
+    assert "Automation scheduler image:" in SOURCE
+    assert "xvond-automation-scheduler" in SOURCE
