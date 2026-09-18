@@ -48,10 +48,11 @@ docker compose -f docker-compose.production.yml --profile workflow up -d workflo
 
 ## Master workflow
 
-Import and activate both Xvond-owned gateway workflows:
+Import and activate the Xvond-owned gateway/provider workflows:
 
 - `ops/n8n/xvond-actions.workflow.json` for outbound actions and managed-channel sends.
 - `ops/n8n/xvond-channel-inbound.workflow.json` for normalized inbound communication-channel messages.
+- `ops/n8n/xvond-telegram-provider.workflow.json` for Telegram Bot API inbound/outbound transport.
 
 The first supported action is intentionally non-destructive: `health_check`.
 
@@ -132,6 +133,28 @@ Set these workflow-engine environment values:
 A channel route points to a provider-specific webhook owned by the workflow engine. Provider OAuth/API credentials stay in that provider workflow or its credential store. Do not store those provider credentials in Xvond Core. A managed channel must remain disabled until its Xvond channel config contains a non-secret `connection_key`, `provisioning_state=connected`, and the shared Xvond workflow gateway is enabled.
 
 Inbound provider workflows must supply a stable provider message ID as `external_message_id`. Xvond uses it for deduplication, so provider retries do not create duplicate customer turns. Outbound `channel.send` calls must honor the provided `idempotency_key` before performing a side effect.
+
+
+### Telegram provider
+
+Telegram is the first concrete provider binding for the universal channel contract.
+
+Configure both registries with the same tenant-scoped key `company_id:connection_key`:
+
+- `XVOND_CHANNEL_ROUTES_JSON` points the generic channel gateway to `https://<workflow-host>/webhook/xvond-telegram-provider` and carries only the Xvond provider-route secret.
+- `XVOND_TELEGRAM_ROUTES_JSON` carries the workflow-only Telegram settings: `company_id`, `agent_id`, `channel_id`, `bot_token`, `webhook_secret`, and the matching `provider_secret`.
+
+Never copy the Telegram bot token into Xvond Core channel config.
+
+After the workflow is deployed, provision the Telegram webhook from inside the workflow container:
+
+```sh
+sh scripts/provision_telegram_channel.sh <company_id> <connection_key>
+```
+
+The provisioning command validates both route registries, calls Telegram `setWebhook` with the route's secret token, then verifies the installed URL with `getWebhookInfo`. Only after that succeeds should the Xvond channel config be marked `provisioning_state=connected`.
+
+Telegram inbound `update_id` is used as the stable external message identity. Telegram `sendMessage` must return a provider `message_id`; Xvond will not mark delivery accepted without it.
 
 ## Booking adapter
 
