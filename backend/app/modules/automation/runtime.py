@@ -179,12 +179,10 @@ class AutomationRuntime:
             }
 
         if step_type == "media_generation":
-            prompt = str(
-                step.get("prompt")
-                or state.get("ai_response")
-                or step.get("label")
-                or ""
-            ).strip()
+            instruction = str(step.get("prompt") or step.get("label") or "").strip()
+            generated_content = str(state.get("ai_response") or "").strip()
+            prompt_parts = [item for item in (instruction, generated_content) if item]
+            prompt = "\n\nGenerated content/context:\n".join(prompt_parts)
             if not prompt:
                 raise ValueError("Media generation requires a prompt or prior AI output")
             asset = generate_image_asset(
