@@ -209,7 +209,7 @@
           "conditions": [
             {
               "id": "provider-delivery-confirmed",
-              "leftValue": "={{ String($json.success) }}",
+              "leftValue": "={{ String($json.success === true && !!(($json.data && $json.data.provider_message_id) || $json.provider_message_id || $json.message_id)) }}",
               "rightValue": "true",
               "operator": {
                 "type": "string",
@@ -250,7 +250,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ channel_id: $node[\"Prepare Channel Reply\"].json.channel_id, conversation_id: $node[\"Prepare Channel Reply\"].json.conversation_id, response_message_id: $node[\"Prepare Channel Reply\"].json.response_message_id, provider_message_id: String(($json.data && $json.data.provider_message_id) || $json.provider_message_id || $json.message_id || $node[\"Prepare Channel Reply\"].json.request_id) }) }}",
+        "body": "={{ JSON.stringify({ channel_id: $node[\"Prepare Channel Reply\"].json.channel_id, conversation_id: $node[\"Prepare Channel Reply\"].json.conversation_id, response_message_id: $node[\"Prepare Channel Reply\"].json.response_message_id, provider_message_id: String(($json.data && $json.data.provider_message_id) || $json.provider_message_id || $json.message_id || \"\") }) }}",
         "options": {
           "timeout": 15000
         }
