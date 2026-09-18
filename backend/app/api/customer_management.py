@@ -71,6 +71,42 @@ def _validate_live_connection(item: CompanyIntegration) -> dict:
             "url": url,
         }
 
+    if integration_type == "instagram_publish":
+        instagram_user_id = str(config.get("instagram_user_id") or "").strip()
+        access_token = str(config.get("access_token") or "").strip()
+        if not instagram_user_id or not access_token:
+            raise HTTPException(
+                409,
+                "Instagram User ID and access token are required before validation",
+            )
+        url = validate_public_http_url(
+            f"https://graph.facebook.com/{instagram_user_id}?fields=id,username"
+        )
+        try:
+            result = safe_http_request(
+                url=url,
+                method="GET",
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {access_token}",
+                },
+                timeout=10,
+                max_response_bytes=64_000,
+            )
+        except Exception as exc:
+            raise HTTPException(502, "Instagram connection validation request failed") from exc
+        status = int(result.get("status_code") or 0)
+        if not 200 <= status < 300:
+            raise HTTPException(
+                409,
+                f"Instagram connection validation returned HTTP {status}",
+            )
+        return {
+            "validated": True,
+            "mode": "instagram_live_read_only_request",
+            "status_code": status,
+        }
+
     if integration_type not in {"custom_api", "pos", "crm", "erp"}:
         raise HTTPException(
             409,
