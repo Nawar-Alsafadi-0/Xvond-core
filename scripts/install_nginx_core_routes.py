@@ -94,8 +94,16 @@ def _nginx_files() -> dict[Path, str]:
 
 
 def _contains_domain_server(text: str, domain: str) -> bool:
-    escaped = re.escape(domain)
-    return bool(re.search(rf"\bserver_name\s+[^;]*\b{escaped}\b[^;]*;", text))
+    wanted = domain.lower().strip(".")
+    for match in re.finditer(r"\bserver_name\s+([^;]+);", text):
+        names = {
+            token.strip().lower().strip(".")
+            for token in match.group(1).split()
+            if token.strip()
+        }
+        if wanted in names:
+            return True
+    return False
 
 
 def _discover_target(domain: str) -> Path:
