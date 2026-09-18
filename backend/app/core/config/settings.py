@@ -53,6 +53,7 @@ class Settings:
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
     XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+    META_GRAPH_API_VERSION = os.getenv("META_GRAPH_API_VERSION", "v26.0").strip() or "v26.0"
     N8N_ENABLED = os.getenv("N8N_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "").strip()
     N8N_SHARED_SECRET = os.getenv("N8N_SHARED_SECRET", "")
