@@ -163,35 +163,51 @@ def run_due_workflow(workflow_id: int, *, now: datetime | None = None) -> dict:
         db.close()
 
 
-def run_due_schedules_once(*, now: datetime | None = None, limit: int = 200) -> dict:
-    db = SessionLocal()
-    try:
-        workflow_ids = [
-            row[0]
-            for row in (
-                db.query(AutomationWorkflow.id)
-                .filter(
-                    AutomationWorkflow.trigger_type == "schedule",
-                    AutomationWorkflow.enabled.is_(True),
-                )
-                .order_by(AutomationWorkflow.id.asc())
-                .limit(max(1, min(int(limit), 1000)))
-                .all()
-            )
-        ]
-    finally:
-        db.close()
-
+def run_due_schedules_once(
+    *,
+    now: datetime | None = None,
+    batch_size: int = 200,
+) -> dict:
+    safe_batch_size = max(1, min(int(batch_size), 1000))
     results = []
-    for workflow_id in workflow_ids:
+    last_id = 0
+
+    while True:
+        db = SessionLocal()
         try:
-            results.append(run_due_workflow(workflow_id, now=now))
-        except Exception:
-            logger.exception(
-                "Scheduled automation execution failed",
-                extra={"workflow_id": workflow_id},
-            )
-            results.append({"workflow_id": workflow_id, "status": "failed"})
+            workflow_ids = [
+                row[0]
+                for row in (
+                    db.query(AutomationWorkflow.id)
+                    .filter(
+                        AutomationWorkflow.id > last_id,
+                        AutomationWorkflow.trigger_type == "schedule",
+                        AutomationWorkflow.enabled.is_(True),
+                    )
+                    .order_by(AutomationWorkflow.id.asc())
+                    .limit(safe_batch_size)
+                    .all()
+                )
+            ]
+        finally:
+            db.close()
+
+        if not workflow_ids:
+            break
+
+        for workflow_id in workflow_ids:
+            try:
+                results.append(run_due_workflow(workflow_id, now=now))
+            except Exception:
+                logger.exception(
+                    "Scheduled automation execution failed",
+                    extra={"workflow_id": workflow_id},
+                )
+                results.append({"workflow_id": workflow_id, "status": "failed"})
+
+        last_id = workflow_ids[-1]
+        if len(workflow_ids) < safe_batch_size:
+            break
 
     executed = sum(1 for item in results if item.get("status") == "success")
     failed = sum(1 for item in results if item.get("status") == "failed")
