@@ -35,13 +35,15 @@ def test_managed_channel_provider_dispatch_keeps_credentials_in_workflow_plane()
     nodes = {node["name"]: node for node in payload["nodes"]}
     sender = nodes["Execute Channel Route"]["parameters"]
 
-    assert sender["url"] == "={{ $json.route_url }}"
+    assert "XVOND_WORKFLOW_CHANNELS_JSON" in sender["url"]
     headers = sender["headerParameters"]["parameters"]
     names = {item["name"] for item in headers}
     assert "X-Xvond-Channel-Secret" in names
     assert "Idempotency-Key" in names
     assert "X-Xvond-Request-ID" in names
-    assert "route_secret" in str(headers)
+    assert "XVOND_WORKFLOW_CHANNELS_JSON" in str(headers)
+    assert "route_secret" not in workflow_code()
+    assert "route_url" not in workflow_code()
     assert "$json.action" in sender["body"]
     assert "access_token" not in json.dumps(payload).lower()
     assert "bot_token" not in json.dumps(payload).lower()
