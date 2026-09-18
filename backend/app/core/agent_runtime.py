@@ -243,13 +243,18 @@ class AgentRuntime:
             and capability.get("runtime_adapter") != N8N_CHANNEL_RUNTIME_ADAPTER
         ):
             return base
+        channel_type_filter = (
+            AgentChannel.channel_type == "whatsapp"
+            if channel_type == "whatsapp"
+            else AgentChannel.channel_type == channel_type
+        )
         channel = (
             db.query(AgentChannel)
             .filter(
                 AgentChannel.company_id == conversation.company_id,
                 AgentChannel.id == conversation.channel_id,
                 AgentChannel.agent_id == conversation.agent_id,
-                AgentChannel.channel_type == channel_type,
+                channel_type_filter,
                 AgentChannel.enabled.is_(True),
             )
             .first()
