@@ -5,6 +5,8 @@ from backend.app.core.config_secrets import reveal_config
 from backend.app.core.http_security import safe_http_request
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.automation.execution_graph import (
+    compare_values,
+    extract_data_path,
     normalize_execution_graph,
     resolve_graph_value,
 )
@@ -240,28 +242,100 @@ class AutomationRuntime:
                         "values": params.get("values") or params,
                     }
                 elif node_type == "condition":
-                    operator = str(params.get("operator") or "eq").strip().lower()
-                    left = params.get("left")
-                    right = params.get("right")
-                    if operator == "eq":
-                        matched = left == right
-                    elif operator == "neq":
-                        matched = left != right
-                    elif operator == "gt":
-                        matched = left > right
-                    elif operator == "gte":
-                        matched = left >= right
-                    elif operator == "lt":
-                        matched = left < right
-                    elif operator == "lte":
-                        matched = left <= right
-                    elif operator == "contains":
-                        matched = right in left if left is not None else False
-                    else:
-                        raise ValueError(
-                            f"Unsupported execution graph condition operator: {operator}"
-                        )
+                    matched = compare_values(
+                        params.get("left"),
+                        str(params.get("operator") or "eq"),
+                        params.get("right"),
+                    )
                     node_outputs[node_id] = {"matched": bool(matched)}
+                    continue
+                elif node_type == "select":
+                    items = params.get("items")
+                    fields = params.get("fields")
+                    if not isinstance(items, list):
+                        raise ValueError(
+                            f"Execution graph select node {node_id} requires a list"
+                        )
+                    if not isinstance(fields, list) or not fields:
+                        raise ValueError(
+                            f"Execution graph select node {node_id} requires fields"
+                        )
+                    clean_fields = [
+                        str(field or "").strip()
+                        for field in fields
+                        if str(field or "").strip()
+                    ][:50]
+                    selected = []
+                    for item in items[:1000]:
+                        if isinstance(item, dict):
+                            selected.append({
+                                field: extract_data_path(item, field)
+                                for field in clean_fields
+                            })
+                        else:
+                            selected.append({"value": item})
+                    node_outputs[node_id] = {
+                        "items": selected,
+                        "count": len(selected),
+                    }
+                    continue
+                elif node_type == "filter":
+                    items = params.get("items")
+                    if not isinstance(items, list):
+                        raise ValueError(
+                            f"Execution graph filter node {node_id} requires a list"
+                        )
+                    path = str(params.get("path") or "").strip()
+                    operator = str(params.get("operator") or "eq").strip().lower()
+                    right = params.get("value")
+                    filtered = []
+                    for item in items[:1000]:
+                        left = extract_data_path(item, path)
+                        try:
+                            matched = compare_values(left, operator, right)
+                        except (TypeError, ValueError):
+                            matched = False
+                        if matched:
+                            filtered.append(item)
+                    node_outputs[node_id] = {
+                        "items": filtered,
+                        "count": len(filtered),
+                    }
+                    continue
+                elif node_type == "aggregate":
+                    items = params.get("items")
+                    if not isinstance(items, list):
+                        raise ValueError(
+                            f"Execution graph aggregate node {node_id} requires a list"
+                        )
+                    operation = str(params.get("operation") or "count").strip().lower()
+                    path = str(params.get("path") or "").strip()
+                    if operation == "count":
+                        value = len(items)
+                    else:
+                        values = []
+                        for item in items[:1000]:
+                            raw = extract_data_path(item, path)
+                            if isinstance(raw, bool):
+                                continue
+                            if isinstance(raw, (int, float)):
+                                values.append(float(raw))
+                        if operation == "sum":
+                            value = sum(values)
+                        elif operation == "avg":
+                            value = (sum(values) / len(values)) if values else None
+                        elif operation == "min":
+                            value = min(values) if values else None
+                        elif operation == "max":
+                            value = max(values) if values else None
+                        else:
+                            raise ValueError(
+                                f"Unsupported execution graph aggregate operation: {operation}"
+                            )
+                    node_outputs[node_id] = {
+                        "value": value,
+                        "operation": operation,
+                    }
                     continue
                 elif node_type == "notify":
                     message = str(params.get("message") or node.get("label") or "").strip()
