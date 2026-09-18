@@ -436,3 +436,72 @@ def test_graph_runtime_resolves_node_outputs_into_later_action(monkeypatch):
     assert captured["arguments"]["body"] == "Generated result"
     assert result["graph_outputs"]["draft"]["ai_response"] == "Generated result"
     assert result["graph_outputs"]["act"]["done"] is True
+
+
+
+def test_graph_runtime_supports_condition_gates(monkeypatch):
+    calls = []
+
+    runtime = automation_runtime_module.AutomationRuntime()
+    original = runtime.execute_step
+
+    def dispatch(db, company_id, step, state, *, run_id, step_index):
+        if step.get("type") == "graph":
+            return original(
+                db,
+                company_id,
+                step,
+                state,
+                run_id=run_id,
+                step_index=step_index,
+            )
+        if step.get("type") == "scheduled_action":
+            calls.append(step)
+            return {"executed": True}
+        raise AssertionError(step.get("type"))
+
+    monkeypatch.setattr(runtime, "execute_step", dispatch)
+
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 1,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "check",
+                        "type": "condition",
+                        "depends_on": [],
+                        "params": {
+                            "left": "$input.score",
+                            "operator": "gte",
+                            "right": 80,
+                        },
+                    },
+                    {
+                        "id": "act",
+                        "type": "action",
+                        "depends_on": ["check"],
+                        "when": "$nodes.check.matched",
+                        "params": {
+                            "action_type": "send_report",
+                            "arguments": {"score": "$input.score"},
+                        },
+                    },
+                ],
+            },
+        },
+        state={
+            "_xvond_execution_key": "graph-condition-test",
+            "score": 75,
+        },
+        run_id=1,
+        step_index=0,
+    )
+
+    assert result["graph_outputs"]["check"]["matched"] is False
+    assert result["graph_outputs"]["act"]["skipped"] is True
+    assert calls == []
