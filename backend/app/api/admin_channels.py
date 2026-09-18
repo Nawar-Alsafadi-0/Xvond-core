@@ -1,3 +1,4 @@
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -514,6 +515,74 @@ def update_channel(
         db.refresh(channel)
         result = serialize_channel(channel)
         result["status"] = "updated"
+        return result
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/{channel_id}/verify-managed-route")
+def verify_managed_channel_route(
+    channel_id: int,
+    current_admin: User = Depends(require_xvond_admin),
+):
+    """Verify an n8n-backed managed channel route before customer launch."""
+    db = SessionLocal()
+    try:
+        channel = db.query(AgentChannel).filter(AgentChannel.id == channel_id).first()
+        if channel is None:
+            raise HTTPException(404, "Channel not found")
+
+        capability = get_channel_capability(channel.channel_type) or {}
+        if capability.get("runtime_adapter") != N8N_CHANNEL_RUNTIME_ADAPTER:
+            raise HTTPException(409, "This channel does not use Xvond managed workflow routing")
+        if not n8n_channel_gateway.configured():
+            raise HTTPException(503, "Xvond managed channel gateway is not configured")
+
+        try:
+            route = n8n_channel_gateway.check_channel(
+                company_id=channel.company_id,
+                agent_id=channel.agent_id,
+                channel_id=channel.id,
+                channel_type=canonical_channel_type(channel.channel_type),
+            )
+        except N8NChannelGatewayError as exc:
+            raise HTTPException(
+                503,
+                "Xvond managed channel route could not be verified",
+            ) from exc
+
+        if not (
+            route.get("success")
+            and (route.get("data") or {}).get("connected") is True
+        ):
+            raise HTTPException(409, "Xvond managed channel route is not connected")
+
+        channel.config = merge_config(
+            channel.config,
+            {
+                "provisioning_state": "connected",
+                "provisioning_method": "xvond_managed_n8n",
+                "provisioned_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            },
+        )
+        _ensure_channels_module(db, channel.company_id)
+        _audit_channel(
+            db,
+            current_admin,
+            channel,
+            "channel.managed_route_verified",
+            details={"runtime_adapter": N8N_CHANNEL_RUNTIME_ADAPTER},
+        )
+        db.commit()
+        db.refresh(channel)
+        result = serialize_channel(channel)
+        result["status"] = "verified"
         return result
     except HTTPException:
         db.rollback()
