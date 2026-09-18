@@ -389,7 +389,37 @@
                 <div class="muted">Trigger: ${escapeHtml(item.trigger || "as requested")}</div>
             </div>
         `).join("") || '<p class="muted">No explicit task list was returned.</p>';
-        const permissions = (spec.permissions || []).map(item => badge(`${item.action}: ${String(item.mode || "ask_before").replaceAll("_", " ")}`, item.mode === "automatic" ? "ready" : "setup")).join("") || '<span class="muted">No additional permission rules.</span>';
+        const actionPlan = spec?.delivery?.action_plan || {};
+        const permissions = (spec.permissions || []).map(item => {
+            const action = String(item.action || "").trim();
+            const mode = String(item.mode || "ask_before");
+            const suggested = String(item.suggested_mode || mode);
+            const source = String(item.source || "");
+            const executable = Boolean(action && actionPlan[action]);
+            const encodedAction = encodeURIComponent(action);
+            const suggestionText = suggested !== mode
+                ? `Xvond suggested ${suggested.replaceAll("_", " ")}; owner approval has not granted it.`
+                : (source === "owner" ? "Explicit owner permission." : "Safe default permission.");
+            return `
+                <div class="note employee-builder-permission">
+                    <div class="employee-builder-current-head">
+                        <strong>${escapeHtml(action.replaceAll("_", " ") || "Action")}</strong>
+                        ${badge(mode.replaceAll("_", " "), mode === "automatic" ? "ready" : (mode === "never" ? "neutral" : "setup"))}
+                    </div>
+                    <div class="muted">${escapeHtml(suggestionText)}</div>
+                    ${executable ? `
+                        <div class="employee-builder-actions">
+                            <select data-owner-permission="${encodedAction}" data-owner-permission-current="${escapeHtml(mode)}">
+                                <option value="ask_before" ${mode === "ask_before" ? "selected" : ""}>Ask before</option>
+                                <option value="automatic" ${mode === "automatic" ? "selected" : ""}>Automatic</option>
+                                <option value="never" ${mode === "never" ? "selected" : ""}>Never</option>
+                            </select>
+                        </div>
+                        <div class="error" data-owner-permission-error="${encodedAction}"></div>
+                    ` : ""}
+                </div>
+            `;
+        }).join("") || '<span class="muted">No additional permission rules.</span>';
         const questions = (spec.setup_questions || []).map(item => `<li>${escapeHtml(item)}</li>`).join("");
 
         return `
@@ -765,6 +795,37 @@
 
         document.getElementById("employee-builder-approvals-refresh")?.addEventListener("click", loadAutomationApprovals);
         loadAutomationApprovals();
+
+        document.querySelectorAll("[data-owner-permission]").forEach(select => {
+            select.addEventListener("change", async () => {
+                const encodedKey = String(select.dataset.ownerPermission || "");
+                const key = decodeURIComponent(encodedKey);
+                const previous = String(select.dataset.ownerPermissionCurrent || "ask_before");
+                const next = String(select.value || "ask_before");
+                const error = document.querySelector(`[data-owner-permission-error="${encodedKey}"]`);
+                if (error) error.textContent = "";
+                if (!key || next === previous) return;
+
+                select.disabled = true;
+                try {
+                    await api(
+                        `/customer/employee-builder/${Number(employee.agent_id)}/permissions/${encodeURIComponent(key)}`,
+                        {
+                            method: "PUT",
+                            body: JSON.stringify({mode: next}),
+                        }
+                    );
+                    await loadEmployeeBuilder();
+                } catch (err) {
+                    select.value = previous;
+                    if (error) {
+                        error.textContent = err?.message || "Could not update this permission.";
+                    }
+                } finally {
+                    if (document.body.contains(select)) select.disabled = false;
+                }
+            });
+        });
 
         document.getElementById("employee-builder-manual-run")?.addEventListener("click", async () => {
             const input = document.getElementById("employee-builder-manual-run-input");
