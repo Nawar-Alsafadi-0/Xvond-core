@@ -67,13 +67,13 @@ GitHub CI also builds a completely fresh PostgreSQL database through Alembic, ch
 
 ## Canonical production deployment
 
-Production releases must use the reviewed repository state and the release script rather than an improvised sequence of Docker commands:
+Production releases must use the reviewed repository state and the release script rather than an improvised sequence of Docker commands. `PUBLIC_BASE_URL` is the canonical public Core origin; the Nginx Core routes must be installed in the HTTPS vhost for that exact hostname:
 
 ```bash
 ./scripts/deploy_production.sh
 ```
 
-The release script validates the Git working tree and production Compose, brings database/Redis up, takes a fresh database backup before replacing application containers, stops the previous WhatsApp worker, builds one application image, recreates the API and worker from that same image, waits for service health, starts and verifies the Workflow Engine when enabled, verifies API/worker image identity and checks `/health/ready`.
+The release script validates the Git working tree and canonical release branch, production Compose and production environment, brings PostgreSQL/Redis up, takes a fresh database backup before replacing application containers, builds one application image, recreates the API, WhatsApp worker and automation scheduler from that same image, verifies the WhatsApp worker lease and scheduler heartbeat, verifies Workflow Engine health and post-cutover reachability when enabled, verifies image parity across runtime processes and checks `/health/ready`.
 
 The application entrypoint applies Alembic migrations and safe startup tasks before starting the API. The WhatsApp worker intentionally uses the already-migrated application image and does not run the application entrypoint independently.
 
