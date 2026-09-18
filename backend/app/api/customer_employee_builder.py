@@ -1580,6 +1580,8 @@ def refine_self_service_employee(
         if agent is None:
             raise HTTPException(404, "AI employee not found")
         config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
         builder = dict((config.settings or {}).get("employee_builder") or {})
         existing_pending = (
             builder.get("pending_revision")
@@ -2726,6 +2728,9 @@ def test_draft_employee(
             raise HTTPException(404, "AI employee not found")
 
         config = _employee_config_or_404(db, agent)
+        if agent.enabled:
+            db.refresh(config, with_for_update=True)
+            db.refresh(agent, with_for_update=True)
 
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
@@ -2941,6 +2946,7 @@ def build_pending_live_revision(
 
         config = _employee_config_or_404(db, agent)
         db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
         pending = deepcopy(builder.get("pending_revision"))
@@ -3013,6 +3019,7 @@ def discard_pending_live_revision(
             raise HTTPException(404, "AI employee not found")
         config = _employee_config_or_404(db, agent)
         db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
         if not isinstance(builder.get("pending_revision"), dict):
