@@ -24,6 +24,7 @@ from backend.app.modules.channels.catalog import (
 from backend.app.modules.channels.delivery import reconcile_managed_channel_requests
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.api.admin_channels import _activation_blockers
+from backend.app.api.customer_inbox import LIVE_INBOX_CHANNELS
 from backend.app.api.public_employee_builder import public_employee_builder_channels
 
 
@@ -209,3 +210,11 @@ def test_custom_channel_is_registered_but_not_claimed_live_without_gateway():
     assert custom["setup_mode"] == CHANNEL_SETUP_MANAGED
     assert custom["runtime_state"] == CHANNEL_RUNTIME_ADAPTER_REQUIRED
     assert custom["runtime_adapter"] is None
+
+
+def test_customer_inbox_only_counts_channels_with_real_runtime():
+    assert "website" in LIVE_INBOX_CHANNELS
+    assert "whatsapp" in LIVE_INBOX_CHANNELS
+    assert "voice" in LIVE_INBOX_CHANNELS
+    assert "instagram" not in LIVE_INBOX_CHANNELS
+    assert "telegram" not in LIVE_INBOX_CHANNELS
