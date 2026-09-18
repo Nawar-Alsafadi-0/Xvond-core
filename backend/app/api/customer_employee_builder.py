@@ -265,6 +265,62 @@ def _clear_generated_self_service_build(db, *, company_id: int, agent_id: int) -
             workflow.enabled = False
 
 
+def _reconcile_builder_runtime_tools(
+    db,
+    *,
+    agent_id: int,
+    previous_capabilities: dict,
+    next_capabilities: tuple[str, ...],
+) -> None:
+    """Keep Builder-owned tools aligned without overriding operator-managed tools."""
+    previous = tuple(
+        key for key, enabled in (previous_capabilities or {}).items() if enabled
+    )
+    previous_builder_tools = set(runtime_tools_for(previous))
+    desired_tools = set(runtime_tools_for(next_capabilities))
+
+    assignments = (
+        db.query(AgentToolAssignment)
+        .filter(AgentToolAssignment.agent_id == agent_id)
+        .all()
+    )
+    by_name = {item.tool_name: item for item in assignments}
+
+    for assignment in assignments:
+        stored = dict(reveal_config(assignment.config) or {})
+        builder_owned = (
+            stored.get("_xvond_source") == "employee_builder"
+            or (assignment.tool_name in previous_builder_tools and not stored)
+        )
+        if not builder_owned:
+            continue
+
+        if stored.get("_xvond_source") != "employee_builder":
+            stored["_xvond_source"] = "employee_builder"
+
+        if assignment.tool_name in desired_tools:
+            if stored.pop("_xvond_retired_by_revision", None):
+                assignment.enabled = True
+            assignment.config = stored
+            continue
+
+        stored["_xvond_retired_by_revision"] = True
+        assignment.config = stored
+        assignment.enabled = False
+
+    for tool_name in desired_tools:
+        if tool_name in by_name:
+            continue
+        db.add(
+            AgentToolAssignment(
+                agent_id=agent_id,
+                tool_name=tool_name,
+                config={"_xvond_source": "employee_builder"},
+                enabled=True,
+            )
+        )
+
+
 def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: AgentConfig) -> dict:
     # Serialize compilation/provisioning, including retries of a cached spec.
     db.refresh(config, with_for_update=True)
@@ -489,7 +545,7 @@ def create_employee(
                 AgentToolAssignment(
                     agent_id=agent.id,
                     tool_name=tool_name,
-                    config={},
+                    config={"_xvond_source": "employee_builder"},
                     enabled=True,
                 )
             )
@@ -600,6 +656,12 @@ def revise_self_service_job_brief(
             agent_id=agent.id,
         )
 
+        _reconcile_builder_runtime_tools(
+            db,
+            agent_id=agent.id,
+            previous_capabilities=dict(config.capabilities or {}),
+            next_capabilities=blueprint.capabilities,
+        )
         config.settings = settings
         config.capabilities = {item: True for item in blueprint.capabilities}
         agent.description = blueprint.description
@@ -619,23 +681,6 @@ def revise_self_service_job_brief(
         if profile is not None:
             profile.instructions = blueprint.description
             profile.business_type = "personal" if blueprint.audience == "personal" else None
-
-        existing_tools = {
-            row.tool_name
-            for row in db.query(AgentToolAssignment).filter(
-                AgentToolAssignment.agent_id == agent.id
-            )
-        }
-        for tool_name in runtime_tools_for(blueprint.capabilities):
-            if tool_name not in existing_tools:
-                db.add(
-                    AgentToolAssignment(
-                        agent_id=agent.id,
-                        tool_name=tool_name,
-                        config={},
-                        enabled=True,
-                    )
-                )
 
         db.commit()
         return {
