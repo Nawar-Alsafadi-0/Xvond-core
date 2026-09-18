@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from decimal import Decimal
 from typing import Any
 
@@ -35,6 +36,7 @@ COMMUNICATION_CHANNELS = frozenset(
 
 EXTERNAL_COMMUNICATION_CHANNELS = COMMUNICATION_CHANNELS - {"xvond"}
 SELF_SERVICE_LIVE_EXTERNAL_CHANNELS = frozenset({"whatsapp", "website"})
+SELF_SERVICE_DIRECT_CONNECTION_REQUIREMENTS = SELF_SERVICE_LIVE_EXTERNAL_CHANNELS
 
 
 def is_self_service_company(company: Company | None) -> bool:
@@ -66,6 +68,35 @@ def _requirement_channel_keys(spec: dict) -> list[str]:
         if key in COMMUNICATION_CHANNELS and key not in result:
             result.append(key)
     return result
+
+
+def self_service_connection_status(item: dict) -> str | None:
+    status = str(item.get("status") or "").strip().lower()
+    if status != "connection_required":
+        return None
+    key = str(item.get("key") or "").strip().lower()
+    kind = str(item.get("kind") or "").strip().lower()
+    if kind == "channel" and key in SELF_SERVICE_DIRECT_CONNECTION_REQUIREMENTS:
+        return "self_service_available"
+    return "xvond_adapter_required"
+
+
+def self_service_spec_view(spec: dict | None) -> dict | None:
+    """Annotate a compiled spec for truthful Self-Service connection UX.
+
+    This is view-layer metadata so cached compiler output does not need a paid
+    recompilation when Xvond's connection surface changes.
+    """
+    if not isinstance(spec, dict):
+        return None
+    rendered = deepcopy(spec)
+    for item in rendered.get("requirements") or []:
+        if not isinstance(item, dict):
+            continue
+        connection_status = self_service_connection_status(item)
+        if connection_status:
+            item["self_service_connection_status"] = connection_status
+    return rendered
 
 
 def interaction_mode(spec: dict | None, requested_channels: list[str] | tuple[str, ...]) -> str:
@@ -263,7 +294,13 @@ def _execution_blockers(spec: dict, *, resolved_channels: list[str]) -> list[str
 
         if kind == "channel" and channel_key in resolved:
             continue
-        if status in {"connection_required", "customer_input_required", "setup_required"}:
+        if status == "connection_required":
+            if self_service_connection_status(item) == "xvond_adapter_required":
+                blockers.append(f"{key}: Xvond connection adapter required")
+            else:
+                blockers.append(f"{key}: setup required")
+            continue
+        if status in {"customer_input_required", "setup_required"}:
             blockers.append(f"{key}: setup required")
             continue
         if status == "xvond_managed" and execution_status in {
@@ -377,9 +414,7 @@ def self_service_readiness(
             "This employee is not a self-service employee",
         )
 
-    spec = builder.get("compiled_spec")
-    if not isinstance(spec, dict):
-        spec = None
+    spec = self_service_spec_view(builder.get("compiled_spec"))
     provisioned = bool(
         isinstance(spec, dict)
         and (spec.get("delivery") or {}).get("provisioning_version") == 1
