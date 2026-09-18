@@ -12,7 +12,9 @@ from backend.app.core.config_secrets import reveal_config
 from backend.app.core.database.base import Base
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
+from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.ai_agent import self_service_policy
 from backend.app.modules.channels.models import AgentChannel
 
 
@@ -196,6 +198,102 @@ def test_customer_website_setup_is_tenant_scoped_and_self_service_only(website_d
     with pytest.raises(HTTPException) as managed:
         api.customer_get_website_config(3, managed_user)
     assert managed.value.status_code == 409
+
+
+def test_customer_website_setup_flows_into_atomic_self_service_launch(
+    website_database,
+    monkeypatch,
+):
+    factory = website_database
+    with factory() as db:
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={
+                    "employee_builder": {
+                        "onboarding_source": "self_service",
+                        "delivery_mode": "self_service",
+                        "source_description": "Reply to website visitors.",
+                        "requested_channels": ["website"],
+                        "compiled_spec": {
+                            "scope": "business",
+                            "requirements": [
+                                {
+                                    "key": "website",
+                                    "kind": "channel",
+                                    "status": "connection_required",
+                                }
+                            ],
+                            "delivery": {"provisioning_version": 1},
+                        },
+                    }
+                },
+                capabilities={"customer_support": True},
+                customer_controls={},
+            )
+        )
+        db.commit()
+
+    monkeypatch.setattr(
+        self_service_policy,
+        "subscription_snapshot",
+        lambda *args, **kwargs: {
+            "active": True,
+            "subscription": SimpleNamespace(id=1),
+            "plan": SimpleNamespace(id=1),
+            "plan_name": "Self Service",
+            "plan_tier": "starter",
+            "channel_limit": 1,
+        },
+    )
+    monkeypatch.setattr(api.limits_service, "check_agent_limit", lambda *args: None)
+    monkeypatch.setattr(api.limits_service, "check_channel_limit", lambda *args: None)
+
+    prepared = api.customer_configure_website(
+        1,
+        api.WebsiteSetup(allowed_domain="example.com"),
+        USER,
+    )
+    assert prepared["prepared"] is True
+    assert prepared["enabled"] is False
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        agent = db.get(AIAgent, 1)
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        state = self_service_policy.self_service_readiness(
+            db,
+            company=company,
+            agent=agent,
+            config=config,
+        )
+        assert state["ready"] is True
+        assert state["prepared_channels"] == ["website"]
+        assert state["active_channels"] == []
+
+    # Customer Website setup and Employee Builder launch share the same DB in
+    # production; point the builder module at this isolated test factory too.
+    monkeypatch.setattr(
+        "backend.app.api.customer_employee_builder.SessionLocal",
+        factory,
+    )
+    launched = __import__(
+        "backend.app.api.customer_employee_builder",
+        fromlist=["launch_self_service_employee"],
+    ).launch_self_service_employee(1, USER)
+
+    assert launched["status"] == "live"
+    assert launched["active_channels"] == ["website"]
+    with factory() as db:
+        channel = db.query(AgentChannel).filter_by(
+            company_id=1,
+            agent_id=1,
+            channel_type="website",
+        ).one()
+        assert channel.enabled is True
+        assert db.get(AIAgent, 1).enabled is True
+        assert db.get(Company, 1).active is True
 
 
 def test_customer_website_routes_require_authentication():
