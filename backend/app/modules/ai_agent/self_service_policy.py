@@ -284,7 +284,7 @@ def enabled_channel_types(db, *, company_id: int, agent_id: int) -> list[str]:
     )
     result: list[str] = []
     for row in rows:
-        key = str(row.channel_type or "").strip().lower()
+        key = canonical_channel_type(row.channel_type)
         if key in EXTERNAL_COMMUNICATION_CHANNELS and key not in result:
             result.append(key)
     return result
@@ -302,13 +302,38 @@ def configured_channel_types(db, *, company_id: int, agent_id: int) -> list[str]
     )
     result: list[str] = []
     for row in rows:
-        key = str(row.channel_type or "").strip().lower()
-        if key not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS or key in result:
+        key = canonical_channel_type(row.channel_type)
+        if key in result:
             continue
+        capability = get_channel_capability(key)
+        if (
+            capability is None
+            or capability.get("runtime_state") != CHANNEL_RUNTIME_LIVE
+            or key not in EXTERNAL_COMMUNICATION_CHANNELS
+        ):
+            continue
+
+        config = reveal_config(row.config) or {}
         try:
-            validate_channel_config(key, reveal_config(row.config) or {})
+            validate_channel_config(key, config)
         except ValueError:
             continue
+
+        if capability.get("setup_mode") == CHANNEL_SETUP_MANAGED:
+            if key == "voice":
+                required = (
+                    "vapi_assistant_id",
+                    "vapi_phone_number_id",
+                    "vapi_llm_credential_id",
+                    "llm_api_key",
+                )
+                if str(config.get("provisioning_state") or "").strip().lower() != "connected":
+                    continue
+                if any(not str(config.get(item) or "").strip() for item in required):
+                    continue
+            else:
+                continue
+
         result.append(key)
     return result
 
@@ -505,7 +530,7 @@ def _execution_blockers(
             continue
         key = str(item.get("key") or "requirement").strip()
         kind = str(item.get("kind") or "").strip().lower()
-        channel_key = "xvond" if key == "xvond_workspace" else key.lower()
+        channel_key = "xvond" if key == "xvond_workspace" else canonical_channel_type(key)
         status = str(item.get("status") or "").strip().lower()
         execution_status = str(item.get("execution_status") or "").strip().lower()
 
