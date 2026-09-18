@@ -116,3 +116,19 @@ def test_self_service_portal_visibility_does_not_fake_paid_entitlement():
     assert "has_self_service_employee" in source
     assert "portal_service_codes" in source
     assert '"active_services": active_service_codes' in source
+
+
+def test_self_service_builder_is_a_first_class_portal_route():
+    portal = (ROOT / "backend" / "app" / "api" / "customer_portal.py").read_text(
+        encoding="utf-8"
+    )
+    app = (ROOT / "frontend" / "customer" / "app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"id": "employee-builder"' in portal
+    assert '"loader": "employee-builder"' in portal
+    assert "has_self_service_employee" in portal
+    assert 'requestedPage' in app
+    assert 'selfServiceDraft' in app
+    assert '"employee-builder"' in app
