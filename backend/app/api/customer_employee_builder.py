@@ -1649,6 +1649,18 @@ def bind_self_service_integration(
         if str(requirement.get("kind") or "").strip().lower() == "channel":
             raise HTTPException(409, "Communication channels use their dedicated connection flow")
 
+        executable_types = {"custom_api", "pos", "crm", "erp", "webhook"}
+        if integration.integration_type not in executable_types:
+            raise HTTPException(
+                409,
+                "This connected-system type does not have a generic execution adapter. Use Custom API or an Xvond packaged connector.",
+            )
+        if key == "booking" and integration.integration_type == "webhook":
+            raise HTTPException(
+                409,
+                "Booking needs a two-way API so Xvond can verify availability before creating the booking",
+            )
+
         execute_required = integration.integration_type in {
             "custom_api", "pos", "crm", "erp"
         }
