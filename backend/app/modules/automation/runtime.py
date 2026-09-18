@@ -110,6 +110,7 @@ def _new_trace(
         "execution_key": execution_key,
         "started_at": _trace_iso(),
         "finished_at": None,
+        "status": "running",
         "spans": [],
     }
 
@@ -274,6 +275,7 @@ class AutomationRuntime:
             run.status = "success"
             run.finished_at = _utcnow_naive()
             trace["finished_at"] = _trace_iso(run.finished_at)
+            trace["status"] = "success"
             run.output_data = {"state": state, "steps": step_results, "trace": trace}
             db.commit()
             db.refresh(run)
@@ -300,6 +302,7 @@ class AutomationRuntime:
             db.add(request)
             db.flush()
             run.status = "waiting_approval"
+            trace["status"] = "waiting_approval"
             run.output_data = {
                 "state": state,
                 "steps": step_results,
@@ -323,6 +326,7 @@ class AutomationRuntime:
         except Exception as original_error:
             error_message = str(original_error)[:2000]
             trace["finished_at"] = _trace_iso()
+            trace["status"] = "failed"
             failed_output = {"state": state, "steps": step_results, "trace": trace}
             db.rollback()
 
@@ -401,6 +405,16 @@ class AutomationRuntime:
             "node_outputs": deepcopy(approval.get("node_outputs") or {}),
         }
         step_results = list(output.get("steps") or [])
+        execution_key = str(state.get("_xvond_execution_key") or "")
+        trace = deepcopy(output.get("trace") or {})
+        if not isinstance(trace, dict) or not trace.get("trace_id"):
+            trace = _new_trace(
+                company_id=company_id,
+                workflow=workflow,
+                execution_key=execution_key,
+            )
+        trace["status"] = "running"
+        trace["finished_at"] = None
 
         run.status = "running"
         run.error_message = None
@@ -409,13 +423,49 @@ class AutomationRuntime:
         try:
             for index in range(step_index, len(workflow.steps or [])):
                 step = (workflow.steps or [])[index]
-                result = self.execute_step(
-                    db,
-                    company_id,
-                    step,
-                    state,
-                    run_id=run.id,
-                    step_index=index,
+                span_started_at = _trace_iso()
+                span_started_perf = perf_counter()
+                try:
+                    result = self.execute_step(
+                        db,
+                        company_id,
+                        step,
+                        state,
+                        run_id=run.id,
+                        step_index=index,
+                    )
+                except AutomationApprovalRequired as next_approval:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_approval",
+                        phase="resume",
+                        node_id=next_approval.node_id,
+                    )
+                    raise
+                except Exception as exc:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="failed",
+                        phase="resume",
+                        error=str(exc),
+                    )
+                    raise
+                _append_step_span(
+                    trace,
+                    index=index,
+                    step=step,
+                    started_at=span_started_at,
+                    started_perf=span_started_perf,
+                    status="success",
+                    phase="resume",
                 )
                 step_results.append(
                     {
@@ -431,15 +481,18 @@ class AutomationRuntime:
                 state.pop("_xvond_approved_request_id", None)
 
             run.status = "success"
+            run.finished_at = _utcnow_naive()
+            trace["status"] = "success"
+            trace["finished_at"] = _trace_iso(run.finished_at)
             run.output_data = {
                 "state": state,
                 "steps": step_results,
+                "trace": trace,
                 "approval": {
                     **approval,
                     "status": "approved",
                 },
             }
-            run.finished_at = _utcnow_naive()
             db.commit()
             db.refresh(run)
             return run
@@ -468,9 +521,12 @@ class AutomationRuntime:
             state.pop("_xvond_graph_resume", None)
             run.status = "waiting_approval"
             run.error_message = None
+            trace["status"] = "waiting_approval"
+            trace["finished_at"] = None
             run.output_data = {
                 "state": state,
                 "steps": step_results,
+                "trace": trace,
                 "approval": {
                     "request_id": next_request.id,
                     "agent_id": next_approval.agent_id,
@@ -489,9 +545,13 @@ class AutomationRuntime:
         except Exception as exc:
             run.status = "failed"
             run.error_message = str(exc)[:2000]
+            run.finished_at = _utcnow_naive()
+            trace["status"] = "failed"
+            trace["finished_at"] = _trace_iso(run.finished_at)
             run.output_data = {
                 "state": state,
                 "steps": step_results,
+                "trace": trace,
                 "approval": {
                     **approval,
                     "status": "approved_execution_failed",
