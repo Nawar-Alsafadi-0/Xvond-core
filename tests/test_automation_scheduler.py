@@ -1507,7 +1507,10 @@ def test_graph_nested_approval_resumes_each_item_without_replay(monkeypatch):
         )
         meta_one = request_one.details["_xvond_automation"]
         assert meta_one["approval_scope"] == "each[0]/send"
-        assert waiting_first.output_data["approval"]["graph_resume"]["foreach"]["loop_index"] == 0
+        first_foreach_checkpoint = waiting_first.output_data["approval"]["graph_resume"]["foreach"]
+        assert first_foreach_checkpoint["loop_index"] == 0
+        assert first_foreach_checkpoint["items_fingerprint"]
+        assert waiting_first.output_data["approval"]["workflow_fingerprint"]
 
         request_one.status = "approved"
         db.commit()
@@ -2127,5 +2130,135 @@ def test_automation_trace_records_step_lifecycle(monkeypatch):
         assert span["status"] == "success"
         assert span["phase"] == "execute"
         assert span["duration_ms"] >= 0
+
+    engine.dispose()
+
+
+
+def test_approval_resume_rejects_changed_workflow_checkpoint(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Checkpoint Company", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Checkpoint worker",
+                system_prompt="Ask first.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "send": {
+                            "enabled": True,
+                            "confirmation_required": True,
+                            "destination": {
+                                "type": "xvond_internal",
+                                "adapter": "generic_capability",
+                                "execution_plan": [
+                                    {
+                                        "id": "notify",
+                                        "op": "notify",
+                                        "title": "Send",
+                                        "message": "Sent.",
+                                    }
+                                ],
+                            },
+                            "availability": {"mode": "none"},
+                        }
+                    }
+                },
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Checkpoint workflow",
+            trigger_type="manual",
+            trigger_config={},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "send",
+                                "type": "action",
+                                "depends_on": [],
+                                "params": {
+                                    "action_type": "send",
+                                    "arguments": {"value": "original"},
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        waiting = runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={},
+        )
+        request = db.query(ActionRequest).one()
+        request.status = "approved"
+        workflow.steps = [
+            {
+                "type": "graph",
+                "agent_id": 1,
+                "graph": {
+                    "version": 1,
+                    "nodes": [
+                        {
+                            "id": "send",
+                            "type": "action",
+                            "depends_on": [],
+                            "params": {
+                                "action_type": "send",
+                                "arguments": {"value": "changed"},
+                            },
+                        }
+                    ],
+                },
+            }
+        ]
+        db.flush()
+
+        try:
+            runtime.resume_approval(
+                db,
+                company_id=1,
+                workflow=workflow,
+                run=waiting,
+                request=request,
+            )
+        except ValueError as exc:
+            assert "workflow changed" in str(exc).lower()
+        else:
+            raise AssertionError("changed workflow must invalidate approval checkpoint")
 
     engine.dispose()

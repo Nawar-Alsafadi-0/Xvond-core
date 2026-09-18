@@ -147,6 +147,22 @@ def _append_step_span(
     )
 
 
+def _checkpoint_fingerprint(value) -> str:
+    import json
+
+    try:
+        payload = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Automation checkpoint data is not serializable") from exc
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _approval_checkpoint_matches(
     request: ActionRequest,
     *,
@@ -329,6 +345,9 @@ class AutomationRuntime:
                         "workflow_step_index": approval.workflow_step_index,
                         "node_id": approval.node_id,
                         "approval_scope": approval.approval_scope,
+                        "workflow_fingerprint": _checkpoint_fingerprint(
+                            workflow.steps or []
+                        ),
                         "execution_key": state.get("_xvond_execution_key"),
                     },
                 },
@@ -351,6 +370,9 @@ class AutomationRuntime:
                     "workflow_step_index": approval.workflow_step_index,
                     "node_id": approval.node_id,
                     "approval_scope": approval.approval_scope,
+                    "workflow_fingerprint": _checkpoint_fingerprint(
+                        workflow.steps or []
+                    ),
                     "node_outputs": approval.node_outputs,
                     "graph_resume": approval.graph_resume,
                     "status": "awaiting_confirmation",
@@ -427,6 +449,18 @@ class AutomationRuntime:
             raise ValueError("Automation approval checkpoint is missing")
         if int(approval.get("request_id") or 0) != int(request.id):
             raise ValueError("Approval request does not match run checkpoint")
+
+        saved_workflow_fingerprint = str(
+            approval.get("workflow_fingerprint") or ""
+        ).strip()
+        if (
+            saved_workflow_fingerprint
+            and saved_workflow_fingerprint
+            != _checkpoint_fingerprint(workflow.steps or [])
+        ):
+            raise ValueError(
+                "Automation workflow changed after the approval checkpoint"
+            )
 
         step_index = int(approval.get("workflow_step_index") or 0)
         if not 0 <= step_index < len(workflow.steps or []):
@@ -555,6 +589,9 @@ class AutomationRuntime:
                         "workflow_step_index": next_approval.workflow_step_index,
                         "node_id": next_approval.node_id,
                         "approval_scope": next_approval.approval_scope,
+                        "workflow_fingerprint": _checkpoint_fingerprint(
+                            workflow.steps or []
+                        ),
                         "execution_key": state.get("_xvond_execution_key"),
                     },
                 },
@@ -581,6 +618,9 @@ class AutomationRuntime:
                     "workflow_step_index": next_approval.workflow_step_index,
                     "node_id": next_approval.node_id,
                     "approval_scope": next_approval.approval_scope,
+                    "workflow_fingerprint": _checkpoint_fingerprint(
+                        workflow.steps or []
+                    ),
                     "node_outputs": next_approval.node_outputs,
                     "graph_resume": next_approval.graph_resume,
                     "status": "awaiting_confirmation",
@@ -1088,6 +1128,17 @@ class AutomationRuntime:
                     start_index = 0
                     child_resume = None
                     if foreach_resume is not None:
+                        saved_items_fingerprint = str(
+                            foreach_resume.get("items_fingerprint") or ""
+                        ).strip()
+                        if (
+                            not saved_items_fingerprint
+                            or saved_items_fingerprint
+                            != _checkpoint_fingerprint(items)
+                        ):
+                            raise ValueError(
+                                f"Execution graph foreach node {node_id} items changed after approval checkpoint"
+                            )
                         try:
                             start_index = int(foreach_resume.get("loop_index"))
                         except (TypeError, ValueError) as exc:
@@ -1163,6 +1214,7 @@ class AutomationRuntime:
                                 "node_outputs": deepcopy(node_outputs),
                                 "foreach": {
                                     "loop_index": loop_index,
+                                    "items_fingerprint": _checkpoint_fingerprint(items),
                                     "completed_results": deepcopy(results),
                                     "child_resume": child_checkpoint,
                                 },
