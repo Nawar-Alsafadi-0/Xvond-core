@@ -99,16 +99,23 @@ def _active_handoff(db, *, company_id: int, conversation_id: int) -> HumanHandof
 
 
 def _existing_reply(db, inbound: AIMessage) -> AIMessage | None:
-    return (
+    """Return only the assistant reply that immediately follows this inbound turn.
+
+    A later assistant message may belong to a newer customer turn. Treating any
+    later assistant as this message's retry result could leak the wrong reply.
+    """
+    next_message = (
         db.query(AIMessage)
         .filter(
             AIMessage.conversation_id == inbound.conversation_id,
             AIMessage.id > inbound.id,
-            AIMessage.role == "assistant",
         )
         .order_by(AIMessage.id.asc())
         .first()
     )
+    if next_message is None or next_message.role != "assistant":
+        return None
+    return next_message
 
 
 @router.post("/inbound")
