@@ -63,7 +63,17 @@
     function requirementStatusLabel(item) {
         const status = String(item?.status || "xvond_build");
         if (status === "available") return "ready";
-        if (status === "xvond_managed") return item.execution_status === "disabled" ? "action paused" : "execution setup pending";
+        if (status === "xvond_managed") {
+            const scheduleStatus = String(item?.schedule_status || "");
+            if (scheduleStatus === "ready") return "scheduled & ready";
+            if (scheduleStatus === "approval_required") return "automatic permission required";
+            if (scheduleStatus === "schedule_required" || scheduleStatus === "schedule_setup_required") return "schedule setup required";
+            if (scheduleStatus === "runtime_inputs_required") return "add task inputs";
+            if (scheduleStatus === "disabled") return "schedule paused";
+            if (item.execution_status === "ready") return "ready";
+            if (item.execution_status === "disabled") return "action paused";
+            return "execution setup pending";
+        }
         if (status === "xvond_build") return "Xvond builds this";
         if (status === "connection_required") return "connect account";
         if (status === "customer_input_required") return "add required data";
@@ -74,7 +84,10 @@
         if (!(items || []).length) return '<p class="muted">No extra systems were identified.</p>';
         return `<div class="employee-builder-missing">${items.map(item => {
             const status = String(item.status || "xvond_build");
-            const tone = status === "available" ? "ready" : "setup";
+            const ready = status === "available" || (
+                status === "xvond_managed" && item.execution_status === "ready"
+            );
+            const tone = ready ? "ready" : "setup";
             const label = `${String(item.key || "requirement").replaceAll("_", " ")} · ${requirementStatusLabel(item)}`;
             return badge(label, tone);
         }).join("")}</div>`;
