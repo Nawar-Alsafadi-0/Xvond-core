@@ -126,3 +126,15 @@ def test_inbound_channel_gateway_calls_xvond_then_provider_without_exposing_cred
     assert "provider_secret" not in prepare
     assert "XVOND_CHANNEL_ROUTES_JSON" in str(nodes["Send Channel Reply"]["parameters"])
     assert "Send Channel Reply" in nodes
+    assert "Provider Delivery Confirmed?" in nodes
+    assert "Confirm Channel Delivery" in nodes
+    assert "XVOND_INTERNAL_CHANNEL_CONFIRM_URL" in str(
+        nodes["Confirm Channel Delivery"]["parameters"]
+    )
+    confirm_body = str(nodes["Confirm Channel Delivery"]["parameters"])
+    assert "conversation_id" in confirm_body
+    assert "response_message_id" in confirm_body
+    assert "provider_message_id" in confirm_body
+    assert "request_id" not in confirm_body
+    gate = str(nodes["Provider Delivery Confirmed?"]["parameters"])
+    assert "provider_message_id" in gate

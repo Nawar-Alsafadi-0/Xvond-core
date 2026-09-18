@@ -196,6 +196,73 @@
         1900,
         260
       ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "provider-delivery-confirmed",
+              "leftValue": "={{ String($json.success === true && !!(($json.data && $json.data.provider_message_id) || $json.provider_message_id || $json.message_id)) }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "provider-delivery-confirmed",
+      "name": "Provider Delivery Confirmed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1900,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.XVOND_INTERNAL_CHANNEL_CONFIRM_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Xvond-N8N-Secret",
+              "value": "={{ $env.N8N_SHARED_SECRET }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ channel_id: $node[\"Prepare Channel Reply\"].json.channel_id, conversation_id: $node[\"Prepare Channel Reply\"].json.conversation_id, response_message_id: $node[\"Prepare Channel Reply\"].json.response_message_id, provider_message_id: String(($json.data && $json.data.provider_message_id) || $json.provider_message_id || $json.message_id || \"\") }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "confirm-channel-delivery",
+      "name": "Confirm Channel Delivery",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2140,
+        20
+      ]
     }
   ],
   "pinData": {},
@@ -281,6 +348,35 @@
       ]
     },
     "Send Channel Reply": {
+      "main": [
+        [
+          {
+            "node": "Provider Delivery Confirmed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Provider Delivery Confirmed?": {
+      "main": [
+        [
+          {
+            "node": "Confirm Channel Delivery",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Channel Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confirm Channel Delivery": {
       "main": [
         [
           {
