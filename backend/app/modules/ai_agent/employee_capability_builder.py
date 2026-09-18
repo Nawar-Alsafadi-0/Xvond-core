@@ -512,6 +512,18 @@ def _provision_self_service_schedule(
                     )[:2000],
                 }
             )
+        if "media_generation" in (requirement.get("primitives") or []):
+            workflow_steps.append(
+                {
+                    "type": "media_generation",
+                    "prompt": (
+                        "Create the publishable visual for this scheduled task. "
+                        f"Task: {task_purpose}. "
+                        "Use the generated content from the previous AI step as the primary creative direction."
+                    )[:2000],
+                    "size": "1024x1024",
+                }
+            )
         workflow_steps.append(
             {
                 "type": "scheduled_action",
