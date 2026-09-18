@@ -9,11 +9,13 @@ OFFSITE_RESTORE = (ROOT / "scripts" / "offsite_restore_latest.sh").read_text()
 PRODUCTION_COMPOSE = (ROOT / "docker-compose.production.yml").read_text()
 
 
-def test_backup_is_private_atomic_and_checksummed():
+def test_backup_is_private_atomic_readable_and_checksummed():
     assert "umask 077" in BACKUP
     assert ".partial" in BACKUP
-    assert 'mv "$partial_path" "$final_path"' in BACKUP
-    assert 'sha256sum "$final_path"' in BACKUP
+    verify = BACKUP.index('pg_restore --list "$partial_path"')
+    promote = BACKUP.index('mv "$partial_path" "$final_path"')
+    checksum = BACKUP.index('sha256sum "$final_path"')
+    assert verify < promote < checksum
 
 
 def test_backup_has_retention_policy():
