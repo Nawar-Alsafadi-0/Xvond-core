@@ -493,6 +493,7 @@ class AutomationRuntime:
                         "approval_request_id": (
                             int(state.get("_xvond_approved_request_id") or 0) or None
                         ),
+                        "approval_node_id": node_id,
                         "_xvond_graph_action": True,
                     }
                 elif node_type == "http_get_json":
@@ -955,6 +956,21 @@ class AutomationRuntime:
                         )
                         .first()
                     )
+                    if approval is not None:
+                        meta = (
+                            (approval.details or {}).get("_xvond_automation")
+                            if isinstance(approval.details, dict)
+                            else None
+                        )
+                        expected_node_id = str(step.get("approval_node_id") or "").strip()
+                        if (
+                            expected_node_id
+                            and (
+                                not isinstance(meta, dict)
+                                or str(meta.get("node_id") or "").strip() != expected_node_id
+                            )
+                        ):
+                            approval = None
                 if approval is None:
                     if not step.get("_xvond_graph_action"):
                         raise ValueError(
