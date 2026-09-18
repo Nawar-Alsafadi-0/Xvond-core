@@ -189,7 +189,7 @@ def test_payment_evidence_is_scoped_to_same_company_and_checkout(
     monkeypatch.setattr(
         gate,
         "payment_gateway",
-        lambda: SimpleNamespace(configured=lambda: True),
+        lambda: SimpleNamespace(provider="paddle", configured=lambda: True),
     )
     monkeypatch.setattr(gate.settings, "BILLING_PROVIDER", "paddle")
     monkeypatch.setattr(gate.settings, "PADDLE_ENVIRONMENT", "live")
@@ -275,3 +275,88 @@ def test_market_gate_launch_mode_must_match_company_source(
 
     assert report["launchable"] is False
     assert report["identity"]["actual_launch_mode"] == "self_service"
+
+
+def test_tap_payment_evidence_can_satisfy_provider_neutral_launch_gate(
+    launch_database,
+    monkeypatch,
+):
+    factory = launch_database
+    monkeypatch.setattr(
+        gate,
+        "payment_gateway",
+        lambda: SimpleNamespace(provider="tap", configured=lambda: True),
+    )
+    monkeypatch.setattr(gate.settings, "BILLING_PROVIDER", "tap")
+    monkeypatch.setattr(gate.settings, "TAP_SECRET_KEY", "sk_live_tap_test")
+    monkeypatch.setattr(gate.settings, "TAP_MERCHANT_ID", "merchant_live")
+    monkeypatch.setattr(gate.settings, "PUBLIC_BASE_URL", "https://api.xvond.example")
+    monkeypatch.setattr(gate.settings, "TAP_REDIRECT_URL", "")
+
+    with factory() as db:
+        checkout = ServiceCheckout(
+            id=2,
+            company_id=1,
+            service_subscription_id=1,
+            plan_id=1,
+            provider="tap",
+            provider_transaction_id="chg-company-1",
+            provider_subscription_id=None,
+            status="completed",
+            checkout_url="https://tap.example/pay/chg-company-1",
+            amount=Decimal("19.900"),
+            currency="USD",
+        )
+        db.add(checkout)
+        db.flush()
+        db.add(
+            ServicePaymentEvent(
+                company_id=1,
+                service_checkout_id=checkout.id,
+                provider="tap",
+                provider_event_id="chg-company-1:CAPTURED:1760000000000",
+                event_type="charge.captured",
+            )
+        )
+        db.commit()
+
+    with factory() as db:
+        result = gate._billing_gate(
+            db,
+            company_id=1,
+            require_online_billing=True,
+            require_payment_evidence=True,
+        )
+
+    assert result["ok"] is True
+    assert result["payment_provider"] == "tap"
+    assert result["completed_checkout_evidence"] is True
+    assert result["signed_payment_webhook_evidence"] is True
+
+
+def test_tap_launch_gate_rejects_test_secret_for_production_acceptance(
+    launch_database,
+    monkeypatch,
+):
+    factory = launch_database
+    monkeypatch.setattr(
+        gate,
+        "payment_gateway",
+        lambda: SimpleNamespace(provider="tap", configured=lambda: True),
+    )
+    monkeypatch.setattr(gate.settings, "BILLING_PROVIDER", "tap")
+    monkeypatch.setattr(gate.settings, "TAP_SECRET_KEY", "sk_test_tap")
+    monkeypatch.setattr(gate.settings, "TAP_MERCHANT_ID", "merchant_test")
+    monkeypatch.setattr(gate.settings, "PUBLIC_BASE_URL", "https://api.xvond.example")
+    monkeypatch.setattr(gate.settings, "TAP_REDIRECT_URL", "")
+
+    with factory() as db:
+        result = gate._billing_gate(
+            db,
+            company_id=1,
+            require_online_billing=True,
+            require_payment_evidence=False,
+        )
+
+    assert result["ok"] is False
+    assert "tap_secret_key_not_live" in result["blockers"]
