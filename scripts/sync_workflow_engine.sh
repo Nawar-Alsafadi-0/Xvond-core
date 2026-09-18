@@ -76,7 +76,7 @@ wait_for_runtime_webhooks() {
     count=0
     last_error=""
     while [ "$count" -lt "$attempts" ]; do
-        if action_output="$(probe_inside_engine             "xvond-actions"             "{request_id: requestId, company_id: 1, agent_id: 1, conversation_id: null, action: 'health_check', data: {source: 'workflow_sync'}}" 2>&1)"             && channel_output="$(probe_inside_engine             "xvond-channels"             "{request_id: requestId, company_id: 1, agent_id: 1, action: 'channel.check', data: {channel_id: 1, channel_type: 'custom'}}" 2>&1)"; then
+        if action_output="$(probe_inside_engine             "xvond-actions"             "{request_id: requestId, company_id: 1, agent_id: 1, conversation_id: null, action: 'health_check', data: {source: 'workflow_sync'}}" 2>&1)"             && channel_output="$(probe_inside_engine             "xvond-channels"             "{request_id: requestId, company_id: 2147483647, agent_id: 2147483647, action: 'channel.check', data: {channel_id: 2147483647, channel_type: 'custom'}}" 2>&1)"; then
             return 0
         else
             code="$?"
