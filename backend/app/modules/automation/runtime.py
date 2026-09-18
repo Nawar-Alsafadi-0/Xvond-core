@@ -1193,15 +1193,18 @@ class AutomationRuntime:
             action = (config.get("actions") or {}).get(action_type)
             if not isinstance(action, dict):
                 raise ValueError("Scheduled action contract is missing")
-            if not action.get("enabled", True):
-                if str(action.get("_xvond_permission_mode") or "").strip().lower() == "never":
-                    return {
-                        "scheduled_action_result": {
-                            "skipped": True,
-                            "reason": "owner_permission_never",
-                            "action_type": action_type,
-                        }
+            permission_mode = str(
+                action.get("_xvond_permission_mode") or ""
+            ).strip().lower()
+            if permission_mode == "never":
+                return {
+                    "scheduled_action_result": {
+                        "skipped": True,
+                        "reason": "owner_permission_never",
+                        "action_type": action_type,
                     }
+                }
+            if not action.get("enabled", True):
                 raise ValueError("Scheduled action is not enabled")
             destination = action.get("destination") or {}
             if action.get("confirmation_required", True):
