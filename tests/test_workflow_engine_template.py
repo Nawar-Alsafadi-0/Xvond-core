@@ -5,6 +5,7 @@ from pathlib import Path
 WORKFLOW_PATH = Path("ops/n8n/xvond-actions.workflow.json")
 CONTRACTS_PATH = Path("ops/n8n/action-contracts.json")
 CHANNEL_INBOUND_PATH = Path("ops/n8n/xvond-channel-inbound.workflow.json")
+TELEGRAM_PROVIDER_PATH = Path("ops/n8n/xvond-telegram-provider.workflow.json")
 
 
 def _workflow_code() -> str:
@@ -135,3 +136,54 @@ def test_inbound_channel_gateway_prefers_core_owned_delivery_with_safe_legacy_cu
     false_branch = payload["connections"]["Core Owns Delivery?"]["main"][1]
     assert true_branch[0]["node"] == "Return Channel Result"
     assert false_branch[0]["node"] == "Prepare Channel Reply"
+
+
+def test_telegram_provider_normalizes_updates_and_returns_provider_message_identity():
+    payload = json.loads(TELEGRAM_PROVIDER_PATH.read_text(encoding="utf-8"))
+    nodes = {node["name"]: node for node in payload["nodes"]}
+
+    assert nodes["Telegram Inbound"]["parameters"]["path"] == "xvond-telegram-inbound"
+    assert nodes["Telegram Provider"]["parameters"]["path"] == "xvond-telegram-provider"
+
+    normalize = nodes["Normalize Telegram"]["parameters"]["jsCode"]
+    assert "x-telegram-bot-api-secret-token" in normalize.lower()
+    assert "update_id" in normalize
+    assert "external_contact_id" in normalize
+    assert "external_message_id" in normalize
+    assert "channel_type:'telegram'" in normalize
+    assert "XVOND_TELEGRAM_ROUTES_JSON" in normalize
+    assert "bot_token" not in normalize
+
+    outbound = nodes["Validate Telegram Send"]["parameters"]["jsCode"]
+    assert "channel.send" in outbound
+    assert "provider_secret" in outbound
+    assert "route_key" in outbound
+    assert "route.bot_token" in outbound
+    emitted = outbound.split("return [{json:{", 1)[-1]
+    assert "bot_token:" not in emitted
+
+    send = str(nodes["Telegram sendMessage"]["parameters"])
+    assert "api.telegram.org" in send
+    assert "sendMessage" in send
+    assert "XVOND_TELEGRAM_ROUTES_JSON" in send
+
+    result = nodes["Normalize Telegram Send Result"]["parameters"]["jsCode"]
+    assert "provider_message_id" in result
+    assert "message_id" in result
+
+
+def test_telegram_provider_route_credentials_are_not_written_into_workflow_execution_payload():
+    payload = json.loads(TELEGRAM_PROVIDER_PATH.read_text(encoding="utf-8"))
+    nodes = {node["name"]: node for node in payload["nodes"]}
+    outbound = nodes["Validate Telegram Send"]["parameters"]["jsCode"]
+
+    # Secrets may be read from the workflow-only registry for validation/use,
+    # but they must never be copied into the emitted item passed between nodes.
+    emitted = outbound.split("return [{json:{", 1)[-1]
+    assert "bot_token:" not in emitted
+    assert "provider_secret:" not in emitted
+    assert "route_key:routeKey" in emitted
+
+    send_url = nodes["Telegram sendMessage"]["parameters"]["url"]
+    assert "XVOND_TELEGRAM_ROUTES_JSON" in send_url
+    assert ".bot_token" in send_url
