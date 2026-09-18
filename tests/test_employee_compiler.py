@@ -9,6 +9,7 @@ from backend.app.modules.ai_agent.employee_compiler import (
     build_compiled_employee_system_prompt,
     build_compiler_user_message,
     is_sensitive_requirement_key,
+    normalize_compiled_spec,
     parse_compiler_response,
 )
 
