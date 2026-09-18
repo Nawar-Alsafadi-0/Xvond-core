@@ -6,6 +6,7 @@ from backend.app.modules.ai_agent.employee_capability_builder import (
 from backend.app.modules.ai_agent.employee_compiler import (
     build_compiled_employee_system_prompt,
     build_compiler_user_message,
+    is_sensitive_requirement_key,
     parse_compiler_response,
 )
 
@@ -194,7 +195,8 @@ def test_customer_portal_shows_xvond_owned_build_instead_of_unsupported_features
     source = (ROOT / "frontend" / "customer" / "employee-builder.js").read_text(
         encoding="utf-8"
     )
-    assert "Build employee" in source
+    assert "build_employee" in source
+    assert "BUILD PROGRESS" in source
     assert "EMPLOYEE BUILD PLAN" in source
     assert "/compile`" in source
     assert "Xvond builds this" in source
@@ -315,3 +317,18 @@ def test_customer_portal_labels_ready_scheduled_work_truthfully():
     assert "scheduled & ready" in source
     assert "automatic permission required" in source
     assert "schedule setup required" in source
+
+
+def test_builder_generic_setup_never_treats_credentials_as_plain_data():
+    for key in (
+        "password",
+        "api_key",
+        "crm_access_token",
+        "oauth_client_secret",
+        "vendor_credentials",
+        "aws_access_key",
+    ):
+        assert is_sensitive_requirement_key(key) is True
+
+    for key in ("workspace_id", "timezone", "target_market", "account_context"):
+        assert is_sensitive_requirement_key(key) is False
