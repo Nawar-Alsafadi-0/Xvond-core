@@ -1423,3 +1423,166 @@ def test_graph_nested_approval_is_blocked_before_execution(monkeypatch):
             raise AssertionError("nested approval must fail closed")
 
     engine.dispose()
+
+
+
+def test_graph_ai_node_consumes_resolved_context_without_special_case(monkeypatch):
+    captured = {}
+
+    def fake_chat(**kwargs):
+        captured.update(kwargs)
+        return {
+            "response": {"content": "summary"},
+            "conversation_id": 99,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module.agent_runtime,
+        "chat",
+        fake_chat,
+    )
+
+    runtime = automation_runtime_module.AutomationRuntime()
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 7,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "data",
+                        "type": "transform",
+                        "depends_on": [],
+                        "params": {
+                            "values": {
+                                "items": [
+                                    {"name": "A", "score": 91},
+                                    {"name": "B", "score": 84},
+                                ]
+                            }
+                        },
+                    },
+                    {
+                        "id": "summarize",
+                        "type": "ai",
+                        "depends_on": ["data"],
+                        "params": {
+                            "prompt": "Summarize the qualified leads.",
+                            "context": "$nodes.data.items",
+                        },
+                    },
+                ],
+            },
+        },
+        state={"_xvond_execution_key": "ai-context-test"},
+        run_id=1,
+        step_index=0,
+    )
+
+    assert captured["agent_id"] == 7
+    assert "Summarize the qualified leads." in captured["message"]
+    assert '"name": "A"' in captured["message"]
+    assert '"score": 84' in captured["message"]
+    assert result["graph_outputs"]["summarize"]["ai_response"] == "summary"
+
+
+def test_ai_step_context_is_bounded_to_runtime_message_limit(monkeypatch):
+    captured = {}
+
+    def fake_chat(**kwargs):
+        captured.update(kwargs)
+        return {
+            "response": {"content": "ok"},
+            "conversation_id": 1,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module.agent_runtime,
+        "chat",
+        fake_chat,
+    )
+
+    runtime = automation_runtime_module.AutomationRuntime()
+    runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "ai",
+            "agent_id": 1,
+            "prompt": "Analyze this page.",
+            "context": "x" * 20000,
+        },
+        state={},
+        run_id=1,
+        step_index=0,
+    )
+
+    assert len(captured["message"]) <= 12000
+    assert "context truncated by Xvond" in captured["message"]
+
+
+def test_graph_media_node_consumes_explicit_resolved_context(monkeypatch):
+    captured = {}
+
+    def fake_generate_image_asset(*, prompt, model=None, size="1024x1024"):
+        captured.update({"prompt": prompt, "model": model, "size": size})
+        return {
+            "media_url": "https://api.xvond.test/media/generated/context.jpg?x=1",
+            "content_type": "image/jpeg",
+            "bytes": 100,
+            "model": "image-test",
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "generate_image_asset",
+        fake_generate_image_asset,
+    )
+
+    runtime = automation_runtime_module.AutomationRuntime()
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 1,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "brief",
+                        "type": "transform",
+                        "depends_on": [],
+                        "params": {
+                            "values": {
+                                "creative": "Minimal clinic launch visual"
+                            }
+                        },
+                    },
+                    {
+                        "id": "image",
+                        "type": "media",
+                        "depends_on": ["brief"],
+                        "params": {
+                            "prompt": "Create the campaign visual.",
+                            "context": "$nodes.brief.creative",
+                            "size": "1024x1024",
+                        },
+                    },
+                ],
+            },
+        },
+        state={"ai_response": "legacy fallback must not win"},
+        run_id=1,
+        step_index=0,
+    )
+
+    assert "Create the campaign visual." in captured["prompt"]
+    assert "Minimal clinic launch visual" in captured["prompt"]
+    assert "legacy fallback must not win" not in captured["prompt"]
+    assert result["graph_outputs"]["image"]["media_url"].startswith(
+        "https://api.xvond.test/"
+    )
