@@ -612,7 +612,12 @@ def evaluate_readiness(
     elif not provisioned:
         blockers.append("Employee action plan is not provisioned")
 
-    if channel_limit is not None and len(slot_channels) > channel_limit:
+    billed_slot_channels = [
+        item
+        for item in slot_channels
+        if (get_channel_capability(item) or {}).get("channel_slot") is True
+    ]
+    if channel_limit is not None and len(billed_slot_channels) > channel_limit:
         blockers.append(
             f"Selected communication channels exceed the plan limit ({channel_limit})"
         )
@@ -642,7 +647,8 @@ def evaluate_readiness(
         "active_channels": active,
         "missing_channels": missing_channels,
         "channel_limit": channel_limit,
-        "channel_slots_used": len(slot_channels),
+        "channel_slots_used": len(billed_slot_channels),
+        "billed_slot_channels": billed_slot_channels,
         "blockers": blockers,
     }
 
