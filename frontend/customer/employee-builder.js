@@ -127,6 +127,42 @@
             return '<span class="muted">A company Owner or Admin must choose the plan.</span>';
         }
 
+        if (type === "connect_system") {
+            const encodedKey = encodeURIComponent(String(action?.key || ""));
+            const isBooking = String(action?.key || "") === "booking";
+            return `
+                <div class="employee-builder-setup-answer" data-connect-system="${encodedKey}">
+                    <strong>${escapeHtml(action?.label || "Connect existing system")}</strong>
+                    ${action?.detail ? `<p class="muted">${escapeHtml(action.detail)}</p>` : ""}
+                    <label>
+                        <span>Connected system</span>
+                        <select data-integration-select="${encodedKey}">
+                            <option value="">Loading connections…</option>
+                        </select>
+                    </label>
+                    <label>
+                        <span>${isBooking ? "Create booking endpoint" : "Execute endpoint"}</span>
+                        <input type="text" data-integration-execute="${encodedKey}" placeholder="/api/bookings">
+                    </label>
+                    ${isBooking ? `
+                        <label>
+                            <span>Availability endpoint</span>
+                            <input type="text" data-integration-availability="${encodedKey}" placeholder="/api/availability">
+                        </label>
+                    ` : ""}
+                    <label>
+                        <span>Cancel endpoint (optional)</span>
+                        <input type="text" data-integration-cancel="${encodedKey}" placeholder="/api/bookings/{id}/cancel">
+                    </label>
+                    <div class="employee-builder-actions">
+                        <button type="button" data-bind-integration="${encodedKey}">Use this connection</button>
+                        <button type="button" data-open-integrations>Manage connections</button>
+                    </div>
+                    <div class="error" data-integration-bind-error="${encodedKey}"></div>
+                </div>
+            `;
+        }
+
         if (type === "provide_input") {
             const encodedKey = encodeURIComponent(String(action?.key || ""));
             const fields = Array.isArray(action?.fields) ? action.fields : [];
@@ -141,9 +177,11 @@
                                 <span>${escapeHtml(field?.label || field?.key || "Required field")}</span>
                                 ${field?.detail ? `<small class="muted">${escapeHtml(field.detail)}</small>` : ""}
                                 <input
-                                    type="text"
+                                    type="${escapeHtml(field?.type || "text")}"
                                     data-setup-field="${fieldKey}"
                                     autocomplete="off"
+                                    ${field?.min ? `min="${escapeHtml(field.min)}"` : ""}
+                                    ${field?.max ? `max="${escapeHtml(field.max)}"` : ""}
                                     placeholder="Enter ${escapeHtml(field?.label || field?.key || "required value")}"
                                 >
                             </label>
@@ -169,8 +207,10 @@
             "choose_plan",
             "build_employee",
             "manage_knowledge",
+            "manage_integrations",
             "setup_website",
             "setup_whatsapp",
+            "test_employee",
             "launch_employee",
         ]).has(type);
         if (!runnable) return "";
@@ -227,6 +267,16 @@
                 <div id="subscription-plans" class="employee-builder-section hidden"></div>
                 <div id="subscription-error" class="error"></div>
                 <div id="prepare-employee-error" class="error"></div>
+                <div id="employee-builder-test-panel" class="employee-builder-section hidden">
+                    <h3>Preview & Test</h3>
+                    <p class="muted">Talk to the current draft. Xvond will not use live channels or execute business actions in this preview.</p>
+                    <div id="employee-builder-test-log" class="chat-box"></div>
+                    <div class="chat-input">
+                        <input id="employee-builder-test-message" maxlength="12000" placeholder="Try a real customer question...">
+                        <button type="button" id="employee-builder-test-send">Send test</button>
+                    </div>
+                    <div id="employee-builder-test-error" class="error"></div>
+                </div>
                 <div id="launch-employee-error" class="error"></div>
             </div>
         `;
@@ -362,6 +412,36 @@
                                 <div id="job-brief-error" class="error"></div>
                             </div>
                         ` : ""}
+                        ${employee.delivery_mode === "self_service" && !employee.enabled ? `
+                            <div class="employee-builder-section">
+                                <h3>Tell Xvond what to change</h3>
+                                <p class="muted">Refine the same employee with a short instruction. Xvond keeps the rest of the Job Brief unless your new instruction overrides it.</p>
+                                <div class="chat-input">
+                                    <input id="employee-refine-instruction" maxlength="2000" placeholder="مثال: خليه يحكي رسمي أكثر، وخلي الحجز 30 دقيقة">
+                                    <button type="button" id="employee-refine-btn">Apply change</button>
+                                </div>
+                                <div id="employee-refine-error" class="error"></div>
+                            </div>
+                            ${(employee.versions || []).length ? `
+                                <details class="employee-builder-section">
+                                    <summary><strong>Version history</strong> · ${Number((employee.versions || []).length)} saved</summary>
+                                    <div style="margin-top:12px">
+                                        ${(employee.versions || []).slice(0, 10).map(version => `
+                                            <div class="note">
+                                                <div class="employee-builder-current-head">
+                                                    <div>
+                                                        <strong>${escapeHtml(version.reason || "Previous build")}</strong>
+                                                        <div class="muted">${escapeHtml(version.created_at || "")}</div>
+                                                    </div>
+                                                    <button type="button" data-rollback-version="${escapeHtml(version.id || "")}">Restore</button>
+                                                </div>
+                                                <p class="muted">${escapeHtml(String(version.job_brief || "").slice(0, 240))}</p>
+                                            </div>
+                                        `).join("")}
+                                    </div>
+                                </details>
+                            ` : ""}
+                        ` : ""}
                     </div>
 
                     <div class="employee-builder-summary-grid">
@@ -438,6 +518,13 @@
                 await prepareEmployee(employee.agent_id);
                 return;
             }
+            if (actionType === "test_employee") {
+                const panel = document.getElementById("employee-builder-test-panel");
+                panel?.classList.remove("hidden");
+                panel?.scrollIntoView({behavior: "smooth", block: "center"});
+                document.getElementById("employee-builder-test-message")?.focus();
+                return;
+            }
             if (actionType === "launch_employee") {
                 await launchEmployee(employee.agent_id);
                 return;
@@ -451,6 +538,10 @@
                     await window.openCustomerManagerTab("knowledge");
                 }
                 document.getElementById("customer-manager-tab")?.scrollIntoView({behavior: "smooth", block: "start"});
+                return;
+            }
+            if (actionType === "manage_integrations") {
+                await openJourneyPage("integrations");
                 return;
             }
             if (actionType === "setup_website" || actionType === "setup_whatsapp") {
@@ -478,6 +569,66 @@
                 button.disabled = true;
                 try {
                     await runJourneyAction(String(button.dataset.builderAction || ""));
+                } finally {
+                    if (document.body.contains(button)) button.disabled = false;
+                }
+            });
+        });
+
+        async function loadBuilderConnections() {
+            const selects = Array.from(document.querySelectorAll("[data-integration-select]"));
+            if (!selects.length) return;
+            try {
+                const result = await api("/manage/integrations");
+                const integrations = (result.integrations || []).filter(item => item.enabled && item.configured && item.validated);
+                const options = '<option value="">Choose a connected system</option>' + integrations.map(item =>
+                    `<option value="${Number(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(item.integration_type)}</option>`
+                ).join("");
+                for (const select of selects) select.innerHTML = options;
+            } catch (err) {
+                for (const select of selects) {
+                    select.innerHTML = '<option value="">Could not load connections</option>';
+                }
+            }
+        }
+        loadBuilderConnections();
+
+        document.querySelectorAll("[data-open-integrations]").forEach(button => {
+            button.addEventListener("click", () => openJourneyPage("integrations"));
+        });
+
+        document.querySelectorAll("[data-bind-integration]").forEach(button => {
+            button.addEventListener("click", async () => {
+                const encodedKey = String(button.dataset.bindIntegration || "");
+                const key = decodeURIComponent(encodedKey);
+                const select = document.querySelector(`[data-integration-select="${encodedKey}"]`);
+                const execute = document.querySelector(`[data-integration-execute="${encodedKey}"]`);
+                const availability = document.querySelector(`[data-integration-availability="${encodedKey}"]`);
+                const cancel = document.querySelector(`[data-integration-cancel="${encodedKey}"]`);
+                const error = document.querySelector(`[data-integration-bind-error="${encodedKey}"]`);
+                if (error) error.textContent = "";
+                const integrationId = Number(select?.value || 0);
+                if (!integrationId) {
+                    if (error) error.textContent = "Choose a connected system first.";
+                    return;
+                }
+                button.disabled = true;
+                try {
+                    await api(
+                        `/customer/employee-builder/${Number(employee.agent_id)}/connections/${encodeURIComponent(key)}`,
+                        {
+                            method: "POST",
+                            body: JSON.stringify({
+                                integration_id: integrationId,
+                                execute_endpoint: String(execute?.value || "").trim() || null,
+                                availability_endpoint: String(availability?.value || "").trim() || null,
+                                cancel_endpoint: String(cancel?.value || "").trim() || null,
+                            }),
+                        }
+                    );
+                    await loadEmployeeBuilder();
+                } catch (err) {
+                    if (error) error.textContent = err?.message || "Could not connect this system.";
                 } finally {
                     if (document.body.contains(button)) button.disabled = false;
                 }
@@ -553,6 +704,49 @@
             });
         }
 
+        const testInput = document.getElementById("employee-builder-test-message");
+        const testSend = document.getElementById("employee-builder-test-send");
+        if (testSend && testInput) {
+            testSend.addEventListener("click", () => testEmployee(employee.agent_id));
+            testInput.addEventListener("keydown", event => {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    testEmployee(employee.agent_id);
+                }
+            });
+        }
+
+        const refineButton = document.getElementById("employee-refine-btn");
+        const refineInput = document.getElementById("employee-refine-instruction");
+        if (refineButton && refineInput) {
+            refineButton.addEventListener("click", () => refineEmployee(employee.agent_id));
+            refineInput.addEventListener("keydown", event => {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    refineEmployee(employee.agent_id);
+                }
+            });
+        }
+
+        document.querySelectorAll("[data-rollback-version]").forEach(button => {
+            button.addEventListener("click", async () => {
+                const versionId = String(button.dataset.rollbackVersion || "");
+                if (!versionId || !confirm("Restore this employee version? The current draft will be saved in history first.")) return;
+                button.disabled = true;
+                try {
+                    await api(`/customer/employee-builder/${employee.agent_id}/rollback`, {
+                        method: "POST",
+                        body: JSON.stringify({version_id: versionId}),
+                    });
+                    await loadEmployeeBuilder();
+                } catch (err) {
+                    alert(err?.message || "Could not restore this version.");
+                } finally {
+                    if (document.body.contains(button)) button.disabled = false;
+                }
+            });
+        });
+
         const chooseSubscriptionButton = document.getElementById("choose-subscription-btn");
         if (chooseSubscriptionButton) {
             chooseSubscriptionButton.addEventListener("click", loadSubscriptionPlans);
@@ -565,6 +759,30 @@
         const launchButton = document.getElementById("launch-employee-btn");
         if (launchButton) {
             launchButton.addEventListener("click", () => launchEmployee(employee.agent_id));
+        }
+    }
+
+    async function refineEmployee(agentId) {
+        const input = document.getElementById("employee-refine-instruction");
+        const button = document.getElementById("employee-refine-btn");
+        const error = document.getElementById("employee-refine-error");
+        const instruction = String(input?.value || "").trim();
+        if (error) error.textContent = "";
+        if (instruction.length < 2) {
+            if (error) error.textContent = "Tell Xvond what you want to change.";
+            return;
+        }
+        if (button) button.disabled = true;
+        try {
+            await api(`/customer/employee-builder/${agentId}/refine`, {
+                method: "POST",
+                body: JSON.stringify({instruction}),
+            });
+            await loadEmployeeBuilder();
+        } catch (err) {
+            if (error) error.textContent = err?.message || "Could not apply this change.";
+        } finally {
+            if (button && document.body.contains(button)) button.disabled = false;
         }
     }
 
@@ -680,6 +898,41 @@
             if (error) error.textContent = err?.message || "Could not build employee.";
         } finally {
             if (button) button.disabled = false;
+        }
+    }
+
+    function appendTestMessage(role, message) {
+        const log = document.getElementById("employee-builder-test-log");
+        if (!log) return;
+        log.innerHTML += `<div class="chat-row"><strong>${escapeHtml(role)}</strong><div>${escapeHtml(message)}</div></div>`;
+        log.scrollTop = log.scrollHeight;
+    }
+
+    async function testEmployee(agentId) {
+        const input = document.getElementById("employee-builder-test-message");
+        const button = document.getElementById("employee-builder-test-send");
+        const error = document.getElementById("employee-builder-test-error");
+        const message = String(input?.value || "").trim();
+        if (!message) return;
+        if (error) error.textContent = "";
+        appendTestMessage("You", message);
+        if (input) input.value = "";
+        if (button) button.disabled = true;
+        try {
+            const result = await api(`/customer/employee-builder/${agentId}/test`, {
+                method: "POST",
+                body: JSON.stringify({message})
+            });
+            appendTestMessage("AI Employee", result.message || "");
+            await loadEmployeeBuilder();
+            requestAnimationFrame(() => {
+                const panel = document.getElementById("employee-builder-test-panel");
+                panel?.classList.remove("hidden");
+            });
+        } catch (err) {
+            if (error) error.textContent = err?.message || "Could not test employee.";
+        } finally {
+            if (button && document.body.contains(button)) button.disabled = false;
         }
     }
 

@@ -94,6 +94,8 @@ def launch_database(monkeypatch):
                         "delivery_mode": "self_service",
                         "source_description": "Reply to customers on WhatsApp.",
                         "requested_channels": ["whatsapp"],
+                        "compiled_at": "2026-09-18T12:00:00Z",
+                        "last_tested_compiled_at": "2026-09-18T12:00:00Z",
                         "compiled_spec": SPEC,
                     }
                 },

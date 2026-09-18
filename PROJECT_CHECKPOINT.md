@@ -64,14 +64,17 @@ Canonical sequence:
 5. Xvond provisions generated capabilities/actions/automation contracts.
 6. Customer supplies only the inputs and communication channels actually required by the current employee contract.
 7. Readiness evaluates subscription, provider route, compiled requirements, provisioned execution and required channel setup.
-8. Customer launches the employee atomically.
-9. Customer may deactivate, revise the Job Brief, rebuild and relaunch.
-10. Recurring/background work runs through the production automation scheduler when the employee specification requires it.
+8. Customer previews/tests the exact current build without live channel sends or business side effects.
+9. Customer launches the employee atomically.
+10. Customer may deactivate, refine or revise the Job Brief, roll back a saved version, rebuild and relaunch.
+11. Recurring/background work runs through the production automation scheduler when the employee specification requires it.
 
 Important Self-Service rules:
 
 - The Customer Portal exposes **Build your employee** as a first-class Self-Service workspace and opens Draft employees there by default.
-- The Builder presents one canonical journey: **Job Brief -> Plan -> Build -> Setup -> Launch**. Runtime readiness remains authoritative; the UI does not infer readiness by parsing blocker text.
+- The Builder presents one canonical journey: **Job Brief -> Plan -> Build -> Setup -> Preview & Test -> Launch**. Runtime readiness remains authoritative; the UI does not infer readiness by parsing blocker text.
+- Natural-language refinement recompiles the employee contract, while bounded version history supports rollback to a previous draft.
+- Launch requires Preview & Test evidence for the exact current compiled build. Setup, connection or build changes invalidate older preview evidence.
 - Owner-provided setup data is collected inside the Builder only for the exact compiled requirement fields. All required fields must be complete before the requirement resolves.
 - Password/token/API-key/credential-shaped requirements never use generic setup fields; they stay on a protected Xvond/provider connection path.
 - A `files` requirement resolves only from an enabled PDF actually attached to that employee; generic text knowledge does not falsely satisfy it.
@@ -81,6 +84,7 @@ Important Self-Service rules:
 - Revising a Job Brief while Draft deactivates no-longer-requested communication channels but preserves reusable connection configuration/credentials.
 - Customer Website/WhatsApp setup is rejected at the API layer if that channel is outside the current Self-Service employee contract.
 - A live employee must be deactivated before changing its Website/WhatsApp connection.
+- Customer-owned API/POS/CRM/ERP/webhook connections must pass protected validation before binding. Configuration changes require deactivation when live, clear prior validation and preview evidence when Draft, and fail closed at readiness and runtime until revalidated.
 - Real non-Mock AI routing is required in production even for a channel-less employee.
 - Knowledge requirements resolve only from enabled, tenant-owned knowledge actually attached to the employee.
 - Managed delivery rules are not reused as blanket Self-Service blockers.
@@ -106,6 +110,7 @@ Implemented platform foundations include:
 - Company Profile / Business Information
 - AI Employees and provider routing
 - Job Brief compile/provision/revise/rebuild lifecycle
+- natural-language refinement, bounded version rollback and build-scoped Preview & Test
 - Knowledge
 - generic Actions / Action Requests
 - Website and WhatsApp customer setup
@@ -407,11 +412,11 @@ The channel inbound workflow remains backward-compatible for one release during 
 
 ## Current release status at this checkpoint
 
-Repository state through the Self-Service channel-contract work is **code validated**, but this checkpoint does **not** claim that the reviewed release has been deployed to the production server.
+Repository state through the Replit-like Self-Service build loop, Market Launch Gate and fail-closed Tap recurring renewal work is **code validated**, but this checkpoint does **not** claim that the reviewed release has been deployed to the production server.
 
 Highest-priority remaining external/product work:
 
-1. Merge and deploy the final Market Launch Gate release on the canonical production server.
+1. Deploy the reviewed `main` release on the canonical production server and pass the production acceptance gate.
 2. Configure production Workflow Engine route registries/secrets and provision one real Telegram bot; prove Telegram inbound -> Xvond employee -> durable provider-confirmed outbound -> handoff -> Return to AI.
 3. Configure Meta Messaging app permissions/subscriptions and real Instagram/Messenger routes; validate raw-body signature handling and one real inbound/outbound round trip for each launch channel.
 4. Re-activate Tap Payments, configure the live Tap key/Merchant ID and webhook/redirect paths, run sandbox then one real `CAPTURED` Self-Service charge, and confirm whether Save Card/recurring capability is enabled before turning on automatic renewals.

@@ -120,9 +120,14 @@ def test_builder_journey_unlocks_launch_only_from_runtime_readiness():
             "provider_ready": True,
             "ready": True,
         },
+        builder={
+            "compiled_at": "2026-09-18T10:00:00Z",
+            "last_tested_compiled_at": "2026-09-18T10:00:00Z",
+        },
     )
 
     assert stage(journey, "setup")["status"] == "complete"
+    assert stage(journey, "test")["status"] == "complete"
     assert stage(journey, "launch")["status"] == "action_required"
     assert [item["type"] for item in journey["next_actions"]] == ["launch_employee"]
 
@@ -136,6 +141,10 @@ def test_builder_journey_unlocks_launch_only_from_runtime_readiness():
             "resolved_requirements": [],
             "provider_ready": True,
             "ready": True,
+        },
+        builder={
+            "compiled_at": "2026-09-18T10:00:00Z",
+            "last_tested_compiled_at": "2026-09-18T10:00:00Z",
         },
     )
     assert stage(live, "launch")["status"] == "complete"
@@ -213,3 +222,108 @@ def test_builder_journey_exposes_declared_setup_fields_and_never_plain_credentia
     assert setup["status"] == "waiting"
     assert setup["actions"] == []
     assert "protected connection" in setup["detail"]
+
+
+def test_builder_journey_requires_setup_then_current_build_preview_before_launch():
+    spec = {
+        "requirements": [],
+        "delivery": {"provisioning_version": 1},
+    }
+    journey = _self_service_builder_journey(
+        agent=SimpleNamespace(enabled=False),
+        has_entitlement=True,
+        compiled_spec=spec,
+        state={
+            "subscription": {"active": True, "status": "active"},
+            "missing_channels": [],
+            "resolved_requirements": [],
+            "provider_ready": True,
+            "ready": True,
+        },
+        builder={"compiled_at": "build-2"},
+    )
+
+    assert stage(journey, "setup")["status"] == "complete"
+    assert stage(journey, "test")["status"] == "action_required"
+    assert stage(journey, "launch")["status"] == "blocked"
+    assert [item["type"] for item in journey["next_actions"]] == ["test_employee"]
+
+
+def test_builder_journey_turns_external_requirement_into_connect_system_action():
+    spec = {
+        "requirements": [
+            {
+                "key": "booking",
+                "kind": "integration",
+                "status": "connection_required",
+                "purpose": "Use the existing booking system",
+            }
+        ],
+        "delivery": {"provisioning_version": 1},
+    }
+    journey = _self_service_builder_journey(
+        agent=SimpleNamespace(enabled=False),
+        has_entitlement=True,
+        compiled_spec=spec,
+        state={
+            "subscription": {"active": True, "status": "active"},
+            "missing_channels": [],
+            "resolved_requirements": [],
+            "provider_ready": True,
+            "ready": False,
+        },
+        builder={"compiled_at": "build-1"},
+    )
+
+    setup = stage(journey, "setup")
+    assert setup["status"] == "action_required"
+    action = next(item for item in setup["actions"] if item["type"] == "connect_system")
+    assert action["key"] == "booking"
+
+
+def test_builder_journey_routes_expired_connection_validation_back_to_setup():
+    spec = {
+        "requirements": [
+            {
+                "key": "booking",
+                "kind": "integration",
+                "status": "xvond_managed",
+                "purpose": "Use the existing booking system",
+                "execution_status": "ready",
+            }
+        ],
+        "delivery": {"provisioning_version": 1},
+    }
+    journey = _self_service_builder_journey(
+        agent=SimpleNamespace(enabled=False),
+        has_entitlement=True,
+        compiled_spec=spec,
+        state={
+            "subscription": {"active": True, "status": "active"},
+            "missing_channels": [],
+            "resolved_requirements": [],
+            "connected_system_setup": [
+                {
+                    "requirement_key": "booking",
+                    "reason": "validation_required",
+                    "message": "Validate Booking API again before launch",
+                }
+            ],
+            "provider_ready": True,
+            "ready": False,
+        },
+        builder={"compiled_at": "build-1"},
+    )
+
+    setup = stage(journey, "setup")
+    assert setup["status"] == "action_required"
+    assert setup["actions"] == [
+        {
+            "type": "manage_integrations",
+            "label": "Validate connected system",
+            "target": "integrations",
+            "key": "booking",
+            "detail": "Validate Booking API again before launch",
+        }
+    ]
+    assert stage(journey, "test")["status"] == "blocked"

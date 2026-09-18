@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -41,6 +42,7 @@ from backend.app.modules.ai_agent.self_service_policy import (
     is_self_service_company,
     self_service_channel_activation_blockers,
     self_service_channel_slots,
+    self_service_connection_status,
     self_service_readiness,
     self_service_spec_view,
 )
@@ -59,6 +61,8 @@ from backend.app.modules.channels.delivery import reconcile_managed_channel_requ
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord, CompanyAIProfile
 from backend.app.modules.tools.models import AgentToolAssignment
+from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.integrations.catalog import integration_validation_ready
 
 router = APIRouter(
     prefix="/customer/employee-builder",
@@ -80,7 +84,22 @@ class EmployeeBuilderTestRequest(BaseModel):
 
 
 class EmployeeBuilderReviseRequest(BaseModel):
-    description: str = Field(min_length=8, max_length=4000)
+    description: str = Field(min_length=8, max_length=12000)
+
+
+class EmployeeBuilderRefineRequest(BaseModel):
+    instruction: str = Field(min_length=2, max_length=2000)
+
+
+class EmployeeBuilderRollbackRequest(BaseModel):
+    version_id: str = Field(min_length=1, max_length=80)
+
+
+class EmployeeBuilderIntegrationBindRequest(BaseModel):
+    integration_id: int
+    execute_endpoint: str | None = Field(default=None, max_length=500)
+    availability_endpoint: str | None = Field(default=None, max_length=500)
+    cancel_endpoint: str | None = Field(default=None, max_length=500)
 
 
 class EmployeeBuilderSetupAnswerRequest(BaseModel):
@@ -96,6 +115,79 @@ DEFAULT_CUSTOMER_CONTROLS = {
     "can_change_provider": False,
     "can_change_model": False,
 }
+
+
+BUILDER_HISTORY_LIMIT = 20
+
+
+def _snapshot_builder_version(
+    builder: dict,
+    *,
+    reason: str,
+    capabilities: dict | None = None,
+) -> dict:
+    history = list(builder.get("versions") or [])
+    snapshot_source = str(builder.get("source_description") or "").strip()
+    snapshot_spec = builder.get("compiled_spec")
+    if not snapshot_source and not isinstance(snapshot_spec, dict):
+        return builder
+
+    version_id = (
+        datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
+        + f"-{len(history) + 1}"
+    )
+    history.append(
+        {
+            "id": version_id,
+            "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "reason": str(reason or "change")[:120],
+            "source_description": snapshot_source[:12000],
+            "compiled_spec": deepcopy(snapshot_spec) if isinstance(snapshot_spec, dict) else None,
+            "compiled_at": builder.get("compiled_at"),
+            "setup_answers": deepcopy(dict(builder.get("setup_answers") or {})),
+            "requested_channels": list(builder.get("requested_channels") or []),
+            "audience": builder.get("audience"),
+            "permissions": deepcopy(dict(builder.get("permissions") or {})),
+            "capabilities": dict(capabilities or {}),
+        }
+    )
+    builder["versions"] = history[-BUILDER_HISTORY_LIMIT:]
+    return builder
+
+
+def _clear_current_build_evidence(builder: dict) -> None:
+    for key in (
+        "compiled_spec",
+        "delivery",
+        "compiled_at",
+        "compiler_provider",
+        "compiler_model",
+        "last_tested_at",
+        "last_tested_compiled_at",
+    ):
+        builder.pop(key, None)
+    # Keep the serialized builder contract explicit for callers and existing
+    # stored workspaces: a revised/rolled-back draft is uncompiled, rather than
+    # having an ambiguous missing compilation field.
+    builder["compiled_spec"] = None
+
+
+def _builder_versions_view(builder: dict) -> list[dict]:
+    result = []
+    for item in reversed(list(builder.get("versions") or [])):
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            {
+                "id": item.get("id"),
+                "created_at": item.get("created_at"),
+                "reason": item.get("reason"),
+                "job_brief": item.get("source_description"),
+                "compiled": isinstance(item.get("compiled_spec"), dict),
+                "compiled_at": item.get("compiled_at"),
+            }
+        )
+    return result
 
 
 def _ensure_module(db, company_id: int, name: str):
@@ -476,6 +568,7 @@ def _self_service_builder_journey(
     has_entitlement: bool,
     compiled_spec: dict | None,
     state: dict | None,
+    builder: dict | None = None,
 ) -> dict:
     """Render the Self-Service lifecycle as structured product steps.
 
@@ -485,6 +578,7 @@ def _self_service_builder_journey(
     """
 
     state = dict(state or {})
+    builder = dict(builder or {})
     subscription = dict(state.get("subscription") or {})
     compiled = isinstance(compiled_spec, dict)
     provisioned = bool(
@@ -652,12 +746,52 @@ def _self_service_builder_journey(
                         if is_sensitive_requirement_key(field_key):
                             sensitive_input = True
                         if not any(item["key"] == field_key for item in input_fields):
+                            field_meta = {
+                                "working_days": {
+                                    "label": "Working days",
+                                    "detail": "Example: Sunday, Monday, Tuesday, Wednesday, Thursday",
+                                },
+                                "opening_time": {
+                                    "label": "Opening time",
+                                    "type": "time",
+                                },
+                                "closing_time": {
+                                    "label": "Closing time",
+                                    "type": "time",
+                                },
+                                "slot_minutes": {
+                                    "label": "Appointment duration (minutes)",
+                                    "type": "number",
+                                    "min": "5",
+                                    "max": "720",
+                                },
+                                "capacity": {
+                                    "label": "Bookings allowed per time slot",
+                                    "type": "number",
+                                    "min": "1",
+                                    "max": "100",
+                                },
+                            }.get(field_key, {})
                             input_fields.append(
                                 {
                                     "key": field_key,
-                                    "label": str(input_labels.get(field_key) or raw_field).strip()
+                                    "label": str(
+                                        input_labels.get(field_key)
+                                        or field_meta.get("label")
+                                        or raw_field
+                                    ).strip()
                                     or field_key.replace("_", " "),
-                                    "detail": str(input_purposes.get(field_key) or "").strip() or None,
+                                    "detail": str(
+                                        input_purposes.get(field_key)
+                                        or field_meta.get("detail")
+                                        or ""
+                                    ).strip()
+                                    or None,
+                                    **{
+                                        meta_key: meta_value
+                                        for meta_key, meta_value in field_meta.items()
+                                        if meta_key not in {"label", "detail"}
+                                    },
                                 }
                             )
                     if sensitive_input:
@@ -679,9 +813,21 @@ def _self_service_builder_journey(
                 if kind == "channel" and key in missing_channels:
                     continue
                 connection_status = str(
-                    requirement.get("self_service_connection_status") or ""
+                    requirement.get("self_service_connection_status")
+                    or self_service_connection_status(requirement)
+                    or ""
                 )
-                if connection_status == "xvond_adapter_required":
+                if connection_status == "self_service_integration_available" and kind != "channel":
+                    setup_actions.append(
+                        _builder_action(
+                            "connect_system",
+                            f"Connect system for {key.replace('_', ' ')}",
+                            target="integrations",
+                            key=key,
+                            detail=str(requirement.get("purpose") or "").strip() or None,
+                        )
+                    )
+                elif connection_status == "xvond_adapter_required":
                     waiting_reasons.append(
                         f"{key.replace('_', ' ').title()} needs an Xvond connection adapter."
                     )
@@ -704,6 +850,20 @@ def _self_service_builder_journey(
                     waiting_reasons.append(
                         f"Xvond execution setup is still required for {key.replace('_', ' ')}."
                     )
+
+        for item in state.get("connected_system_setup") or []:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("requirement_key") or "connected_system")
+            setup_actions.append(
+                _builder_action(
+                    "manage_integrations",
+                    "Validate connected system",
+                    target="integrations",
+                    key=key,
+                    detail=str(item.get("message") or "").strip() or None,
+                )
+            )
 
         if state.get("provider_ready") is False:
             waiting_reasons.append(
@@ -752,6 +912,51 @@ def _self_service_builder_journey(
             "Build the employee first so Xvond can determine the exact setup it needs.",
         )
 
+    compiled_at = str(builder.get("compiled_at") or "").strip()
+    tested_build = bool(
+        compiled_at
+        and str(builder.get("last_tested_compiled_at") or "").strip() == compiled_at
+    )
+    setup_stage = next((item for item in stages if item.get("id") == "setup"), {})
+    setup_complete = setup_stage.get("status") == "complete"
+    if tested_build and setup_complete:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "complete",
+            "The current employee build has been tested safely without live channels or business actions.",
+        )
+    elif provisioned and has_entitlement and setup_complete:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "action_required",
+            "Chat with this exact draft before launch. Preview testing never sends through live channels or executes business actions.",
+            [_builder_action("test_employee", "Test employee", target="builder")],
+        )
+    elif provisioned and not setup_complete:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "blocked",
+            "Finish the required setup for this build before preview testing.",
+        )
+    elif provisioned:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "blocked",
+            "Activate the AI Employee plan before testing this build.",
+        )
+    else:
+        add_stage(
+            "test",
+            "Preview & Test",
+            "blocked",
+            "Build the employee before testing it.",
+        )
+
+
     if agent.enabled:
         add_stage(
             "launch",
@@ -759,13 +964,20 @@ def _self_service_builder_journey(
             "complete",
             "This AI employee is live.",
         )
-    elif state.get("ready"):
+    elif state.get("ready") and tested_build:
         add_stage(
             "launch",
             "Launch",
             "action_required",
-            "All launch requirements are ready.",
+            "All launch requirements are ready and this build has been preview-tested.",
             [_builder_action("launch_employee", "Launch employee", target="builder")],
+        )
+    elif state.get("ready") and not tested_build:
+        add_stage(
+            "launch",
+            "Launch",
+            "blocked",
+            "Test the current employee build once before launch.",
         )
     else:
         add_stage(
@@ -820,6 +1032,7 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
                 has_entitlement=has_entitlement,
                 compiled_spec=compiled_spec if isinstance(compiled_spec, dict) else None,
                 state=self_service_state,
+                builder=builder if isinstance(builder, dict) else {},
             )
         display_channels = list(builder.get("requested_channels", []))
         if is_self_service_company(company):
@@ -845,9 +1058,17 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
                 ),
                 "self_service_readiness": self_service_state,
                 "builder_journey": builder_journey,
+                "last_tested_at": builder.get("last_tested_at"),
+                "versions": _builder_versions_view(builder),
+                "current_build_tested": bool(
+                    builder.get("compiled_at")
+                    and builder.get("last_tested_compiled_at") == builder.get("compiled_at")
+                ),
                 "can_launch": bool(
                     self_service_state
                     and self_service_state.get("ready")
+                    and builder.get("compiled_at")
+                    and builder.get("last_tested_compiled_at") == builder.get("compiled_at")
                     and not agent.enabled
                 ),
             }
@@ -1041,6 +1262,11 @@ def revise_self_service_job_brief(
 
         settings = dict(config.settings or {})
         builder = dict(settings.get("employee_builder") or {})
+        builder = _snapshot_builder_version(
+            builder,
+            reason="job_brief_revision",
+            capabilities=dict(config.capabilities or {}),
+        )
         builder.update(
             {
                 "version": 2,
@@ -1056,13 +1282,7 @@ def revise_self_service_job_brief(
                 "compiled_spec": None,
             }
         )
-        for stale_key in (
-            "delivery",
-            "compiled_at",
-            "compiler_provider",
-            "compiler_model",
-        ):
-            builder.pop(stale_key, None)
+        _clear_current_build_evidence(builder)
         settings["employee_builder"] = builder
 
         _clear_generated_self_service_build(
@@ -1133,6 +1353,466 @@ def revise_self_service_job_brief(
             "deactivated_channels": deactivated_channels,
             "managed_channel_requests": managed_reconcile,
             "missing_information": list(blueprint.missing_information),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/refine")
+def refine_self_service_employee(
+    agent_id: int,
+    data: EmployeeBuilderRefineRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Apply a concise owner instruction to the same draft employee.
+
+    The source Job Brief remains auditable. Later OWNER REFINEMENT sections are
+    compiled as authoritative overrides without silently discarding unrelated
+    requirements.
+    """
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Natural-language refinement is available only for Self-Service employees")
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == agent_id,
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        if agent.enabled:
+            raise HTTPException(409, "Deactivate this employee before refining it")
+        config = _employee_config_or_404(db, agent)
+        builder = dict((config.settings or {}).get("employee_builder") or {})
+        current_brief = str(builder.get("source_description") or agent.description or "").strip()
+        if not current_brief:
+            raise HTTPException(409, "Current Job Brief is unavailable")
+        instruction = " ".join(str(data.instruction or "").strip().split())
+        if not instruction:
+            raise HTTPException(400, "Refinement instruction is required")
+        revised = (
+            current_brief
+            + "\n\nOWNER REFINEMENT "
+            + datetime.utcnow().isoformat(timespec="seconds")
+            + "Z:\n"
+            + instruction
+        )
+        if len(revised) > 12000:
+            raise HTTPException(
+                409,
+                "This employee has accumulated too many refinements. Consolidate the Job Brief before continuing.",
+            )
+    finally:
+        db.close()
+
+    result = revise_self_service_job_brief(
+        agent_id,
+        EmployeeBuilderReviseRequest(description=revised),
+        current_user,
+    )
+    if _has_ai_agents_entitlement_for_user(current_user):
+        try:
+            compile_employee(agent_id, current_user)
+            result["compiled"] = True
+            result["status"] = "refined_and_rebuilt"
+        except HTTPException:
+            # The refinement itself is durable. The normal journey will surface
+            # the build blocker rather than losing the owner's instruction.
+            result["status"] = "refined"
+    return result
+
+
+def _has_ai_agents_entitlement_for_user(current_user: User) -> bool:
+    db = SessionLocal()
+    try:
+        return _has_ai_agents_entitlement(db, current_user.company_id)
+    finally:
+        db.close()
+
+
+@router.get("/{agent_id}/versions")
+def self_service_employee_versions(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Version history is available only for Self-Service employees")
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == agent_id,
+            AIAgent.company_id == company.id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+        builder = dict((config.settings or {}).get("employee_builder") or {})
+        return {
+            "agent_id": agent.id,
+            "versions": _builder_versions_view(builder),
+        }
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/rollback")
+def rollback_self_service_employee(
+    agent_id: int,
+    data: EmployeeBuilderRollbackRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Rollback is available only for Self-Service employees")
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == agent_id,
+            AIAgent.company_id == company.id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+        if agent.enabled:
+            raise HTTPException(409, "Deactivate this employee before rolling it back")
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        versions = list(builder.get("versions") or [])
+        selected = next(
+            (
+                item for item in versions
+                if isinstance(item, dict)
+                and str(item.get("id") or "") == str(data.version_id)
+            ),
+            None,
+        )
+        if selected is None:
+            raise HTTPException(404, "Employee version not found")
+
+        previous_capabilities = dict(config.capabilities or {})
+        builder = _snapshot_builder_version(
+            builder,
+            reason="before_rollback",
+            capabilities=previous_capabilities,
+        )
+        restored_brief = str(selected.get("source_description") or "").strip()
+        if not restored_brief:
+            raise HTTPException(409, "Selected version has no Job Brief")
+
+        _clear_generated_self_service_build(
+            db,
+            company_id=company.id,
+            agent_id=agent.id,
+        )
+
+        restored_spec = selected.get("compiled_spec")
+        restored_channels = communication_channels(selected.get("requested_channels") or [])
+        restored_capabilities = dict(selected.get("capabilities") or {})
+        builder["source_description"] = restored_brief
+        builder["job_brief"] = restored_brief
+        builder["requested_channels"] = restored_channels
+        builder["audience"] = selected.get("audience")
+        builder["permissions"] = deepcopy(dict(selected.get("permissions") or {}))
+        builder["setup_answers"] = deepcopy(dict(selected.get("setup_answers") or {}))
+        _clear_current_build_evidence(builder)
+
+        if isinstance(restored_spec, dict):
+            restored_spec = deepcopy(restored_spec)
+            restored_spec, delivery = provision_compiled_capabilities(
+                db,
+                agent_id=agent.id,
+                spec=restored_spec,
+            )
+            restored_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            builder["compiled_spec"] = restored_spec
+            builder["delivery"] = delivery
+            builder["compiled_at"] = restored_at
+            builder["missing_information"] = list(restored_spec.get("setup_required") or [])
+            agent.system_prompt = build_compiled_employee_system_prompt(
+                owner_name=company.name,
+                spec=restored_spec,
+            )
+        else:
+            blueprint = _build_final_blueprint(
+                EmployeeBuilderCreateRequest(
+                    description=restored_brief,
+                    name=agent.name,
+                )
+            )
+            restored_capabilities = {item: True for item in blueprint.capabilities}
+            builder["audience"] = blueprint.audience
+            builder["permissions"] = dict(blueprint.permissions)
+            builder["missing_information"] = list(blueprint.missing_information)
+            agent.system_prompt = build_employee_system_prompt(
+                owner_name=company.name,
+                blueprint=blueprint,
+            )
+
+        config.capabilities = restored_capabilities
+        _reconcile_builder_runtime_tools(
+            db,
+            agent_id=agent.id,
+            previous_capabilities=previous_capabilities,
+            next_capabilities=tuple(
+                key
+                for key, enabled in restored_capabilities.items()
+                if enabled
+            ),
+        )
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        agent.description = restored_brief
+
+        profile = (
+            db.query(AIAgentProfile)
+            .filter(
+                AIAgentProfile.company_id == company.id,
+                AIAgentProfile.agent_id == agent.id,
+            )
+            .first()
+        )
+        if profile is not None:
+            profile.instructions = restored_brief
+            if isinstance(restored_spec, dict):
+                profile.business_type = (
+                    "personal"
+                    if str(restored_spec.get("scope") or "").strip().lower() == "personal"
+                    else None
+                )
+            else:
+                profile.business_type = (
+                    "personal"
+                    if str(builder.get("audience") or "").strip().lower() == "personal"
+                    else None
+                )
+
+        reconcile_managed_channel_requests(
+            db,
+            company_id=company.id,
+            agent_id=agent.id,
+            desired_channel_types=restored_channels,
+            request_source="version_rollback",
+        )
+        for channel in (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.company_id == company.id,
+                AgentChannel.agent_id == agent.id,
+                AgentChannel.enabled.is_(True),
+            )
+            .with_for_update()
+            .all()
+        ):
+            channel_type = canonical_channel_type(channel.channel_type)
+            if communication_channels([channel_type]) and channel_type not in restored_channels:
+                channel.enabled = False
+
+        db.commit()
+        return {
+            "status": "rolled_back",
+            "agent_id": agent.id,
+            "version_id": data.version_id,
+            "compiled": isinstance(builder.get("compiled_spec"), dict),
+            "current_build_tested": False,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _relative_endpoint(value: str | None, *, required: bool = False) -> str | None:
+    endpoint = str(value or "").strip()
+    if not endpoint:
+        if required:
+            raise HTTPException(400, "Required integration endpoint is missing")
+        return None
+    if endpoint.startswith("//") or endpoint.lower().startswith(("http://", "https://")):
+        raise HTTPException(400, "Integration operation endpoints must be relative paths")
+    return "/" + endpoint.lstrip("/")
+
+
+@router.post("/{agent_id}/connections/{requirement_key}")
+def bind_self_service_integration(
+    agent_id: int,
+    requirement_key: str,
+    data: EmployeeBuilderIntegrationBindRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Bind one customer-owned connected system to one compiled requirement."""
+
+    key = normalize_requirement_key(requirement_key)
+    if not key:
+        raise HTTPException(400, "Connection requirement key is invalid")
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Connected-system binding is available only for Self-Service employees")
+
+        agent = db.query(AIAgent).filter(
+            AIAgent.id == agent_id,
+            AIAgent.company_id == company.id,
+        ).first()
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+        if agent.enabled:
+            raise HTTPException(409, "Deactivate this employee before changing connected systems")
+
+        integration = db.query(CompanyIntegration).filter(
+            CompanyIntegration.id == data.integration_id,
+            CompanyIntegration.company_id == company.id,
+            CompanyIntegration.enabled.is_(True),
+        ).first()
+        if integration is None:
+            raise HTTPException(404, "Connected system not found or disabled")
+        integration_config = reveal_config(integration.config) or {}
+        if not integration_validation_ready(integration_config):
+            raise HTTPException(
+                409,
+                "Validate this connected system successfully before binding it to the AI employee",
+            )
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        compiled_spec = builder.get("compiled_spec")
+        if not isinstance(compiled_spec, dict):
+            raise HTTPException(409, "Build the employee before connecting a system")
+
+        requirements = [
+            dict(item) if isinstance(item, dict) else item
+            for item in (compiled_spec.get("requirements") or [])
+        ]
+        requirement = next(
+            (
+                item for item in requirements
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HTTPException(404, "Connection requirement not found in the current Job Brief")
+        if str(requirement.get("status") or "").strip().lower() != "connection_required":
+            raise HTTPException(409, "This requirement does not need an external connection")
+        if str(requirement.get("kind") or "").strip().lower() == "channel":
+            raise HTTPException(409, "Communication channels use their dedicated connection flow")
+
+        executable_types = {"custom_api", "pos", "crm", "erp", "webhook"}
+        if integration.integration_type not in executable_types:
+            raise HTTPException(
+                409,
+                "This connected-system type does not have a generic execution adapter. Use Custom API or an Xvond packaged connector.",
+            )
+        if key == "booking" and integration.integration_type == "webhook":
+            raise HTTPException(
+                409,
+                "Booking needs a two-way API so Xvond can verify availability before creating the booking",
+            )
+
+        execute_required = integration.integration_type in {
+            "custom_api", "pos", "crm", "erp"
+        }
+        execute_endpoint = _relative_endpoint(
+            data.execute_endpoint,
+            required=execute_required,
+        )
+        availability_endpoint = _relative_endpoint(data.availability_endpoint)
+        cancel_endpoint = _relative_endpoint(data.cancel_endpoint)
+
+        if key == "booking" and integration.integration_type != "webhook":
+            if not availability_endpoint:
+                raise HTTPException(
+                    400,
+                    "Booking systems need an availability endpoint so the employee can check real slots",
+                )
+            if not execute_endpoint:
+                raise HTTPException(
+                    400,
+                    "Booking systems need a booking/create endpoint",
+                )
+
+        operations = {}
+        if execute_endpoint:
+            operations["execute"] = {"method": "POST", "endpoint": execute_endpoint}
+        if availability_endpoint:
+            operations["availability"] = {
+                "method": "POST",
+                "endpoint": availability_endpoint,
+            }
+        if cancel_endpoint:
+            operations["cancel"] = {"method": "POST", "endpoint": cancel_endpoint}
+
+        requirement["integration_id"] = integration.id
+        requirement["integration_type"] = integration.integration_type
+        requirement["integration_operations"] = operations
+        requirement["fulfillment_mode"] = "external_connection"
+        requirement["validation_required"] = True
+        requirement["requires_connection"] = True
+        requirement["status"] = "xvond_build"
+        requirement["delivery_mode"] = "compose"
+
+        compiled_value = dict(compiled_spec)
+        compiled_value["requirements"] = requirements
+        compiled_value, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=agent.id,
+            spec=compiled_value,
+        )
+        builder["compiled_spec"] = compiled_value
+        builder["delivery"] = delivery
+        builder["missing_information"] = list(compiled_value.get("setup_required") or [])
+        # Connection changes alter executable behavior and therefore invalidate
+        # preview evidence for the previous build.
+        builder.pop("last_tested_at", None)
+        builder.pop("last_tested_compiled_at", None)
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        agent.system_prompt = build_compiled_employee_system_prompt(
+            owner_name=company.name,
+            spec=compiled_value,
+        )
+
+        db.commit()
+        return {
+            "status": "connected",
+            "agent_id": agent.id,
+            "requirement_key": key,
+            "integration": {
+                "id": integration.id,
+                "name": integration.name,
+                "type": integration.integration_type,
+            },
+            "compiled_spec": self_service_spec_view(compiled_value),
+            "readiness": self_service_readiness(
+                db,
+                company=company,
+                agent=agent,
+                config=config,
+            ),
         }
     except HTTPException:
         db.rollback()
@@ -1261,7 +1941,40 @@ def save_self_service_setup_answer(
         customer_inputs = dict(compiled_value.get("customer_inputs") or {})
         customer_inputs[key] = answer_value
         compiled_value["customer_inputs"] = customer_inputs
+
+        # Customer input is a build dependency, not a dead-end form. Once all
+        # declared fields are supplied, advance the requirement back into its
+        # declared build stage and re-provision the runtime capability.
+        requirements = [
+            dict(item) if isinstance(item, dict) else item
+            for item in (compiled_value.get("requirements") or [])
+        ]
+        for item in requirements:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("key") or "").strip().lower() != key:
+                continue
+            next_status = str(item.get("after_input_status") or "").strip().lower()
+            if next_status:
+                item["status"] = next_status
+                item["delivery_mode"] = (
+                    "compose" if next_status == "xvond_build" else item.get("delivery_mode")
+                )
+            break
+        compiled_value["requirements"] = requirements
+
+        compiled_value, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=agent.id,
+            spec=compiled_value,
+        )
         builder["compiled_spec"] = compiled_value
+        builder["delivery"] = delivery
+        builder["missing_information"] = list(compiled_value.get("setup_required") or [])
+        # Setup data changes the employee's executable behavior. A preview from
+        # before this change cannot authorize launch of the updated build.
+        builder.pop("last_tested_at", None)
+        builder.pop("last_tested_compiled_at", None)
         settings_value["employee_builder"] = builder
         config.settings = settings_value
 
@@ -1275,6 +1988,7 @@ def save_self_service_setup_answer(
             "status": "saved",
             "agent_id": agent.id,
             "requirement_key": key,
+            "compiled_spec": self_service_spec_view(compiled_value),
             "readiness": self_service_readiness(
                 db,
                 company=company,
@@ -1391,6 +2105,16 @@ def launch_self_service_employee(
             agent=agent,
             config=config,
         )
+        builder = dict((config.settings or {}).get("employee_builder") or {})
+        compiled_at = str(builder.get("compiled_at") or "").strip()
+        if not compiled_at or str(builder.get("last_tested_compiled_at") or "").strip() != compiled_at:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "Test the current employee build before launch",
+                    "blockers": ["Run Preview & Test once after the latest build or revision"],
+                },
+            )
         if not state["ready"]:
             raise HTTPException(
                 409,
@@ -1646,6 +2370,14 @@ def test_draft_employee(
             selected=selected,
             response=response,
         )
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        builder["last_tested_at"] = now_iso
+        builder["last_tested_compiled_at"] = builder.get("compiled_at")
+        builder["test_count"] = int(builder.get("test_count") or 0) + 1
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
         db.commit()
         return {
             "agent_id": agent.id,

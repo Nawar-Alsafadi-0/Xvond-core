@@ -75,7 +75,10 @@ def test_customer_portal_treats_job_brief_as_source_of_truth():
     assert "Capabilities" not in source
     assert "/customer/employee-builder/create" not in source
     assert "/customer/employee-builder/preview" not in source
-    assert "/customer/employee-builder/${employee.agent_id}/test" not in source
+    assert "/customer/employee-builder/${agentId}/test" in source
+    assert "Preview & Test" in source
+    assert "employee-refine-instruction" in source
+    assert "Version history" in source
 
 
 def test_xvond_com_nginx_exposes_public_builder_without_replacing_landing():

@@ -36,11 +36,15 @@ def test_encrypted_integration_is_validated_and_redacted():
         config={
             "base_url": "https://example.com",
             "api_key": "secret",
+            "validation_endpoint": "/me",
         },
     )
 
     assert item.config["api_key"].startswith(ENCRYPTED_PREFIX)
     result = serialize_integration(item)
     assert result["configured"] is True
-    assert result["config"] == {"base_url": "https://example.com"}
+    assert result["config"] == {
+        "base_url": "https://example.com",
+        "validation_endpoint": "/me",
+    }
     assert result["configured_secret_fields"] == ["api_key"]

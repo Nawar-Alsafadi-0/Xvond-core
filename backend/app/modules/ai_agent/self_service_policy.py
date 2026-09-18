@@ -37,6 +37,8 @@ from backend.app.modules.channels.catalog import (
 )
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
+from backend.app.modules.integrations.catalog import integration_validation_ready
+from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.knowledge.models import AgentKnowledge, KnowledgeDocument
 
 
@@ -143,7 +145,7 @@ def self_service_connection_status(item: dict) -> str | None:
         return None
     kind = str(item.get("kind") or "").strip().lower()
     if kind != "channel":
-        return "xvond_adapter_required"
+        return "self_service_integration_available"
 
     key = canonical_channel_type(item.get("key"))
     if key == "xvond_workspace":
@@ -746,6 +748,11 @@ def self_service_readiness(
         company_id=company.id,
         agent_id=agent.id,
     )
+    connected_system_setup = _connected_system_setup(
+        db,
+        company_id=company.id,
+        spec=spec or {},
+    )
     state = evaluate_readiness(
         subscribed=bool(billing["active"]),
         channel_limit=billing["channel_limit"],
@@ -755,6 +762,12 @@ def self_service_readiness(
         provisioned=provisioned,
         resolved_requirements=resolved_requirements,
     )
+    state["connected_system_setup"] = connected_system_setup
+    if connected_system_setup:
+        state["ready"] = False
+        state["blockers"].extend(
+            item["message"] for item in connected_system_setup
+        )
     provider_ready = _self_service_provider_ready(
         db,
         company_id=company.id,
@@ -776,6 +789,63 @@ def self_service_readiness(
     state["employee_source"] = SELF_SERVICE_SOURCE
     state["lifecycle"] = "live" if agent.enabled else "draft"
     return state
+
+
+def _connected_system_setup(db, *, company_id: int, spec: dict) -> list[dict]:
+    """Re-check customer-owned execution connections at every readiness read."""
+
+    setup: list[dict] = []
+    for requirement in spec.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        if requirement.get("validation_required") is not True:
+            continue
+
+        key = normalize_requirement_key(requirement.get("key")) or "connected_system"
+        integration_id = requirement.get("integration_id")
+        try:
+            integration_id = int(integration_id)
+        except (TypeError, ValueError):
+            integration_id = 0
+
+        integration = None
+        if integration_id:
+            integration = (
+                db.query(CompanyIntegration)
+                .filter(
+                    CompanyIntegration.id == integration_id,
+                    CompanyIntegration.company_id == company_id,
+                    CompanyIntegration.enabled.is_(True),
+                )
+                .first()
+            )
+
+        label = str(requirement.get("purpose") or key.replace("_", " ")).strip()
+        if integration is None:
+            requirement["execution_status"] = "setup_required"
+            message = f"Reconnect the connected system for {label} before launch"
+            reason = "unavailable"
+            name = None
+        elif not integration_validation_ready(reveal_config(integration.config) or {}):
+            requirement["execution_status"] = "setup_required"
+            message = f"Validate {integration.name} again before launch"
+            reason = "validation_required"
+            name = integration.name
+        else:
+            if requirement.get("execution_status") == "setup_required":
+                requirement["execution_status"] = "ready"
+            continue
+
+        setup.append(
+            {
+                "requirement_key": key,
+                "integration_id": integration_id or None,
+                "integration_name": name,
+                "reason": reason,
+                "message": message,
+            }
+        )
+    return setup
 
 
 def assert_self_service_runtime_subscription(db, *, company_id: int) -> None:

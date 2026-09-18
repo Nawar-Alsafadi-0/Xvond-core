@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from backend.app.modules.ai_agent.employee_capability_builder import (
+    build_internal_booking_action_config,
+    build_internal_record_action_config,
     build_managed_action_config,
 )
 from backend.app.modules.ai_agent.employee_compiler import (
@@ -368,15 +370,20 @@ def test_compiler_smart_intake_keeps_known_facts_and_asks_only_for_missing_requi
         "working_hours",
         "booking_capacity",
     ]
-    context = next(x for x in spec["requirements"] if x["key"] == "employee_context")
-    assert context["status"] == "customer_input_required"
-    assert context["customer_inputs"] == ["working_hours", "booking_capacity"]
-    assert context["customer_input_labels"] == {
-        "working_hours": "أوقات الدوام",
-        "booking_capacity": "سعة الحجز",
+    booking = next(x for x in spec["requirements"] if x["key"] == "booking")
+    assert booking["fulfillment_mode"] == "xvond_internal"
+    assert booking["status"] == "customer_input_required"
+    assert set(booking["customer_inputs"]) == {
+        "working_days",
+        "opening_time",
+        "closing_time",
+        "slot_minutes",
+        "capacity",
     }
-    assert "business_name" not in context["customer_inputs"]
-    assert "employee_context" in spec["setup_required"]
+    assert "employee_context" not in {
+        item["key"] for item in spec["requirements"]
+    }
+    assert spec["setup_required"] == ["booking", "whatsapp"]
 
 
 def test_compiled_runtime_prompt_includes_grounded_job_brief_context():
@@ -398,3 +405,140 @@ def test_compiled_runtime_prompt_includes_grounded_job_brief_context():
     prompt = build_compiled_employee_system_prompt(owner_name="Workspace", spec=spec)
     assert "KNOWN CONTEXT EXTRACTED FROM THE JOB BRIEF" in prompt
     assert "اسم المطعم: بيت الشام" in prompt
+
+
+def test_booking_defaults_to_xvond_internal_and_asks_only_for_missing_schedule_facts():
+    response = """{
+      "role":"Booking employee",
+      "scope":"business",
+      "summary":"Handle appointments.",
+      "tasks":[{"name":"Appointments","description":"Book appointments","trigger":"customer request"}],
+      "requirements":[{
+        "key":"booking",
+        "kind":"module",
+        "purpose":"Create and manage appointments",
+        "requires_connection":false,
+        "fulfillment_mode":"xvond_internal",
+        "runtime_inputs":{"opening_time":"09:00"},
+        "customer_inputs":[]
+      }],
+      "permissions":[{"action":"booking","mode":"ask_before"}],
+      "setup_questions":[]
+    }"""
+    spec = parse_compiler_response(
+        response,
+        job_brief="بدي موظف يحجز مواعيد، الدوام بيفتح الساعة 09:00",
+    )
+    booking = next(item for item in spec["requirements"] if item["key"] == "booking")
+
+    assert booking["fulfillment_mode"] == "xvond_internal"
+    assert booking["status"] == "customer_input_required"
+    assert booking["after_input_status"] == "xvond_build"
+    assert booking["runtime_inputs"]["opening_time"] == "09:00"
+    assert set(booking["customer_inputs"]) == {
+        "working_days",
+        "closing_time",
+        "slot_minutes",
+    }
+
+
+def test_booking_explicit_external_system_stays_connection_required():
+    response = """{
+      "role":"Booking employee",
+      "scope":"business",
+      "summary":"Use the clinic's existing booking system.",
+      "tasks":[],
+      "requirements":[{
+        "key":"booking",
+        "kind":"integration",
+        "purpose":"Use Acme Scheduler for appointments",
+        "requires_connection":true,
+        "fulfillment_mode":"external_connection",
+        "customer_inputs":[]
+      }],
+      "permissions":[{"action":"booking","mode":"ask_before"}],
+      "setup_questions":[]
+    }"""
+    spec = parse_compiler_response(
+        response,
+        job_brief="اربط الموظف مع نظام Acme Scheduler الموجود عندي للحجوزات",
+    )
+    booking = spec["requirements"][0]
+    assert booking["status"] == "connection_required"
+    assert booking["fulfillment_mode"] == "external_connection"
+
+
+def test_internal_booking_action_builds_real_schedule_from_customer_setup():
+    spec = {
+        "permissions": [{"action": "booking", "mode": "ask_before"}],
+        "customer_inputs": {
+            "booking": {
+                "working_days": "Sunday-Thursday",
+                "opening_time": "9:00 am",
+                "closing_time": "5:30 pm",
+                "slot_minutes": "30 minutes",
+            }
+        },
+    }
+    requirement = {
+        "key": "booking",
+        "purpose": "Book appointments",
+        "fulfillment_mode": "xvond_internal",
+        "runtime_inputs": {},
+    }
+
+    action = build_internal_booking_action_config(requirement=requirement, spec=spec)
+
+    assert action["destination"]["type"] == "xvond_internal"
+    assert action["destination"]["adapter"] == "booking"
+    assert action["availability"]["mode"] == "xvond_schedule"
+    assert action["availability"]["schedule"] == {
+        "weekdays": [0, 1, 2, 3, 6],
+        "start": "09:00",
+        "end": "17:30",
+        "slot_minutes": 30,
+        "capacity": 1,
+    }
+    assert action["_xvond_booking_setup_ready"] is True
+
+
+def test_xvond_native_business_records_are_real_portal_capabilities():
+    spec = {
+        "permissions": [{"action": "lead_management", "mode": "automatic"}],
+    }
+    requirement = {
+        "key": "lead_management",
+        "purpose": "Capture and follow up sales leads",
+        "fulfillment_mode": "xvond_internal",
+    }
+    action = build_internal_record_action_config(requirement=requirement, spec=spec)
+
+    assert action["module"] == "lead_management"
+    assert action["destination"]["type"] == "xvond_internal"
+    assert action["destination"]["adapter"] == "business_record"
+    assert action["destination"]["record_type"] == "lead_management"
+    assert any(field["key"] == "interest" and field["required"] for field in action["fields"])
+    assert action["confirmation_required"] is False
+
+
+def test_external_booking_action_keeps_real_integration_and_provider_endpoints():
+    spec = {"permissions": [{"action": "booking", "mode": "ask_before"}]}
+    requirement = {
+        "key": "booking",
+        "purpose": "Use existing booking system",
+        "fulfillment_mode": "external_connection",
+        "integration_id": 41,
+        "validation_required": True,
+        "integration_operations": {
+            "availability": {"method": "POST", "endpoint": "/availability"},
+            "execute": {"method": "POST", "endpoint": "/bookings"},
+        },
+    }
+    action = build_managed_action_config(requirement=requirement, spec=spec)
+
+    assert action["module"] == "booking"
+    assert action["destination"]["type"] == "integration"
+    assert action["destination"]["integration_id"] == 41
+    assert action["destination"]["validation_required"] is True
+    assert action["destination"]["operations"]["execute"]["endpoint"] == "/bookings"
+    assert action["availability"]["mode"] == "integration"

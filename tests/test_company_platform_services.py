@@ -82,7 +82,12 @@ def test_ai_agent_limit_usage_counts_provisioned_agents():
 
 def test_integration_config_requires_real_required_fields():
     assert validate_integration_config(
-        "pos", {"base_url": "https://pos.example.com", "api_key": "secret"}
+        "pos",
+        {
+            "base_url": "https://pos.example.com",
+            "api_key": "secret",
+            "validation_endpoint": "/account",
+        },
     ) is True
     assert validate_integration_config(
         "webhook", {"url": "https://hooks.example.com/xvond"}
@@ -90,6 +95,11 @@ def test_integration_config_requires_real_required_fields():
 
     with pytest.raises(ValueError, match="base_url"):
         validate_integration_config("crm", {})
+
+    with pytest.raises(ValueError, match="validation_endpoint"):
+        validate_integration_config(
+            "crm", {"base_url": "https://crm.example.com"}
+        )
 
     with pytest.raises(ValueError, match="Unsupported integration type"):
         validate_integration_config("unknown", {})

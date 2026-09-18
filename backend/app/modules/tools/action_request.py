@@ -9,6 +9,7 @@ from backend.app.core.http_security import safe_http_request, validate_public_ht
 from backend.app.modules.ai_agent.models import AIMessage
 from backend.app.modules.channels.handoff import activate_human_handoff
 from backend.app.modules.channels.whatsapp_models import WhatsAppSession
+from backend.app.modules.integrations.catalog import integration_validation_ready
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.tools.base import AgentTool, ToolResult
 from backend.app.modules.tools.business_models import ActionRequest, HumanHandoff
@@ -300,7 +301,17 @@ def _integration_call(
             error="Configured integration is unavailable",
         )
     config = reveal_config(integration.config) or {}
+    if (
+        destination.get("validation_required") is True
+        and not integration_validation_ready(config)
+    ):
+        return ToolResult(
+            success=False,
+            error="Configured integration must be validated again before use",
+        )
     operations = destination.get("operations") or {}
+    if not operations and isinstance(config.get("operations"), dict):
+        operations = config.get("operations") or {}
     op_config = operations.get(operation) if isinstance(operations, dict) else None
     if not isinstance(op_config, dict):
         op_config = destination

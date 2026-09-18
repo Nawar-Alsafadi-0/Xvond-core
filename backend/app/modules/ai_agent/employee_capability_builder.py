@@ -6,8 +6,11 @@ from urllib.parse import urlparse
 
 from backend.app.core.config_secrets import reveal_config
 from backend.app.models.company import Company
+from backend.app.models.company_module import CompanyModule
 from backend.app.models.company_profile import CompanyProfile
 from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.integrations.catalog import integration_validation_ready
+from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.automation.schedule import ScheduleConfigError, normalize_schedule_config
 from backend.app.modules.ai_agent.employee_compiler import normalize_requirement_key
@@ -17,6 +20,259 @@ from backend.app.modules.tools.models import AgentToolAssignment
 MANAGED_STATUS = "xvond_managed"
 BUILD_STATUS = "xvond_build"
 CUSTOMER_STATUSES = {"connection_required", "customer_input_required"}
+
+
+_WEEKDAY_ALIASES = {
+    "monday": 0, "mon": 0, "الاثنين": 0, "الإثنين": 0,
+    "tuesday": 1, "tue": 1, "الثلاثاء": 1,
+    "wednesday": 2, "wed": 2, "الأربعاء": 2, "الاربعاء": 2,
+    "thursday": 3, "thu": 3, "الخميس": 3,
+    "friday": 4, "fri": 4, "الجمعة": 4,
+    "saturday": 5, "sat": 5, "السبت": 5,
+    "sunday": 6, "sun": 6, "الأحد": 6, "الاحد": 6,
+}
+
+
+def _requirement_inputs(spec: dict, requirement: dict) -> dict:
+    values = dict(requirement.get("runtime_inputs") or {})
+    answers = spec.get("customer_inputs") or {}
+    if isinstance(answers, dict):
+        item = answers.get(str(requirement.get("key") or "").strip())
+        if isinstance(item, dict):
+            for key, value in item.items():
+                if str(value or "").strip():
+                    values[str(key).strip()] = str(value).strip()
+    return values
+
+
+def _parse_weekdays(value) -> list[int]:
+    if isinstance(value, list):
+        source = " ".join(str(item or "") for item in value)
+    else:
+        source = str(value or "")
+    normalized = " ".join(source.strip().lower().replace("،", ",").split())
+    result: list[int] = []
+
+    # Support a common contiguous range such as Sunday-Thursday.
+    range_match = re.search(
+        r"([A-Za-z]+|الأحد|الاحد|الاثنين|الإثنين|الثلاثاء|الأربعاء|الاربعاء|الخميس|الجمعة|السبت)\s*[-–—]\s*"
+        r"([A-Za-z]+|الأحد|الاحد|الاثنين|الإثنين|الثلاثاء|الأربعاء|الاربعاء|الخميس|الجمعة|السبت)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if range_match:
+        start = _WEEKDAY_ALIASES.get(range_match.group(1).lower())
+        end = _WEEKDAY_ALIASES.get(range_match.group(2).lower())
+        if start is not None and end is not None:
+            cursor = start
+            for _ in range(7):
+                if cursor not in result:
+                    result.append(cursor)
+                if cursor == end:
+                    break
+                cursor = (cursor + 1) % 7
+
+    for alias, day in _WEEKDAY_ALIASES.items():
+        if re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", normalized, flags=re.IGNORECASE):
+            if day not in result:
+                result.append(day)
+
+    for token in re.findall(r"(?<!\d)([0-6])(?!\d)", normalized):
+        day = int(token)
+        if day not in result:
+            result.append(day)
+    return sorted(result)
+
+
+def _valid_hhmm(value) -> str | None:
+    raw = str(value or "").strip().lower().replace(".", "")
+    match = re.fullmatch(r"(\d{1,2})(?::([0-5]\d))?\s*(am|pm)?", raw)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    meridiem = match.group(3)
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        if meridiem == "pm" and hour != 12:
+            hour += 12
+        if meridiem == "am" and hour == 12:
+            hour = 0
+    elif not 0 <= hour <= 23:
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def build_internal_booking_action_config(*, requirement: dict, spec: dict) -> dict:
+    values = _requirement_inputs(spec, requirement)
+    weekdays = _parse_weekdays(values.get("working_days"))
+    start = _valid_hhmm(values.get("opening_time"))
+    end = _valid_hhmm(values.get("closing_time"))
+    try:
+        slot_match = re.search(r"\d+", str(values.get("slot_minutes") or ""))
+        slot_minutes = int(slot_match.group(0)) if slot_match else 0
+    except ValueError:
+        slot_minutes = 0
+    slot_minutes = slot_minutes if 5 <= slot_minutes <= 720 else 0
+    try:
+        capacity_match = re.search(r"\d+", str(values.get("capacity") or ""))
+        capacity = int(capacity_match.group(0)) if capacity_match else 1
+    except ValueError:
+        capacity = 1
+    capacity = max(1, min(capacity, 100))
+
+    schedule_ready = bool(weekdays and start and end and slot_minutes)
+    fields = [
+        {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
+        {"key": "phone", "label": "Phone", "required": True, "type": "phone"},
+        {"key": "service", "label": "Service", "required": True, "type": "text"},
+        {"key": "date", "label": "Date", "required": True, "type": "date", "role": "date"},
+        {"key": "time", "label": "Time", "required": True, "type": "time", "role": "time"},
+        {"key": "notes", "label": "Notes", "required": False, "type": "text"},
+    ]
+    action = {
+        "enabled": _permission_mode(spec, requirement) != "never",
+        "label": str(requirement.get("purpose") or "Booking").strip()[:200] or "Booking",
+        "description": str(requirement.get("purpose") or "Create and manage bookings").strip()[:1000],
+        "module": "booking",
+        "fields": fields,
+        "confirmation_required": _permission_mode(spec, requirement) != "automatic",
+        "destination": {
+            "type": "xvond_internal",
+            "adapter": "booking",
+            "delivery_mode": "native",
+        },
+        "availability": {
+            "mode": "xvond_schedule" if schedule_ready else "none",
+            "date_field": "date",
+            "time_field": "time",
+            "schedule": {
+                "weekdays": weekdays,
+                "start": start,
+                "end": end,
+                "slot_minutes": slot_minutes or None,
+                "capacity": capacity,
+            },
+        },
+        "xvond_generated": True,
+    }
+    action["_xvond_booking_setup_ready"] = schedule_ready
+    return action
+
+
+def build_internal_record_action_config(*, requirement: dict, spec: dict) -> dict:
+    key = str(requirement.get("key") or "business_request").strip()
+    purpose = str(requirement.get("purpose") or key.replace("_", " ")).strip()
+    definitions = {
+        "lead_management": {
+            "module": "lead_management",
+            "fields": [
+                {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
+                {"key": "phone", "label": "Phone", "required": False, "type": "phone"},
+                {"key": "email", "label": "Email", "required": False, "type": "email"},
+                {"key": "interest", "label": "Interest", "required": True, "type": "text"},
+                {"key": "notes", "label": "Notes", "required": False, "type": "text"},
+            ],
+        },
+        "orders": {
+            "module": "orders",
+            "fields": [
+                {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
+                {"key": "phone", "label": "Phone", "required": True, "type": "phone"},
+                {"key": "items", "label": "Order items", "required": True, "type": "text"},
+                {"key": "address", "label": "Delivery / pickup details", "required": False, "type": "text"},
+                {"key": "notes", "label": "Notes", "required": False, "type": "text"},
+            ],
+        },
+        "quotation": {
+            "module": "quotation",
+            "fields": [
+                {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
+                {"key": "contact", "label": "Contact", "required": True, "type": "text"},
+                {"key": "request", "label": "Quotation request", "required": True, "type": "text"},
+                {"key": "notes", "label": "Notes", "required": False, "type": "text"},
+            ],
+        },
+        "customer_support": {
+            "module": "customer_support",
+            "fields": [
+                {"key": "customer_name", "label": "Customer name", "required": False, "type": "text"},
+                {"key": "contact", "label": "Contact", "required": False, "type": "text"},
+                {"key": "issue", "label": "Issue", "required": True, "type": "text"},
+                {"key": "priority", "label": "Priority", "required": False, "type": "text"},
+            ],
+        },
+    }
+    definition = definitions.get(key)
+    if definition is None:
+        raise ValueError(f"No Xvond-native record definition for {key}")
+    return {
+        "enabled": _permission_mode(spec, requirement) != "never",
+        "label": purpose[:200] or key,
+        "description": purpose[:1000],
+        "module": definition["module"],
+        "fields": definition["fields"],
+        "confirmation_required": _permission_mode(spec, requirement) != "automatic",
+        "destination": {
+            "type": "xvond_internal",
+            "adapter": "business_record",
+            "record_type": key,
+            "delivery_mode": "native",
+        },
+        "availability": {"mode": "none"},
+        "xvond_generated": True,
+    }
+
+
+def build_external_integration_action_config(*, requirement: dict, spec: dict) -> dict:
+    key = str(requirement.get("key") or "connected_action").strip()
+    purpose = str(requirement.get("purpose") or key.replace("_", " ")).strip()
+    integration_id = requirement.get("integration_id")
+    operations = requirement.get("integration_operations")
+    operations = dict(operations) if isinstance(operations, dict) else {}
+
+    fields = []
+    availability = {"mode": "none"}
+    if key == "booking":
+        fields = [
+            {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
+            {"key": "phone", "label": "Phone", "required": True, "type": "phone"},
+            {"key": "service", "label": "Service", "required": True, "type": "text"},
+            {"key": "date", "label": "Date", "required": True, "type": "date", "role": "date"},
+            {"key": "time", "label": "Time", "required": True, "type": "time", "role": "time"},
+            {"key": "notes", "label": "Notes", "required": False, "type": "text"},
+        ]
+        if isinstance(operations.get("availability"), dict):
+            availability = {
+                "mode": "integration",
+                "date_field": "date",
+                "time_field": "time",
+            }
+
+    module_map = {
+        "booking": "booking",
+        "orders": "orders",
+        "lead_management": "lead_management",
+        "quotation": "quotation",
+        "customer_support": "customer_support",
+    }
+    return {
+        "enabled": _permission_mode(spec, requirement) != "never",
+        "label": purpose[:200] or key,
+        "description": purpose[:1000],
+        "module": module_map.get(key, "tools"),
+        "fields": fields,
+        "confirmation_required": _permission_mode(spec, requirement) != "automatic",
+        "destination": {
+            "type": "integration",
+            "integration_id": integration_id,
+            "operations": operations,
+            "validation_required": requirement.get("validation_required") is True,
+        },
+        "availability": availability,
+        "xvond_generated": True,
+    }
 
 
 def _permission_mode(spec: dict, requirement: dict) -> str:
@@ -67,6 +323,14 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
         for item in (requirement.get("primitives") or ["workflow_engine"])
         if str(item).strip()
     ]
+    fulfillment_mode = str(requirement.get("fulfillment_mode") or "")
+    if key == "booking" and fulfillment_mode == "xvond_internal":
+        return build_internal_booking_action_config(requirement=requirement, spec=spec)
+    if key in {"lead_management", "orders", "quotation", "customer_support"} and fulfillment_mode == "xvond_internal":
+        return build_internal_record_action_config(requirement=requirement, spec=spec)
+    if fulfillment_mode == "external_connection" and requirement.get("integration_id"):
+        return build_external_integration_action_config(requirement=requirement, spec=spec)
+
     return {
         "enabled": _permission_mode(spec, requirement) != "never",
         "label": purpose[:200] or key,
@@ -109,6 +373,38 @@ def _scheduled_runtime_fields(requirement: dict) -> list[str]:
         if key and key not in result:
             result.append(key)
     return result
+
+
+BUSINESS_MODULE_KEYS = {
+    "booking",
+    "orders",
+    "lead_management",
+    "quotation",
+    "customer_support",
+}
+
+
+def _enable_company_module(db, company_id: int, module_name: str) -> None:
+    if module_name not in BUSINESS_MODULE_KEYS:
+        return
+    row = (
+        db.query(CompanyModule)
+        .filter(
+            CompanyModule.company_id == company_id,
+            CompanyModule.module_name == module_name,
+        )
+        .first()
+    )
+    if row is None:
+        db.add(
+            CompanyModule(
+                company_id=company_id,
+                module_name=module_name,
+                enabled=True,
+            )
+        )
+    else:
+        row.enabled = True
 
 
 def _company_context(db, agent_id: int) -> tuple[Company | None, str | None]:
@@ -291,6 +587,37 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
         destination = action.get("destination") or {}
         if not action.get("enabled", True) or (assignment is not None and not assignment.enabled):
             execution_status = "disabled"
+        elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "booking":
+            execution_status = (
+                "ready"
+                if action.get("_xvond_booking_setup_ready") is True
+                else "setup_required"
+            )
+        elif destination.get("type") == "integration":
+            integration_id = destination.get("integration_id")
+            integration = None
+            if company is not None and integration_id:
+                integration = (
+                    db.query(CompanyIntegration)
+                    .filter(
+                        CompanyIntegration.id == int(integration_id),
+                        CompanyIntegration.company_id == company.id,
+                        CompanyIntegration.enabled.is_(True),
+                    )
+                    .first()
+                )
+            validation_ready = bool(
+                integration is not None
+                and (
+                    destination.get("validation_required") is not True
+                    or integration_validation_ready(
+                        reveal_config(integration.config) or {}
+                    )
+                )
+            )
+            execution_status = "ready" if validation_ready else "setup_required"
+        elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "business_record":
+            execution_status = "ready"
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "generic_capability":
             plan = destination.get("execution_plan") or []
             needs_http = any(
@@ -335,6 +662,10 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                 "workflow_id": schedule_workflow_id,
                 "status": schedule_status,
             }
+        if company is not None:
+            module_name = str(action.get("module") or "").strip()
+            _enable_company_module(db, company.id, module_name)
+
         action_plan[key] = {
             "tool_name": "action_request",
             "action_type": key,
