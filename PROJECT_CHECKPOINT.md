@@ -267,9 +267,13 @@ Self-Service plan flow currently behaves truthfully:
 - an active subscription is not silently replaced by a customer plan change
 - when Xvond/Admin activates a pending paid subscription, its billing period starts from activation time
 
-Xvond Core now has a provider-neutral online checkout boundary with Paddle as the first implementation. Paid plan selection creates a provider transaction/checkout only when billing is configured; entitlement remains `pending_payment` until a cryptographically verified payment webhook confirms completion. Checkout records and provider event identities are durable and webhook processing is idempotent. Subscription lifecycle events can activate, pause/past-due or cancel runtime entitlement.
+Xvond Core has a provider-neutral online checkout boundary. Paddle remains an optional adapter, while Tap Payments is the intended Gulf/Oman production payment path.
 
-Online billing remains disabled by default until the production Merchant-of-Record account is approved and `BILLING_PROVIDER=paddle`, live API/webhook credentials, recurring price mappings and the production checkout/webhook URLs are configured. Code readiness must not be described as a live payment path before a sandbox and then real-money acceptance test succeeds.
+Tap checkout uses the hosted Charges API: Xvond creates a server-side charge with tenant/subscription metadata, a stable idempotency reference, the Xvond webhook URL and a redirect URL. Xvond never receives raw card data. Paid entitlement remains `pending_payment` until a Tap `CAPTURED` webhook passes Tap hashstring verification and is persisted as same-company/same-checkout payment evidence. Tap failed/unknown charge outcomes never grant entitlement.
+
+Tap recurring billing is intentionally feature-gated by the merchant account. The first charge can request `save_card=true`, but production recurring charges must not be claimed until Tap has enabled Save Card/recurring capability and the real account returns Customer ID, Card ID and Payment Agreement ID for the accepted flow. Tap requires a new one-time token from the saved card for each merchant-initiated recurring charge.
+
+Online billing remains disabled by default. For Tap production, `BILLING_PROVIDER=tap`, a live `sk_live_` key, Merchant ID, HTTPS public origin/redirect, signed webhook acceptance and at least one real charge are required before the paid Self-Service path is service-ready.
 
 ## Security and privacy
 
@@ -408,7 +412,7 @@ Highest-priority remaining external/product work:
 1. Merge and deploy the final Market Launch Gate release on the canonical production server.
 2. Configure production Workflow Engine route registries/secrets and provision one real Telegram bot; prove Telegram inbound -> Xvond employee -> durable provider-confirmed outbound -> handoff -> Return to AI.
 3. Configure Meta Messaging app permissions/subscriptions and real Instagram/Messenger routes; validate raw-body signature handling and one real inbound/outbound round trip for each launch channel.
-4. Configure/approve the production Merchant-of-Record account, recurring prices and signed webhook destination; run sandbox and then one real paid Self-Service checkout so tenant-scoped payment evidence exists.
+4. Re-activate Tap Payments, configure the live Tap key/Merchant ID and webhook/redirect paths, run sandbox then one real `CAPTURED` Self-Service charge, and confirm whether Save Card/recurring capability is enabled before turning on automatic renewals.
 5. Run the final Self-Service market gate for signup -> Job Brief -> Smart Intake -> plan/payment -> build -> setup -> launch -> conversation/action -> handoff/resume on the exact channels being sold.
 6. Run one Managed-customer market gate through Xvond Admin to prove operator-built and Self-Service employees converge on the same runtime without sharing lifecycle UX.
 7. After those external gates pass, the reviewed release can be truthfully exposed as the public/global Xvond AI Employee launch. Email/SMS/Slack/Teams/Custom remain custom Xvond setup until packaged provider bindings are intentionally added.
