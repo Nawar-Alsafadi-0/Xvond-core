@@ -17,6 +17,9 @@ ALLOWED_GRAPH_NODE_TYPES = {
     "filter",
     "aggregate",
     "web_fetch",
+    "state_read",
+    "state_write",
+    "state_delete",
 }
 
 
