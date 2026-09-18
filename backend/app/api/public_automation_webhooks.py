@@ -5,6 +5,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from backend.app.core.database.connection import SessionLocal
 from backend.app.core.execution_claims import execution_claims
 from backend.app.models.company import Company
+from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.automation.runtime import automation_runtime
 from backend.app.modules.automation.webhook_auth import verify_automation_webhook_key
@@ -51,6 +52,20 @@ async def automation_webhook(
         company = db.query(Company).filter(Company.id == workflow.company_id).first()
         if company is None or not company.active or str(company.lifecycle_status or "").lower() != "live":
             raise HTTPException(409, "Automation company is not live")
+
+        trigger_config = workflow.trigger_config if isinstance(workflow.trigger_config, dict) else {}
+        generated_agent_id = int(trigger_config.get("_xvond_agent_id") or 0)
+        if generated_agent_id:
+            employee = (
+                db.query(AIAgent)
+                .filter(
+                    AIAgent.id == generated_agent_id,
+                    AIAgent.company_id == workflow.company_id,
+                )
+                .first()
+            )
+            if employee is None or not employee.enabled:
+                raise HTTPException(409, "AI employee is not live")
 
         if not verify_automation_webhook_key(
             supplied_key,
