@@ -682,6 +682,7 @@ def send_human_reply(
         audit_details = {"delivery": delivery, "assigned_user_id": current_user.id}
         message = None
         delivery_row = None
+        gateway_delivery_state = None
 
         if delivery == "whatsapp":
             session = _session(db, current_user.company_id, conversation.id)
@@ -852,10 +853,19 @@ def send_human_reply(
                 raise HTTPException(503, "Managed channel delivery is temporarily unavailable") from exc
             if gateway_result.get("success") is not True:
                 raise HTTPException(502, "Managed channel delivery failed")
+            provider_data = (
+                gateway_result.get("data")
+                if isinstance(gateway_result.get("data"), dict)
+                else {}
+            )
+            gateway_delivery_state = {
+                "success": True,
+                "provider_message_id": provider_data.get("provider_message_id"),
+            }
             audit_details.update(
                 {
                     "idempotency_key": source_key,
-                    "provider_result": gateway_result.get("data"),
+                    "provider_message_id": provider_data.get("provider_message_id"),
                 }
             )
         else:
@@ -880,7 +890,7 @@ def send_human_reply(
             "delivery_state": (
                 delivery_payload(delivery_row)
                 if delivery_row is not None
-                else gateway_result
+                else gateway_delivery_state
                 if delivery == "xvond_managed_channel"
                 else None
             ),
