@@ -10,6 +10,7 @@ from backend.app.core.config_secrets import (
 )
 from backend.app.core.database.connection import SessionLocal
 from backend.app.core.dependencies import require_xvond_admin
+from backend.app.core.n8n_channel_gateway import N8NChannelGatewayError, n8n_channel_gateway
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
 from backend.app.models.user import User
@@ -18,6 +19,7 @@ from backend.app.modules.audit.service import audit_service
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.channels.catalog import (
     CHANNEL_RUNTIME_LIVE,
+    N8N_CHANNEL_RUNTIME_ADAPTER,
     canonical_channel_type,
     get_channel_capability,
     get_channel_definition,
@@ -101,8 +103,44 @@ def serialize_channel(
     verify_connection: bool = False,
 ) -> dict:
     channel_config = reveal_config(channel.config)
+    capability = get_channel_capability(channel.channel_type) or {}
     configured = _channel_configured(channel, channel_config)
-    if channel.channel_type == "whatsapp":
+    if capability.get("runtime_adapter") == N8N_CHANNEL_RUNTIME_ADAPTER:
+        configured = (
+            str(channel_config.get("provisioning_state") or "").strip().lower()
+            == "connected"
+        )
+        connection = {
+            "connected": configured,
+            "meta_onboarding_complete": False,
+            "connection_status": "connected" if configured else "provisioning_required",
+            "connection_issue": (
+                None
+                if configured
+                else "Xvond managed channel provisioning is not complete."
+            ),
+            "connection_checked_at": None,
+            "meta_error_code": None,
+        }
+        if verify_connection and configured:
+            try:
+                check = n8n_channel_gateway.check_channel(
+                    company_id=channel.company_id,
+                    agent_id=channel.agent_id,
+                    channel_id=channel.id,
+                    channel_type=canonical_channel_type(channel.channel_type),
+                )
+                live = bool(check.get("success") and (check.get("data") or {}).get("connected"))
+                connection["connected"] = live
+                connection["connection_status"] = "connected" if live else "unavailable"
+                connection["connection_issue"] = (
+                    None if live else "Xvond managed channel workflow route is unavailable."
+                )
+            except N8NChannelGatewayError:
+                connection["connected"] = False
+                connection["connection_status"] = "unavailable"
+                connection["connection_issue"] = "Xvond managed channel workflow route is unavailable."
+    elif channel.channel_type == "whatsapp":
         connection = whatsapp_connection_state(
             channel_config,
             verify_remote=verify_connection,
@@ -119,7 +157,6 @@ def serialize_channel(
             "meta_error_code": None,
         }
 
-    capability = get_channel_capability(channel.channel_type) or {}
     if capability.get("runtime_state") != CHANNEL_RUNTIME_LIVE:
         connection = {
             "connected": False,
@@ -279,6 +316,30 @@ def _activation_blockers(db, channel: AgentChannel) -> list[str]:
             blockers.append("Voice: Xvond managed provisioning is not complete")
         elif any(not str(channel_config.get(item) or "").strip() for item in required):
             blockers.append("Voice: Vapi provisioning evidence is incomplete")
+    elif capability.get("runtime_adapter") == N8N_CHANNEL_RUNTIME_ADAPTER:
+        if str(channel_config.get("provisioning_state") or "").strip().lower() != "connected":
+            blockers.append(
+                f"{capability.get('name') or channel_type.title()}: Xvond managed provisioning is not complete"
+            )
+        elif not n8n_channel_gateway.configured():
+            blockers.append("Xvond managed channel gateway is not configured")
+        else:
+            try:
+                route = n8n_channel_gateway.check_channel(
+                    company_id=channel.company_id,
+                    agent_id=channel.agent_id,
+                    channel_id=channel.id,
+                    channel_type=channel_type,
+                )
+            except N8NChannelGatewayError:
+                route = {"success": False}
+            if not (
+                route.get("success")
+                and (route.get("data") or {}).get("connected") is True
+            ):
+                blockers.append(
+                    f"{capability.get('name') or channel_type.title()}: managed workflow route is unavailable"
+                )
 
     docs = (
         db.query(KnowledgeDocument)
