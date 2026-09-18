@@ -30,7 +30,7 @@ def test_arabic_business_description_builds_expected_blueprint():
     assert readiness["capabilities"]["sales"] == "conversational_ready"
     assert readiness["capabilities"]["booking"] == "setup_required"
     assert readiness["channels"]["whatsapp"] == "connect_required"
-    assert readiness["channels"]["instagram"] == "planned"
+    assert readiness["channels"]["instagram"] == "xvond_adapter_required"
     assert "business_actions" in blueprint.missing_information
 
 
