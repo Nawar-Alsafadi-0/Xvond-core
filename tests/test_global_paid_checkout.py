@@ -274,3 +274,41 @@ def test_completed_payment_webhook_activates_once(payment_database, monkeypatch)
         entitlement, plan = service_limits.entitlement(db, 1, "ai_agents")
         assert entitlement.id == subscription_id
         assert plan.id == 2
+
+
+def test_public_billing_config_exposes_only_browser_safe_values(monkeypatch):
+    from backend.app.api import public_billing
+
+    monkeypatch.setattr(public_billing.settings, "BILLING_PROVIDER", "paddle")
+    monkeypatch.setattr(public_billing.settings, "PADDLE_ENVIRONMENT", "sandbox")
+    monkeypatch.setattr(public_billing.settings, "PADDLE_CLIENT_TOKEN", "test_client_token")
+    monkeypatch.setattr(public_billing.settings, "PADDLE_CHECKOUT_URL", "https://xvond.example/checkout")
+    monkeypatch.setattr(public_billing.settings, "PADDLE_API_KEY", "secret-api-key")
+    monkeypatch.setattr(public_billing.settings, "PADDLE_WEBHOOK_SECRET", "secret-webhook")
+    monkeypatch.setattr(public_billing.settings, "PUBLIC_BASE_URL", "https://xvond.example")
+
+    result = public_billing.public_billing_config()
+
+    assert result == {
+        "enabled": True,
+        "provider": "paddle",
+        "environment": "sandbox",
+        "client_token": "test_client_token",
+        "success_url": "https://xvond.example/customer-ui#employee-builder",
+    }
+    assert "secret-api-key" not in str(result)
+    assert "secret-webhook" not in str(result)
+
+
+def test_xvond_checkout_page_uses_paddle_js_without_client_side_entitlement_logic():
+    from pathlib import Path
+
+    page = Path("frontend/public/checkout.html").read_text(encoding="utf-8")
+    assert "https://cdn.paddle.com/paddle/v2/paddle.js" in page
+    assert "Paddle.Initialize" in page
+    assert "Paddle.Checkout.open" in page
+    assert "transactionId" in page
+    assert "checkout.completed" in page
+    assert "/customer-ui#employee-builder" in page
+    assert "PADDLE_API_KEY" not in page
+    assert "PADDLE_WEBHOOK_SECRET" not in page
