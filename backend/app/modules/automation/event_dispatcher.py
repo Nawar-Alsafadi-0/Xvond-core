@@ -68,28 +68,23 @@ def dispatch_automation_event(
 
     lookup = SessionLocal()
     try:
-        workflow_ids = [
-            row[0]
-            for row in (
-                lookup.query(AutomationWorkflow.id)
-                .filter(
-                    AutomationWorkflow.company_id == int(company_id),
-                    AutomationWorkflow.trigger_type == "event",
-                    AutomationWorkflow.enabled.is_(True),
-                )
-                .order_by(AutomationWorkflow.id.asc())
-                .limit(MAX_EVENT_WORKFLOWS)
-                .all()
+        candidates = (
+            lookup.query(AutomationWorkflow)
+            .filter(
+                AutomationWorkflow.company_id == int(company_id),
+                AutomationWorkflow.trigger_type == "event",
+                AutomationWorkflow.enabled.is_(True),
             )
-            if str(
-                (
-                    lookup.query(AutomationWorkflow.trigger_config)
-                    .filter(AutomationWorkflow.id == row[0])
-                    .scalar()
-                    or {}
-                ).get("event_name")
-                or ""
-            ).strip().lower()
+            .order_by(AutomationWorkflow.id.asc())
+            .limit(MAX_EVENT_WORKFLOWS)
+            .all()
+        )
+        workflow_ids = [
+            workflow.id
+            for workflow in candidates
+            if str((workflow.trigger_config or {}).get("event_name") or "")
+            .strip()
+            .lower()
             == name
         ]
     finally:
