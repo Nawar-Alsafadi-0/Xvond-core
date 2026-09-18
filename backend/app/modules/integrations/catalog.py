@@ -240,7 +240,25 @@ INTEGRATION_CATALOG = {
             {
                 "name": "access_token",
                 "label": "Google OAuth Access Token",
-                "required": True,
+                "required": False,
+                "secret": True,
+            },
+            {
+                "name": "refresh_token",
+                "label": "Google OAuth Refresh Token",
+                "required": False,
+                "secret": True,
+            },
+            {
+                "name": "client_id",
+                "label": "Google OAuth Client ID",
+                "required": False,
+                "secret": False,
+            },
+            {
+                "name": "client_secret",
+                "label": "Google OAuth Client Secret",
+                "required": False,
                 "secret": True,
             },
         ],
@@ -419,6 +437,17 @@ def validate_integration_config(
             "Missing integration configuration: "
             + ", ".join(missing)
         )
+
+    if str(integration_type or "").strip().lower() == "calendar":
+        access_token = str(config.get("access_token") or "").strip()
+        refresh_ready = all(
+            str(config.get(field) or "").strip()
+            for field in ("refresh_token", "client_id", "client_secret")
+        )
+        if not access_token and not refresh_ready:
+            raise ValueError(
+                "Google Calendar requires an access token or OAuth refresh credentials"
+            )
 
     return True
 
