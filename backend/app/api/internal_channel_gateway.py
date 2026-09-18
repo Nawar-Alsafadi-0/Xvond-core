@@ -91,16 +91,18 @@ def _existing_conversation(
 
 
 def _existing_reply(db, user_message: AIMessage):
-    return (
+    next_message = (
         db.query(AIMessage)
         .filter(
             AIMessage.conversation_id == user_message.conversation_id,
             AIMessage.id > user_message.id,
-            AIMessage.role == "assistant",
         )
         .order_by(AIMessage.id.asc())
         .first()
     )
+    if next_message is None or next_message.role != "assistant":
+        return None
+    return next_message
 
 
 def _channel_response(
