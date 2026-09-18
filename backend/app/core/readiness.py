@@ -12,8 +12,13 @@ from backend.app.core.error_safety import safe_error_label
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
 from backend.app.models.company_profile import CompanyProfile
+from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.ai_agent.profile_models import AIAgentProfile
+from backend.app.modules.ai_agent.self_service_policy import (
+    is_self_service_company,
+    self_service_readiness,
+)
 from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
 from backend.app.modules.channels.acceptance import customer_roundtrip_verified
 from backend.app.modules.channels.catalog import validate_channel_config
@@ -151,6 +156,7 @@ def company_readiness(db, company_id: int):
     company = db.query(Company).filter(Company.id == company_id).first()
     if company is None:
         return None
+    self_service_company = is_self_service_company(company)
 
     company_profile = (
         db.query(CompanyProfile)
@@ -226,6 +232,29 @@ def company_readiness(db, company_id: int):
 
     agent_results = []
     for agent in agents:
+        self_service_state = None
+        agent_config = None
+        if self_service_company:
+            agent_config = (
+                db.query(AgentConfig)
+                .filter(AgentConfig.agent_id == agent.id)
+                .first()
+            )
+            if agent_config is not None:
+                try:
+                    self_service_state = self_service_readiness(
+                        db,
+                        company=company,
+                        agent=agent,
+                        config=agent_config,
+                    )
+                except Exception as exc:
+                    self_service_state = {
+                        "ready": False,
+                        "channels_required": False,
+                        "blockers": [safe_error_label(exc)],
+                    }
+
         profile = (
             db.query(AIAgentProfile)
             .filter(
@@ -358,12 +387,17 @@ def company_readiness(db, company_id: int):
             issues.append("System prompt is empty")
         if not employee_profile_ready:
             issues.append("AI employee profile is missing")
-        if knowledge_count == 0:
-            issues.append("No enabled knowledge connected")
-        if not channels:
-            issues.append("No channel configured")
-        elif not configured_channels:
-            issues.append("Channel configuration is incomplete")
+        if not self_service_company:
+            if knowledge_count == 0:
+                issues.append("No enabled knowledge connected")
+            if not channels:
+                issues.append("No channel configured")
+            elif not configured_channels:
+                issues.append("Channel configuration is incomplete")
+        elif self_service_state is not None:
+            for blocker in self_service_state.get("blockers") or []:
+                if blocker not in issues:
+                    issues.append(blocker)
         if legacy_business_tools:
             issues.append(
                 "Legacy business tools are still enabled: "
@@ -376,7 +410,13 @@ def company_readiness(db, company_id: int):
             )
         if not agent.enabled:
             warnings.append("AI employee is in draft mode; activate the company, then use Go Live")
-        elif not live_channels:
+        elif (
+            not live_channels
+            and (
+                not self_service_company
+                or bool((self_service_state or {}).get("channels_required"))
+            )
+        ):
             warnings.append("AI employee is live but no customer channel is active")
         if any(
             item["type"] == "whatsapp"
@@ -408,22 +448,47 @@ def company_readiness(db, company_id: int):
                 "WhatsApp Coexistence transport and AI round-trip are live but human takeover acceptance is pending"
             )
 
-        setup_ready = bool(
-            provider_ready
-            and prompt_ready
-            and employee_profile_ready
-            and knowledge_count > 0
-            and configured_channels
-            and tools_ready
-        )
-        ready_for_customer = bool(
-            company.active
-            and agent.enabled
-            and setup_ready
-            and enabled_channels
-            and live_channels
-            and not unaccepted_enabled_channels
-        )
+        if self_service_company:
+            setup_ready = bool(
+                self_service_state
+                and self_service_state.get("ready")
+                and provider_ready
+                and prompt_ready
+                and employee_profile_ready
+                and tools_ready
+            )
+            if bool((self_service_state or {}).get("channels_required")):
+                ready_for_customer = bool(
+                    company.active
+                    and agent.enabled
+                    and setup_ready
+                    and enabled_channels
+                    and live_channels
+                    and not unaccepted_enabled_channels
+                )
+            else:
+                ready_for_customer = bool(
+                    company.active
+                    and agent.enabled
+                    and setup_ready
+                )
+        else:
+            setup_ready = bool(
+                provider_ready
+                and prompt_ready
+                and employee_profile_ready
+                and knowledge_count > 0
+                and configured_channels
+                and tools_ready
+            )
+            ready_for_customer = bool(
+                company.active
+                and agent.enabled
+                and setup_ready
+                and enabled_channels
+                and live_channels
+                and not unaccepted_enabled_channels
+            )
         agent_results.append(
             {
                 "id": agent.id,
@@ -461,6 +526,10 @@ def company_readiness(db, company_id: int):
                 "ready_for_customer": ready_for_customer,
                 "issues": issues,
                 "warnings": warnings,
+                "delivery_mode": (
+                    "self_service" if self_service_company else "managed"
+                ),
+                "self_service_readiness": self_service_state,
             }
         )
 
@@ -469,7 +538,7 @@ def company_readiness(db, company_id: int):
     company_issues = []
     company_warnings = []
 
-    if not company_profile_ready:
+    if not self_service_company and not company_profile_ready:
         company_issues.append(
             "Company profile is incomplete: " + ", ".join(profile_missing)
         )
@@ -489,10 +558,10 @@ def company_readiness(db, company_id: int):
         )
 
     setup_ready = bool(
-        company_profile_ready
-        and subscription_ready
+        subscription_ready
         and modules
         and setup_ready_agents
+        and (company_profile_ready or self_service_company)
     )
     if setup_ready and company.active:
         status = "ACTIVE"
@@ -531,6 +600,7 @@ def company_readiness(db, company_id: int):
         },
         "company_profile_ready": company_profile_ready,
         "profile_ready": company_profile_ready,
+        "delivery_mode": "self_service" if self_service_company else "managed",
         "company_profile_missing": profile_missing,
         "ready": setup_ready,
         "setup_ready": setup_ready,
