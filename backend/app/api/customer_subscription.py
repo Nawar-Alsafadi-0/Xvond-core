@@ -133,6 +133,17 @@ def request_self_service_ai_agent_subscription(
         now = _utcnow_naive()
         if (
             item is not None
+            and item.status == "pending_payment"
+            and item.plan_id == plan.id
+        ):
+            return {
+                "status": "pending_payment",
+                "subscription": _subscription_data(item, plan),
+                "requires_payment": True,
+                "message": "Subscription request is already pending payment or Xvond approval.",
+            }
+        if (
+            item is not None
             and item.status == "active"
             and item.current_period_start <= now < item.current_period_end
         ):
