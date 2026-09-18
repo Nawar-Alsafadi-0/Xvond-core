@@ -137,6 +137,19 @@ _ALLOWED_EXECUTION_OPS = {"http_get_json", "extract", "compare", "notify"}
 _ALLOWED_COMPARE_OPERATORS = {"lt", "lte", "gt", "gte", "eq", "neq"}
 
 
+_SENSITIVE_RUNTIME_INPUT_KEYS = {
+    "authorization",
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "credential",
+    "credentials",
+}
+
 COMPILER_SYSTEM_PROMPT = """You are Xvond's AI Employee Compiler.
 Your only task is to convert a customer's open-ended job brief into a structured employee specification and delivery plan.
 
@@ -363,7 +376,11 @@ def _grounded_runtime_inputs(value: Any, *, job_brief: str) -> dict:
     result: dict[str, Any] = {}
     for raw_key, raw_value in value.items():
         key = normalize_requirement_key(raw_key)[:80]
-        if not key or not isinstance(raw_value, (str, int, float, bool)):
+        if (
+            not key
+            or key in _SENSITIVE_RUNTIME_INPUT_KEYS
+            or not isinstance(raw_value, (str, int, float, bool))
+        ):
             continue
         rendered = str(raw_value).strip()
         if not rendered or rendered.casefold() not in source:
