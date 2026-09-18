@@ -36,6 +36,8 @@ from backend.app.modules.integrations.catalog import (
     validate_integration_config,
 )
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.tools.models import AgentToolAssignment
 
 router = APIRouter(prefix="/manage", tags=["Customer Manager Controls"])
 
@@ -50,6 +52,33 @@ class CustomerIntegrationUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     config: dict | None = None
     enabled: bool | None = None
+
+
+def _integration_bound(db, *, company_id: int, integration_id: int) -> bool:
+    rows = (
+        db.query(AgentToolAssignment)
+        .join(AIAgent, AIAgent.id == AgentToolAssignment.agent_id)
+        .filter(AIAgent.company_id == company_id)
+        .all()
+    )
+    for row in rows:
+        config = reveal_config(row.config) or {}
+        actions = config.get("actions") if isinstance(config, dict) else {}
+        if not isinstance(actions, dict):
+            continue
+        for action in actions.values():
+            if not isinstance(action, dict):
+                continue
+            destination = action.get("destination")
+            if not isinstance(destination, dict):
+                continue
+            try:
+                bound_id = int(destination.get("integration_id") or 0)
+            except (TypeError, ValueError):
+                bound_id = 0
+            if bound_id == int(integration_id):
+                return True
+    return False
 
 
 def _serialize_integration(item: CompanyIntegration) -> dict:
@@ -349,6 +378,19 @@ def customer_integration_update(
             item.config = merged
 
         if payload.enabled is not None:
+            if (
+                payload.enabled is False
+                and item.enabled
+                and _integration_bound(
+                    db,
+                    company_id=company_id,
+                    integration_id=item.id,
+                )
+            ):
+                raise HTTPException(
+                    409,
+                    "This connected system is used by an AI employee. Change the employee setup before disabling it.",
+                )
             item.enabled = bool(payload.enabled)
 
         db.commit()
@@ -379,6 +421,15 @@ def customer_integration_delete(
         )
         if item is None:
             raise HTTPException(404, "Connected system not found")
+        if _integration_bound(
+            db,
+            company_id=company_id,
+            integration_id=item.id,
+        ):
+            raise HTTPException(
+                409,
+                "This connected system is used by an AI employee. Change the employee setup before removing it.",
+            )
         db.delete(item)
         db.commit()
         return {"status": "deleted", "integration_id": integration_id}
