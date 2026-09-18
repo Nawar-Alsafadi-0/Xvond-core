@@ -19,6 +19,7 @@ from backend.app.modules.automation.schedule import (
 )
 from backend.app.modules.automation import scheduler
 from backend.app.modules.automation import runtime as automation_runtime_module
+from backend.app.modules.automation.execution_graph import graph_has_side_effect
 from backend.app.modules.automation.webhook_auth import (
     automation_webhook_key,
     verify_automation_webhook_key,
@@ -1896,3 +1897,50 @@ def test_browser_approval_cannot_authorize_different_node(monkeypatch):
             raise AssertionError("approval from another node must not authorize browser")
 
     engine.dispose()
+
+
+
+def test_graph_side_effect_detection_includes_interactive_browser_and_nested_graphs():
+    read_only = {
+        "version": 1,
+        "nodes": [
+            {
+                "id": "read",
+                "type": "browser",
+                "params": {
+                    "url": "https://example.com",
+                    "actions": [{"op": "extract_text", "selector": "body"}],
+                },
+            }
+        ],
+    }
+    interactive = {
+        "version": 1,
+        "nodes": [
+            {
+                "id": "click",
+                "type": "browser",
+                "params": {
+                    "url": "https://example.com",
+                    "actions": [{"op": "click", "text": "Continue"}],
+                },
+            }
+        ],
+    }
+    nested = {
+        "version": 1,
+        "nodes": [
+            {
+                "id": "each",
+                "type": "foreach",
+                "params": {
+                    "items": [1],
+                    "graph": interactive,
+                },
+            }
+        ],
+    }
+
+    assert graph_has_side_effect(read_only) is False
+    assert graph_has_side_effect(interactive) is True
+    assert graph_has_side_effect(nested) is True
