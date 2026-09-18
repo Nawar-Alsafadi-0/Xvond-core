@@ -228,3 +228,19 @@ def test_meta_messaging_provider_workflow_is_source_controlled_and_synced():
     assert "XVOND_META_MESSAGING_ROUTES_JSON" in COMPOSE
     assert "XVOND_META_MESSAGING_VERIFY_TOKEN" in COMPOSE
     assert "NODE_FUNCTION_ALLOW_BUILTIN: crypto" in COMPOSE
+
+
+def test_release_can_run_fail_closed_market_launch_gate_after_cutover():
+    public_probe = SOURCE.index(
+        'python3 scripts/public_origin_probe.py --base-url "$public_base_url"'
+    )
+    market_gate = SOURCE.index("python scripts/market_launch_gate.py")
+    assert public_probe < market_gate
+    assert 'MARKET_ACCEPTANCE_MODE="${MARKET_ACCEPTANCE_MODE:-}"' in SOURCE
+    assert 'MARKET_ACCEPTANCE_CHANNELS="${MARKET_ACCEPTANCE_CHANNELS:-}"' in SOURCE
+    assert "MARKET_ACCEPTANCE_REQUIRE_ONLINE_BILLING" in SOURCE
+    assert "MARKET_ACCEPTANCE_REQUIRE_PAYMENT_EVIDENCE" in SOURCE
+    assert "--require-channel" in SOURCE
+    assert "--require-online-billing" in SOURCE
+    assert "--require-payment-evidence" in SOURCE
+    assert "requires ACCEPTANCE_COMPANY_ID and ACCEPTANCE_AGENT_ID" in SOURCE
