@@ -62,7 +62,33 @@
   function patchOverview(){
     if(xvondWorkspace?.tab!=='overview')return;
     const content=document.getElementById('workspace-content');
-    if(content&&!document.getElementById('xvond-operator-attention'))content.insertAdjacentHTML('afterbegin',attentionHtml());
+    if(!content)return;
+    if(!document.getElementById('xvond-operator-attention'))content.insertAdjacentHTML('afterbegin',attentionHtml());
+
+    const loadIssues=xvondWorkspace?.data?.loadIssues||[];
+    if(loadIssues.length&&!document.getElementById('xvond-admin-load-issues')){
+      content.insertAdjacentHTML('afterbegin',`<div class="workspace-panel" id="xvond-admin-load-issues"><div class="workspace-panel-head"><div><h3>Admin data partially unavailable</h3><p>The company workspace remains usable. Retry the affected section instead of blocking the entire admin.</p></div>${wsPill(`${loadIssues.length} affected`,'bad')}</div><div class="info-stack">${loadIssues.slice(0,8).map(item=>`<div><span>${f(item.label)}</span><strong>${f(item.message)}</strong></div>`).join('')}</div></div>`);
+    }
+
+    const selfService=String(xvondWorkspace?.data?.view?.company?.onboarding_source||'managed')==='self_service';
+    if(selfService){
+      document.querySelectorAll('#workspace-content .metric-card').forEach(card=>{
+        const label=(card.querySelector('span')?.textContent||'').trim();
+        if(['Capabilities','Open Operations','Conversations'].includes(label))card.remove();
+      });
+      const employees=xvondWorkspace?.data?.view?.agents||[];
+      const readinessPanel=[...content.querySelectorAll('.workspace-panel')].find(panel=>(panel.querySelector('h3')?.textContent||'').trim()==='Production Readiness');
+      if(readinessPanel){
+        const ready=employees.filter(item=>item.self_service_readiness?.ready===true).length;
+        const rows=employees.map(item=>{const state=item.self_service_readiness||{};const ok=state.ready===true;const blocker=(state.blockers||[])[0]||'';return `<div class="readiness-row"><span class="readiness-dot ${ok?'ok':'missing'}"></span><span style="flex:1"><strong>${f(item.name)}</strong><small style="display:block;margin-top:4px">${item.compiled?'Build compiled':'Build pending'} · ${f(state.mode||'workspace')}${blocker?` · ${f(blocker)}`:''}</small></span><strong>${ok?'Ready':'Needs setup'}</strong></div>`}).join('');
+        readinessPanel.innerHTML=`<div class="workspace-panel-head"><div><h3>Self-Service Readiness</h3><p>Canonical customer launch policy: subscription, build provisioning, required connections and execution blockers.</p></div>${wsPill(`${ready}/${employees.length} ready`,ready===employees.length&&employees.length?'good':'neutral')}</div>${employees.length?`<div class="readiness-list">${rows}</div>`:wsEmpty('No self-service employee yet')}`;
+      }
+      const flow=content.querySelector('.architecture-flow');
+      if(flow)flow.innerHTML='<span>Job Brief</span><b>→</b><span>Build Plan</span><b>→</b><span>AI Employee</span><b>→</b><span>Tools + Automations</span><b>→</b><span>Connections</span><b>→</b><span>Work</span>';
+      const snapshot=[...content.querySelectorAll('h3')].find(item=>item.textContent.trim()==='Company Snapshot');
+      if(snapshot){snapshot.textContent='Workspace Snapshot';const p=snapshot.parentElement?.querySelector('p');if(p)p.textContent='Operational state for this self-service tenant.'}
+      return;
+    }
 
     document.querySelectorAll('#workspace-content .metric-card').forEach(card=>{
       const label=(card.querySelector('span')?.textContent||'').trim();
@@ -74,6 +100,13 @@
     if(xvondWorkspace?.tab!=='agents')return;
     const rows=xvondWorkspace?.data?.agentMeta||[];
     const channels=xvondWorkspace?.data?.channels||[];
+    const selfService=String(xvondWorkspace?.data?.view?.company?.onboarding_source||'managed')==='self_service';
+    if(selfService){
+      const create=[...document.querySelectorAll('#workspace-content .workspace-panel-head button')].find(button=>(button.textContent||'').includes('+ AI Employee'));
+      if(create)create.remove();
+      const subtitle=document.querySelector('#workspace-content .workspace-panel-head p');
+      if(subtitle)subtitle.textContent='Customer-built employees created from a Job Brief. Admin controls focus on readiness, runtime health and support.';
+    }
     const cards=[...document.querySelectorAll('#workspace-content .employee-card')];
     cards.forEach((card,index)=>{
       const agent=rows[index]?.agent;if(!agent)return;
@@ -83,7 +116,7 @@
       if(stat){
         const strong=stat.querySelector('strong'),label=stat.querySelector('span');
         if(strong)strong.textContent=String(active);
-        if(label)label.textContent='Live Channels';
+        if(label)label.textContent=selfService?'Live Connections':'Live Channels';
       }
       const flow=card.querySelector('.employee-flow-label');
       if(flow&&!card.querySelector('.operator-channel-summary')){
@@ -93,6 +126,22 @@
           return `${type[0].toUpperCase()+type.slice(1)}: ${state.label}`;
         });
         flow.insertAdjacentHTML('afterend',`<div class="meta operator-channel-summary" style="margin-top:8px">${labels.map(f).join(' · ')}</div>`);
+      }
+      if(!card.querySelector('.operator-delivery-source')){
+        const state=agent.self_service_readiness||{};
+        const source=agent.creation_source==='self_service'?'Self-built':'Managed by Xvond';
+        const extra=selfService?` · ${agent.compiled?'Build compiled':'Build pending'} · ${state.ready?'Launch ready':'Needs setup'}`:'';
+        const top=card.querySelector('.employee-card-top');
+        if(top)top.insertAdjacentHTML('afterend',`<div class="meta operator-delivery-source" style="margin-top:8px">${f(source+extra)}</div>`);
+      }
+      if(selfService){
+        const buttons=[...card.querySelectorAll('.employee-actions button')];
+        buttons.forEach(button=>{
+          const label=(button.textContent||'').trim();
+          if(['Information','Knowledge','Actions','Conversations'].includes(label))button.remove();
+          if(label==='Channels')button.textContent='Connections';
+        });
+        if(flow)flow.textContent='Job Brief → Build Plan → Runtime capabilities → Connections → Work';
       }
     });
   }
