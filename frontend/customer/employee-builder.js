@@ -141,9 +141,11 @@
                                 <span>${escapeHtml(field?.label || field?.key || "Required field")}</span>
                                 ${field?.detail ? `<small class="muted">${escapeHtml(field.detail)}</small>` : ""}
                                 <input
-                                    type="text"
+                                    type="${escapeHtml(field?.type || "text")}"
                                     data-setup-field="${fieldKey}"
                                     autocomplete="off"
+                                    ${field?.min ? `min="${escapeHtml(field.min)}"` : ""}
+                                    ${field?.max ? `max="${escapeHtml(field.max)}"` : ""}
                                     placeholder="Enter ${escapeHtml(field?.label || field?.key || "required value")}"
                                 >
                             </label>
@@ -171,6 +173,7 @@
             "manage_knowledge",
             "setup_website",
             "setup_whatsapp",
+            "test_employee",
             "launch_employee",
         ]).has(type);
         if (!runnable) return "";
