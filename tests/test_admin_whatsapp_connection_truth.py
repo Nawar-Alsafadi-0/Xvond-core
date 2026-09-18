@@ -19,7 +19,7 @@ def test_admin_channel_list_verifies_whatsapp_connection():
 def test_whatsapp_activation_requires_verified_meta_connection_not_just_config():
     api = source("backend/app/api/admin_channels.py")
     blockers = api.split("def _activation_blockers", 1)[1].split("@router.post", 1)[0]
-    assert 'channel.channel_type == "whatsapp"' in blockers
+    assert 'channel_type == "whatsapp"' in blockers
     assert "whatsapp_connection_state(" in blockers
     assert "verify_remote=True" in blockers
     assert 'connection["connected"] is not True' in blockers
