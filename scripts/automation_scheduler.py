@@ -4,6 +4,9 @@ import signal
 import time
 
 from backend.app.modules.automation.scheduler import run_due_schedules_once
+from backend.app.modules.automation.event_outbox import (
+    dispatch_pending_automation_events_once,
+)
 from backend.app.modules.automation.scheduler_health import automation_scheduler_health
 from backend.app.modules.billing.renewal import run_due_service_renewals_once
 
@@ -42,6 +45,19 @@ def main():
             automation_scheduler_health.beat(poll)
         except Exception:
             logger.exception("Automation scheduler heartbeat failed")
+        try:
+            events = dispatch_pending_automation_events_once()
+            if events["dispatched"] or events["pending"] or events["failed"]:
+                logger.info(
+                    "Automation event cycle; checked=%s dispatched=%s pending=%s failed=%s",
+                    events["checked"],
+                    events["dispatched"],
+                    events["pending"],
+                    events["failed"],
+                )
+        except Exception:
+            logger.exception("Automation event cycle failed")
+
         try:
             summary = run_due_schedules_once()
             if summary["executed"] or summary["failed"]:
