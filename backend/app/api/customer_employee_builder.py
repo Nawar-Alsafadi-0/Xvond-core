@@ -62,6 +62,7 @@ from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord, CompanyAIProfile
 from backend.app.modules.tools.models import AgentToolAssignment
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.integrations.catalog import integration_validation_ready
 
 router = APIRouter(
     prefix="/customer/employee-builder",
@@ -849,6 +850,20 @@ def _self_service_builder_journey(
                     waiting_reasons.append(
                         f"Xvond execution setup is still required for {key.replace('_', ' ')}."
                     )
+
+        for item in state.get("connected_system_setup") or []:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("requirement_key") or "connected_system")
+            setup_actions.append(
+                _builder_action(
+                    "manage_integrations",
+                    "Validate connected system",
+                    target="integrations",
+                    key=key,
+                    detail=str(item.get("message") or "").strip() or None,
+                )
+            )
 
         if state.get("provider_ready") is False:
             waiting_reasons.append(
@@ -1675,12 +1690,7 @@ def bind_self_service_integration(
         if integration is None:
             raise HTTPException(404, "Connected system not found or disabled")
         integration_config = reveal_config(integration.config) or {}
-        validation = integration_config.get("_xvond_validation")
-        if not (
-            isinstance(validation, dict)
-            and validation.get("validated") is True
-            and str(validation.get("validated_at") or "").strip()
-        ):
+        if not integration_validation_ready(integration_config):
             raise HTTPException(
                 409,
                 "Validate this connected system successfully before binding it to the AI employee",
@@ -1760,6 +1770,7 @@ def bind_self_service_integration(
         requirement["integration_type"] = integration.integration_type
         requirement["integration_operations"] = operations
         requirement["fulfillment_mode"] = "external_connection"
+        requirement["validation_required"] = True
         requirement["requires_connection"] = True
         requirement["status"] = "xvond_build"
         requirement["delivery_mode"] = "compose"

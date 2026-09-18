@@ -528,6 +528,7 @@ def test_external_booking_action_keeps_real_integration_and_provider_endpoints()
         "purpose": "Use existing booking system",
         "fulfillment_mode": "external_connection",
         "integration_id": 41,
+        "validation_required": True,
         "integration_operations": {
             "availability": {"method": "POST", "endpoint": "/availability"},
             "execute": {"method": "POST", "endpoint": "/bookings"},
@@ -538,5 +539,6 @@ def test_external_booking_action_keeps_real_integration_and_provider_endpoints()
     assert action["module"] == "booking"
     assert action["destination"]["type"] == "integration"
     assert action["destination"]["integration_id"] == 41
+    assert action["destination"]["validation_required"] is True
     assert action["destination"]["operations"]["execute"]["endpoint"] == "/bookings"
     assert action["availability"]["mode"] == "integration"

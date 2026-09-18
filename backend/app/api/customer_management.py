@@ -34,10 +34,12 @@ from backend.app.models.company import Company
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.integrations.catalog import (
     get_integration_definition,
+    integration_validation_ready,
     list_integration_definitions,
     validate_integration_config,
 )
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.audit.service import audit_service
 from backend.app.modules.tools.models import AgentToolAssignment
@@ -126,7 +128,13 @@ def _store_validation_evidence(item: CompanyIntegration, evidence: dict) -> None
     item.config = plain
 
 
-def _integration_bound(db, *, company_id: int, integration_id: int) -> bool:
+def _integration_bound_agent_ids(
+    db,
+    *,
+    company_id: int,
+    integration_id: int,
+) -> list[int]:
+    agent_ids: list[int] = []
     rows = (
         db.query(AgentToolAssignment)
         .join(AIAgent, AIAgent.id == AgentToolAssignment.agent_id)
@@ -148,9 +156,93 @@ def _integration_bound(db, *, company_id: int, integration_id: int) -> bool:
                 bound_id = int(destination.get("integration_id") or 0)
             except (TypeError, ValueError):
                 bound_id = 0
-            if bound_id == int(integration_id):
-                return True
-    return False
+            if bound_id == int(integration_id) and row.agent_id not in agent_ids:
+                agent_ids.append(row.agent_id)
+
+    # The compiled employee contract remains authoritative even if an action
+    # assignment is temporarily missing or awaiting repair.
+    configs = (
+        db.query(AgentConfig)
+        .join(AIAgent, AIAgent.id == AgentConfig.agent_id)
+        .filter(AIAgent.company_id == company_id)
+        .all()
+    )
+    for config in configs:
+        settings_value = config.settings if isinstance(config.settings, dict) else {}
+        builder = settings_value.get("employee_builder")
+        spec = builder.get("compiled_spec") if isinstance(builder, dict) else None
+        requirements = spec.get("requirements") if isinstance(spec, dict) else []
+        for requirement in requirements or []:
+            if not isinstance(requirement, dict):
+                continue
+            try:
+                bound_id = int(requirement.get("integration_id") or 0)
+            except (TypeError, ValueError):
+                bound_id = 0
+            if bound_id == int(integration_id) and config.agent_id not in agent_ids:
+                agent_ids.append(config.agent_id)
+    return agent_ids
+
+
+def _integration_bound(db, *, company_id: int, integration_id: int) -> bool:
+    return bool(
+        _integration_bound_agent_ids(
+            db,
+            company_id=company_id,
+            integration_id=integration_id,
+        )
+    )
+
+
+def _invalidate_bound_integration_previews(
+    db,
+    *,
+    company_id: int,
+    integration_id: int,
+) -> int:
+    """Invalidate draft evidence before a bound connection is changed."""
+
+    agent_ids = _integration_bound_agent_ids(
+        db,
+        company_id=company_id,
+        integration_id=integration_id,
+    )
+    if not agent_ids:
+        return 0
+
+    agents = (
+        db.query(AIAgent)
+        .filter(
+            AIAgent.company_id == company_id,
+            AIAgent.id.in_(agent_ids),
+        )
+        .all()
+    )
+    if any(agent.enabled for agent in agents):
+        raise HTTPException(
+            409,
+            "Deactivate every AI employee using this connected system before changing its configuration.",
+        )
+
+    changed = 0
+    configs = db.query(AgentConfig).filter(AgentConfig.agent_id.in_(agent_ids)).all()
+    for config in configs:
+        settings_value = dict(config.settings or {})
+        stored_builder = settings_value.get("employee_builder")
+        if not isinstance(stored_builder, dict):
+            continue
+        builder = dict(stored_builder)
+        had_evidence = bool(
+            builder.get("last_tested_at")
+            or builder.get("last_tested_compiled_at")
+        )
+        builder.pop("last_tested_at", None)
+        builder.pop("last_tested_compiled_at", None)
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        if had_evidence:
+            changed += 1
+    return changed
 
 
 def _serialize_integration(item: CompanyIntegration) -> dict:
@@ -162,7 +254,6 @@ def _serialize_integration(item: CompanyIntegration) -> dict:
     except ValueError:
         configured = False
     plain = reveal_config(item.config) or {}
-    validation = plain.get("_xvond_validation")
     return {
         "id": item.id,
         "integration_type": item.integration_type,
@@ -170,8 +261,12 @@ def _serialize_integration(item: CompanyIntegration) -> dict:
         "config": public_config(item.config),
         "configured_secret_fields": configured_secret_fields(item.config),
         "configured": configured,
-        "validated": bool(isinstance(validation, dict) and validation.get("validated") is True),
-        "validated_at": validation.get("validated_at") if isinstance(validation, dict) else None,
+        "validated": integration_validation_ready(plain),
+        "validated_at": (
+            (plain.get("_xvond_validation") or {}).get("validated_at")
+            if isinstance(plain.get("_xvond_validation"), dict)
+            else None
+        ),
         "enabled": bool(item.enabled),
         "created_at": item.created_at,
     }
@@ -512,9 +607,16 @@ def customer_integration_update(
                 )
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
+            invalidated_previews = _invalidate_bound_integration_previews(
+                db,
+                company_id=company_id,
+                integration_id=item.id,
+            )
             merged_plain = reveal_config(merged) or {}
             merged_plain.pop("_xvond_validation", None)
             item.config = merged_plain
+        else:
+            invalidated_previews = 0
 
         if payload.enabled is not None:
             if (
@@ -543,6 +645,7 @@ def customer_integration_update(
                 "integration_type": item.integration_type,
                 "changed_fields": sorted(payload.model_dump(exclude_unset=True)),
                 "configured_secret_fields": configured_secret_fields(item.config),
+                "invalidated_employee_previews": invalidated_previews,
             },
         )
         db.commit()

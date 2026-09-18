@@ -207,6 +207,7 @@
             "choose_plan",
             "build_employee",
             "manage_knowledge",
+            "manage_integrations",
             "setup_website",
             "setup_whatsapp",
             "test_employee",
@@ -537,6 +538,10 @@
                     await window.openCustomerManagerTab("knowledge");
                 }
                 document.getElementById("customer-manager-tab")?.scrollIntoView({behavior: "smooth", block: "start"});
+                return;
+            }
+            if (actionType === "manage_integrations") {
+                await openJourneyPage("integrations");
                 return;
             }
             if (actionType === "setup_website" || actionType === "setup_whatsapp") {

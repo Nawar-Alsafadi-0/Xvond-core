@@ -9,6 +9,7 @@ from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
 from backend.app.models.company_profile import CompanyProfile
 from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.integrations.catalog import integration_validation_ready
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.automation.schedule import ScheduleConfigError, normalize_schedule_config
@@ -267,6 +268,7 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
             "type": "integration",
             "integration_id": integration_id,
             "operations": operations,
+            "validation_required": requirement.get("validation_required") is True,
         },
         "availability": availability,
         "xvond_generated": True,
@@ -604,7 +606,16 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                     )
                     .first()
                 )
-            execution_status = "ready" if integration is not None else "setup_required"
+            validation_ready = bool(
+                integration is not None
+                and (
+                    destination.get("validation_required") is not True
+                    or integration_validation_ready(
+                        reveal_config(integration.config) or {}
+                    )
+                )
+            )
+            execution_status = "ready" if validation_ready else "setup_required"
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "business_record":
             execution_status = "ready"
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "generic_capability":

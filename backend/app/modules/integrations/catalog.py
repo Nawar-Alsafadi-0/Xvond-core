@@ -203,3 +203,21 @@ def validate_integration_config(
         )
 
     return True
+
+
+def integration_validation_ready(config: dict | None) -> bool:
+    """Return whether the current connection configuration was validated.
+
+    Connection updates remove this private evidence. Runtime and launch checks
+    can therefore fail closed without treating ordinary managed integrations as
+    customer-validated connections.
+    """
+
+    if not isinstance(config, dict):
+        return False
+    evidence = config.get("_xvond_validation")
+    return bool(
+        isinstance(evidence, dict)
+        and evidence.get("validated") is True
+        and str(evidence.get("validated_at") or "").strip()
+    )
