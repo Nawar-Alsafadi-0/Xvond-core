@@ -75,7 +75,10 @@
             return "execution setup pending";
         }
         if (status === "xvond_build") return "Xvond builds this";
-        if (status === "connection_required") return "connect account";
+        if (status === "connection_required") {
+            if (item?.self_service_connection_status === "xvond_adapter_required") return "Xvond connection adapter required";
+            return "connect account";
+        }
         if (status === "customer_input_required") return "add required data";
         return status.replaceAll("_", " ");
     }
