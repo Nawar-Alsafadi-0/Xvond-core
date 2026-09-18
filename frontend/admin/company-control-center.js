@@ -76,7 +76,7 @@ function renderManagedChannelRequests(agentId){
     const controls=n8nManaged&&channel.runtime_state==='live'&&String(channel?.config?.provisioning_state||'').toLowerCase()!=='cancelled'
       ? `<div class="agent-actions">${routeReady?'':`<button class="primary-button" onclick="verifyManagedChannelRoute(${channel.id})">Verify Xvond Route</button>`}${routeReady?`<button class="table-button" onclick="setWorkspaceChannelStatus(${channel.id},${!channel.enabled})">${channel.enabled?'Deactivate':'Activate'}</button>`:''}</div>`
       : '';
-    return `<div class="channel-card"><div><span class="channel-name">${f(channel.channel_name||channel.channel_type)}</span>${wsPill(state.label,state.kind)}</div><p>${f(wsManagedChannelDetail(channel))}</p><div class="meta">Runtime: ${f(channel.runtime_state||'unknown')} · Setup: Xvond managed · Local: ${channel.enabled?'Active':'Inactive'}</div>${controls}</div>`;
+    return `<div class="channel-card"><div><span class="channel-name">${f(channel.channel_name||channel.channel_type)}</span>${wsPill(state.label,state.kind)}</div><p>${f(wsManagedChannelDetail(channel))}</p><div class="meta">Runtime: ${f(channel.runtime_state||'unknown')} · Setup: Xvond managed · Local: ${channel.enabled?'Active':'Inactive'}${channel.managed_route_key?` · Route: ${f(channel.managed_route_key)}`:''}</div>${controls}</div>`;
   }).join('')}</div></div>`;
 }
 function wsActiveOperations(){return (xvondWorkspace.data?.requests||[]).filter(x=>!['completed','cancelled'].includes(x.status))}
