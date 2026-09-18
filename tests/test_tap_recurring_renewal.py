@@ -263,6 +263,7 @@ def test_tap_saved_card_token_and_recurring_charge_use_provider_ids_only(monkeyp
     assert body["customer"]["id"] == "cus_123"
     assert body["reference"]["idempotent"] == "renew-7-period"
     assert body["metadata"]["xvond_renewal"] == "true"
+    assert body["metadata"]["xvond_renewal_key"] == "renew-7-period"
     assert "card" not in body
     assert result["transaction_id"] == "chg_renew_1"
 
@@ -440,3 +441,61 @@ def test_verified_recurring_webhook_advances_period_and_captures_attempt(
         assert attempt.status == "captured"
         assert subscription.current_period_start == old_end
         assert subscription.current_period_end > old_end
+
+
+def test_early_verified_webhook_wins_race_with_scheduler_response(
+    renewal_database,
+    monkeypatch,
+):
+    factory, now = renewal_database
+    _add_profile(factory)
+    old_end = now + timedelta(hours=1)
+
+    def provider_with_early_webhook(**kwargs):
+        with factory() as webhook_db:
+            result = billing_webhooks._process_tap_charge(
+                webhook_db,
+                {
+                    "id": "chg_early_webhook",
+                    "status": "CAPTURED",
+                    "metadata": {
+                        "xvond_company_id": "1",
+                        "xvond_service_subscription_id": "1",
+                        "xvond_plan_id": "1",
+                        "xvond_service_code": "ai_agents",
+                        "xvond_renewal": "true",
+                        "xvond_renewal_key": kwargs["idempotency_key"],
+                    },
+                    "customer": {"id": "cus_live_123"},
+                    "card": {"id": "card_live_456"},
+                    "payment_agreement": {"id": "payagree_live_789"},
+                },
+            )
+            webhook_db.commit()
+            assert result["renewal_attempt_id"] is not None
+        return {
+            "provider": "tap",
+            "transaction_id": "chg_early_webhook",
+            "status": "captured",
+        }
+
+    monkeypatch.setattr(
+        renewal.tap_gateway,
+        "create_recurring_charge",
+        provider_with_early_webhook,
+    )
+
+    summary = renewal.run_due_service_renewals_once(now=now)
+
+    assert summary["captured"] == 1
+    assert summary["submitted"] == 0
+    with factory() as db:
+        attempt = db.query(ServiceRenewalAttempt).one()
+        subscription = db.get(ServiceSubscription, 1)
+        checkouts = db.query(ServiceCheckout).all()
+        assert attempt.status == "captured"
+        assert attempt.provider_transaction_id == "chg_early_webhook"
+        assert subscription.current_period_start == old_end
+        assert subscription.current_period_end > old_end
+        assert len(checkouts) == 1
+        assert checkouts[0].status == "completed"
