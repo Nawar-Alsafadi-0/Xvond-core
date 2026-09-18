@@ -37,6 +37,7 @@ from backend.app.modules.integrations.catalog import (
 )
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.audit.service import audit_service
 from backend.app.modules.tools.models import AgentToolAssignment
 
 router = APIRouter(prefix="/manage", tags=["Customer Manager Controls"])
@@ -330,6 +331,20 @@ def customer_integration_create(
             enabled=True,
         )
         db.add(item)
+        db.flush()
+        audit_service.log(
+            db=db,
+            action="customer.integration_created",
+            resource_type="integration",
+            resource_id=item.id,
+            user_id=current_user.id,
+            company_id=company_id,
+            details={
+                "integration_type": integration_type,
+                "name": name,
+                "configured_secret_fields": configured_secret_fields(item.config),
+            },
+        )
         db.commit()
         db.refresh(item)
         return {"status": "created", **_serialize_integration(item)}
@@ -393,6 +408,19 @@ def customer_integration_update(
                 )
             item.enabled = bool(payload.enabled)
 
+        audit_service.log(
+            db=db,
+            action="customer.integration_updated",
+            resource_type="integration",
+            resource_id=item.id,
+            user_id=current_user.id,
+            company_id=company_id,
+            details={
+                "integration_type": item.integration_type,
+                "changed_fields": sorted(payload.model_dump(exclude_unset=True)),
+                "configured_secret_fields": configured_secret_fields(item.config),
+            },
+        )
         db.commit()
         db.refresh(item)
         return {"status": "updated", **_serialize_integration(item)}
@@ -430,6 +458,18 @@ def customer_integration_delete(
                 409,
                 "This connected system is used by an AI employee. Change the employee setup before removing it.",
             )
+        audit_service.log(
+            db=db,
+            action="customer.integration_deleted",
+            resource_type="integration",
+            resource_id=item.id,
+            user_id=current_user.id,
+            company_id=company_id,
+            details={
+                "integration_type": item.integration_type,
+                "name": item.name,
+            },
+        )
         db.delete(item)
         db.commit()
         return {"status": "deleted", "integration_id": integration_id}
