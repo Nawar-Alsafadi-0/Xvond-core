@@ -549,17 +549,16 @@ def revise_self_service_job_brief(
         if agent is None:
             raise HTTPException(404, "AI employee not found")
 
-        # Serialize revision with launch so a stale readiness snapshot cannot
-        # enable an employee while its generated build artifacts are changing.
+        # Keep the same lock order as compilation: config first, then agent.
+        # This serializes revision with launch/build without creating a lock cycle.
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
         db.refresh(agent, with_for_update=True)
         if agent.enabled:
             raise HTTPException(
                 409,
                 "Deactivate this employee before revising its Job Brief",
             )
-
-        config = _employee_config_or_404(db, agent)
-        db.refresh(config, with_for_update=True)
         try:
             blueprint = _build_final_blueprint(
                 EmployeeBuilderCreateRequest(
@@ -745,9 +744,10 @@ def launch_self_service_employee(
         ).first()
         if agent is None:
             raise HTTPException(404, "AI employee not found")
-        db.refresh(agent, with_for_update=True)
         config = _employee_config_or_404(db, agent)
+        # Match compile/revise lock ordering to avoid config↔agent deadlocks.
         db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
 
         state = self_service_readiness(
             db,
