@@ -151,3 +151,40 @@ def test_setup_answer_rejects_non_contract_and_knowledge_shortcuts(setup_answer_
             SimpleNamespace(company_id=1, role="owner"),
         )
     assert exc.value.status_code == 409
+
+
+def test_setup_answer_rejects_sensitive_credential_keys(setup_answer_database):
+    with setup_answer_database() as db:
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings = dict(config.settings)
+        builder = dict(settings["employee_builder"])
+        spec = dict(builder["compiled_spec"])
+        requirements = list(spec["requirements"])
+        requirements.append(
+            {
+                "key": "crm_access_token",
+                "kind": "custom",
+                "status": "customer_input_required",
+                "purpose": "Connect the CRM securely",
+            }
+        )
+        spec["requirements"] = requirements
+        builder["compiled_spec"] = spec
+        settings["employee_builder"] = builder
+        config.settings = settings
+        db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        api.save_self_service_setup_answer(
+            1,
+            "crm_access_token",
+            api.EmployeeBuilderSetupAnswerRequest(value="must-not-be-stored"),
+            SimpleNamespace(company_id=1, role="owner"),
+        )
+    assert exc.value.status_code == 409
+    assert "protected Xvond connection" in str(exc.value.detail)
+
+    with setup_answer_database() as db:
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        builder = dict(config.settings["employee_builder"])
+        assert "crm_access_token" not in dict(builder.get("setup_answers") or {})
