@@ -165,6 +165,8 @@ _RATE_LIMITS = {
     ("POST", "/auth/customer/reset-password"): (10, 300),
     ("POST", "/public/employee-builder/preview"): (60, 60),
     ("POST", "/webhooks/whatsapp"): (240, 60),
+    ("POST", "/webhooks/billing/paddle"): (240, 60),
+    ("POST", "/webhooks/billing/tap"): (240, 60),
 }
 
 
@@ -319,6 +321,11 @@ def public_employee_builder():
 @app.get("/checkout")
 def checkout():
     return RedirectResponse(url=f"/static/public/checkout.html?v={CUSTOMER_PORTAL_VERSION}")
+
+
+@app.get("/billing/return")
+def billing_return():
+    return RedirectResponse(url="/customer-ui#employee-builder")
 
 
 @app.get("/privacy")

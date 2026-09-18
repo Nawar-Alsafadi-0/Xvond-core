@@ -9,7 +9,11 @@ from sqlalchemy.exc import IntegrityError
 from backend.app.core.database.connection import SessionLocal
 from backend.app.modules.audit.service import audit_service
 from backend.app.modules.billing.cycle import _add_month
-from backend.app.modules.billing.payment_gateway import PaymentGatewayError, paddle_gateway
+from backend.app.modules.billing.payment_gateway import (
+    PaymentGatewayError,
+    paddle_gateway,
+    tap_gateway,
+)
 from backend.app.modules.billing.service_models import (
     ServiceCheckout,
     ServicePaymentEvent,
@@ -53,11 +57,16 @@ def _billing_period(data: dict) -> tuple[datetime, datetime]:
     return start, end
 
 
-def _checkout_for_transaction(db, transaction_id: str) -> ServiceCheckout | None:
+def _checkout_for_transaction(
+    db,
+    transaction_id: str,
+    *,
+    provider: str = "paddle",
+) -> ServiceCheckout | None:
     return (
         db.query(ServiceCheckout)
         .filter(
-            ServiceCheckout.provider == "paddle",
+            ServiceCheckout.provider == provider,
             ServiceCheckout.provider_transaction_id == transaction_id,
         )
         .with_for_update()
@@ -65,11 +74,16 @@ def _checkout_for_transaction(db, transaction_id: str) -> ServiceCheckout | None
     )
 
 
-def _checkout_for_subscription(db, provider_subscription_id: str) -> ServiceCheckout | None:
+def _checkout_for_subscription(
+    db,
+    provider_subscription_id: str,
+    *,
+    provider: str = "paddle",
+) -> ServiceCheckout | None:
     return (
         db.query(ServiceCheckout)
         .filter(
-            ServiceCheckout.provider == "paddle",
+            ServiceCheckout.provider == provider,
             ServiceCheckout.provider_subscription_id == provider_subscription_id,
         )
         .order_by(ServiceCheckout.id.desc())
@@ -185,6 +199,99 @@ def _sync_subscription_state(db, data: dict) -> dict:
     }
 
 
+
+
+def _tap_checkout_from_charge(db, data: dict) -> tuple[ServiceCheckout, ServiceSubscription]:
+    transaction_id = str(data.get("id") or "").strip()
+    if not transaction_id:
+        raise HTTPException(400, "Tap charge id is missing")
+
+    checkout = _checkout_for_transaction(
+        db,
+        transaction_id,
+        provider="tap",
+    )
+    if checkout is not None:
+        subscription = db.get(ServiceSubscription, checkout.service_subscription_id)
+        if subscription is None:
+            raise HTTPException(409, "Xvond subscription for Tap payment no longer exists")
+        return checkout, subscription
+
+    metadata = data.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    try:
+        company_id = int(metadata.get("xvond_company_id"))
+        subscription_id = int(metadata.get("xvond_service_subscription_id"))
+        plan_id = int(metadata.get("xvond_plan_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(409, "Tap charge is not linked to an Xvond checkout")
+
+    subscription = db.get(ServiceSubscription, subscription_id)
+    plan = db.get(ServicePlan, plan_id)
+    if (
+        subscription is None
+        or plan is None
+        or subscription.company_id != company_id
+        or subscription.plan_id != plan_id
+    ):
+        raise HTTPException(409, "Tap charge does not match the Xvond subscription")
+
+    transaction = data.get("transaction")
+    transaction = transaction if isinstance(transaction, dict) else {}
+    checkout = ServiceCheckout(
+        company_id=company_id,
+        service_subscription_id=subscription.id,
+        plan_id=plan.id,
+        provider="tap",
+        provider_transaction_id=transaction_id,
+        provider_subscription_id=None,
+        status="pending",
+        checkout_url=str(transaction.get("url") or "").strip() or None,
+        amount=plan.monthly_price,
+        currency=plan.currency,
+    )
+    db.add(checkout)
+    db.flush()
+    return checkout, subscription
+
+
+def _process_tap_charge(db, data: dict) -> dict:
+    checkout, subscription = _tap_checkout_from_charge(db, data)
+    status = str(data.get("status") or "").strip().upper()
+    transaction_id = str(data.get("id") or "").strip()
+
+    if status == "CAPTURED":
+        checkout.status = "completed"
+        start = _utcnow_naive()
+        subscription.status = "active"
+        subscription.plan_id = checkout.plan_id
+        subscription.current_period_start = start
+        subscription.current_period_end = _add_month(start)
+    elif status in {
+        "ABANDONED",
+        "CANCELLED",
+        "FAILED",
+        "DECLINED",
+        "RESTRICTED",
+        "VOID",
+        "TIMEDOUT",
+    }:
+        checkout.status = "failed"
+    elif status == "UNKNOWN":
+        checkout.status = "unknown"
+    else:
+        checkout.status = "pending"
+
+    return {
+        "subscription_id": subscription.id,
+        "company_id": subscription.company_id,
+        "plan_id": subscription.plan_id,
+        "status": subscription.status,
+        "charge_status": status.lower(),
+        "transaction_id": transaction_id,
+        "checkout_id": checkout.id,
+    }
+
 @router.post("/paddle")
 async def paddle_billing_webhook(
     request: Request,
@@ -237,8 +344,40 @@ async def paddle_billing_webhook(
         else:
             result = {"ignored": True, "event_type": event_type}
 
+        evidence_checkout = None
+        result_company_id = (
+            result.get("company_id")
+            if isinstance(result, dict)
+            else None
+        )
+        if event_type == "transaction.completed":
+            transaction_id = str(data.get("id") or "").strip()
+            if transaction_id:
+                evidence_checkout = _checkout_for_transaction(db, transaction_id)
+        elif event_type.startswith("subscription."):
+            provider_subscription_id = str(data.get("id") or "").strip()
+            if provider_subscription_id:
+                evidence_checkout = _checkout_for_subscription(
+                    db,
+                    provider_subscription_id,
+                )
+
         db.add(
             ServicePaymentEvent(
+                company_id=(
+                    int(result_company_id)
+                    if result_company_id is not None
+                    else (
+                        evidence_checkout.company_id
+                        if evidence_checkout is not None
+                        else None
+                    )
+                ),
+                service_checkout_id=(
+                    evidence_checkout.id
+                    if evidence_checkout is not None
+                    else None
+                ),
                 provider="paddle",
                 provider_event_id=event_id,
                 event_type=event_type,
@@ -256,6 +395,92 @@ async def paddle_billing_webhook(
                 "event_type": event_type,
                 "result_status": result.get("status") if isinstance(result, dict) else None,
                 "ignored": bool(result.get("ignored")) if isinstance(result, dict) else False,
+            },
+        )
+        db.commit()
+        return {"status": "processed", "event_id": event_id, "result": result}
+    except IntegrityError:
+        db.rollback()
+        return {"status": "duplicate", "event_id": event_id}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/tap")
+async def tap_billing_webhook(
+    request: Request,
+    hashstring: str | None = Header(default=None, alias="hashstring"),
+):
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(400, "Invalid Tap webhook body") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Invalid Tap webhook body")
+
+    try:
+        tap_gateway.verify_webhook(
+            payload=payload,
+            hashstring_header=hashstring,
+        )
+    except PaymentGatewayError as exc:
+        raise HTTPException(401, "Invalid Tap webhook") from exc
+
+    charge_id = str(payload.get("id") or "").strip()
+    status = str(payload.get("status") or "").strip().upper()
+    transaction = payload.get("transaction")
+    transaction = transaction if isinstance(transaction, dict) else {}
+    created = str(transaction.get("created") or payload.get("created") or "").strip()
+    if not charge_id or not status:
+        raise HTTPException(400, "Tap webhook identity is missing")
+
+    event_type = f"charge.{status.lower()}"
+    event_id = f"{charge_id}:{status}:{created}"[:160]
+
+    db = SessionLocal()
+    try:
+        existing = (
+            db.query(ServicePaymentEvent)
+            .filter(
+                ServicePaymentEvent.provider == "tap",
+                ServicePaymentEvent.provider_event_id == event_id,
+            )
+            .first()
+        )
+        if existing is not None:
+            return {"status": "duplicate", "event_id": event_id}
+
+        result = _process_tap_charge(db, payload)
+        checkout = db.get(ServiceCheckout, result["checkout_id"])
+
+        db.add(
+            ServicePaymentEvent(
+                company_id=result["company_id"],
+                service_checkout_id=checkout.id if checkout is not None else None,
+                provider="tap",
+                provider_event_id=event_id,
+                event_type=event_type,
+            )
+        )
+        audit_service.log(
+            db=db,
+            action="billing.payment_webhook_processed",
+            resource_type="billing",
+            resource_id=None,
+            company_id=result["company_id"],
+            details={
+                "provider": "tap",
+                "event_id": event_id,
+                "event_type": event_type,
+                "result_status": result.get("status"),
+                "charge_status": result.get("charge_status"),
             },
         )
         db.commit()

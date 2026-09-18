@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import time
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 import httpx
@@ -79,6 +80,10 @@ class PaddleGateway:
         plan_id: int,
         plan_tier: str,
         service_code: str,
+        amount: Decimal,
+        currency: str,
+        customer_email: str | None = None,
+        customer_name: str | None = None,
     ) -> dict[str, Any]:
         if not self.configured():
             raise PaymentGatewayError("Online billing is not configured")
@@ -169,10 +174,177 @@ class PaddleGateway:
             raise PaymentGatewayError("Payment webhook signature is invalid")
 
 
+class TapGateway:
+    """Tap Payments hosted-charge adapter for Xvond Self-Service checkout."""
+
+    provider = "tap"
+    api_base = "https://api.tap.company/v2"
+
+    def configured(self) -> bool:
+        return bool(
+            settings.BILLING_PROVIDER == self.provider
+            and settings.TAP_SECRET_KEY
+            and settings.TAP_MERCHANT_ID
+            and settings.PUBLIC_BASE_URL
+        )
+
+    @staticmethod
+    def _customer_name(value: str | None) -> tuple[str, str]:
+        clean = " ".join(str(value or "").strip().split())
+        if not clean:
+            return "Xvond", "Customer"
+        parts = clean.split(" ", 1)
+        return parts[0][:80], (parts[1] if len(parts) > 1 else "Customer")[:80]
+
+    def create_checkout(
+        self,
+        *,
+        company_id: int,
+        service_subscription_id: int,
+        plan_id: int,
+        plan_tier: str,
+        service_code: str,
+        amount: Decimal,
+        currency: str,
+        customer_email: str | None = None,
+        customer_name: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.configured():
+            raise PaymentGatewayError("Online billing is not configured")
+
+        first_name, last_name = self._customer_name(customer_name)
+        email = str(customer_email or "").strip()
+        if not email:
+            raise PaymentGatewayError("Tap checkout requires a customer email")
+
+        redirect_url = settings.TAP_REDIRECT_URL or (
+            f"{settings.PUBLIC_BASE_URL}/billing/return"
+        )
+        webhook_url = f"{settings.PUBLIC_BASE_URL}/webhooks/billing/tap"
+        idempotency = f"xvond-sub-{service_subscription_id}-plan-{plan_id}"
+
+        body = {
+            "amount": float(Decimal(str(amount))),
+            "currency": str(currency or "").upper(),
+            "customer_initiated": True,
+            "threeDSecure": True,
+            "save_card": bool(settings.TAP_SAVE_CARD_FOR_RECURRING),
+            "description": f"Xvond AI Employee - {plan_tier}",
+            "metadata": {
+                "xvond_company_id": str(company_id),
+                "xvond_service_subscription_id": str(service_subscription_id),
+                "xvond_plan_id": str(plan_id),
+                "xvond_service_code": str(service_code),
+            },
+            "reference": {
+                "transaction": f"xvond-{service_subscription_id}-{plan_id}",
+                "order": f"xvond-{company_id}-{service_subscription_id}",
+                "idempotent": idempotency,
+            },
+            "customer": {
+                "first_name": first_name,
+                "last_name": last_name,
+                "email": email,
+            },
+            "merchant": {"id": settings.TAP_MERCHANT_ID},
+            "source": {"id": settings.TAP_SOURCE_ID},
+            "post": {"url": webhook_url},
+            "redirect": {"url": redirect_url},
+        }
+
+        try:
+            response = httpx.post(
+                f"{self.api_base}/charges/",
+                headers={
+                    "Authorization": f"Bearer {settings.TAP_SECRET_KEY}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json=body,
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise PaymentGatewayError("Tap checkout could not be created") from exc
+
+        if not isinstance(payload, dict):
+            raise PaymentGatewayError("Tap checkout returned an invalid response")
+
+        charge_id = str(payload.get("id") or "").strip()
+        status = str(payload.get("status") or "").strip().lower()
+        transaction = payload.get("transaction")
+        transaction = transaction if isinstance(transaction, dict) else {}
+        checkout_url = str(transaction.get("url") or "").strip()
+        if not charge_id:
+            raise PaymentGatewayError("Tap checkout is missing its charge id")
+        if status != "captured" and not checkout_url:
+            raise PaymentGatewayError("Tap checkout is missing its payment URL")
+
+        return {
+            "provider": self.provider,
+            "transaction_id": charge_id,
+            "subscription_id": None,
+            "status": "completed" if status == "captured" else "pending",
+            "checkout_url": checkout_url or redirect_url,
+        }
+
+    @staticmethod
+    def _amount_for_hash(value: Any, currency: str) -> str:
+        decimals = 3 if str(currency or "").upper() in {"BHD", "JOD", "KWD", "OMR"} else 2
+        quantum = Decimal("0.001") if decimals == 3 else Decimal("0.01")
+        amount = Decimal(str(value or "0")).quantize(quantum, rounding=ROUND_HALF_UP)
+        return f"{amount:.{decimals}f}"
+
+    def verify_webhook(
+        self,
+        *,
+        payload: dict[str, Any],
+        hashstring_header: str | None,
+    ) -> None:
+        secret = settings.TAP_SECRET_KEY
+        posted = str(hashstring_header or "").strip().lower()
+        if not secret or not posted:
+            raise PaymentGatewayError("Tap webhook hashstring is missing")
+
+        reference = payload.get("reference")
+        reference = reference if isinstance(reference, dict) else {}
+        transaction = payload.get("transaction")
+        transaction = transaction if isinstance(transaction, dict) else {}
+
+        charge_id = str(payload.get("id") or "")
+        currency = str(payload.get("currency") or "").upper()
+        amount = self._amount_for_hash(payload.get("amount"), currency)
+        gateway_reference = str(reference.get("gateway") or "")
+        payment_reference = str(reference.get("payment") or "")
+        status = str(payload.get("status") or "")
+        created = str(transaction.get("created") or payload.get("created") or "")
+
+        to_hash = (
+            f"x_id{charge_id}"
+            f"x_amount{amount}"
+            f"x_currency{currency}"
+            f"x_gateway_reference{gateway_reference}"
+            f"x_payment_reference{payment_reference}"
+            f"x_status{status}"
+            f"x_created{created}"
+        )
+        expected = hmac.new(
+            secret.encode("utf-8"),
+            to_hash.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(expected.lower(), posted):
+            raise PaymentGatewayError("Tap webhook hashstring is invalid")
+
+
 paddle_gateway = PaddleGateway()
+tap_gateway = TapGateway()
 
 
 def payment_gateway():
     if settings.BILLING_PROVIDER == "paddle":
         return paddle_gateway
+    if settings.BILLING_PROVIDER == "tap":
+        return tap_gateway
     return None

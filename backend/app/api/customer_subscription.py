@@ -96,6 +96,8 @@ def _create_online_checkout(
     company: Company,
     subscription: ServiceSubscription,
     plan: ServicePlan,
+    customer_email: str | None,
+    customer_name: str | None,
 ) -> ServiceCheckout:
     existing = _pending_checkout(db, subscription.id, plan.id)
     if existing is not None and str(existing.checkout_url or "").strip():
@@ -107,13 +109,36 @@ def _create_online_checkout(
         plan_id=plan.id,
         plan_tier=plan.tier,
         service_code=subscription.service_code,
+        amount=Decimal(str(plan.monthly_price or 0)),
+        currency=plan.currency,
+        customer_email=customer_email,
+        customer_name=customer_name,
     )
+
+    transaction_id = str(result["transaction_id"] or "").strip()
+    provider = str(result["provider"] or "").strip()
+    checkout = (
+        db.query(ServiceCheckout)
+        .filter(
+            ServiceCheckout.provider == provider,
+            ServiceCheckout.provider_transaction_id == transaction_id,
+        )
+        .with_for_update()
+        .first()
+    )
+    if checkout is not None:
+        if checkout.company_id != company.id or checkout.service_subscription_id != subscription.id:
+            raise PaymentGatewayError("Provider transaction is already linked to another Xvond checkout")
+        if result.get("checkout_url") and not checkout.checkout_url:
+            checkout.checkout_url = result["checkout_url"]
+        return checkout
+
     checkout = ServiceCheckout(
         company_id=company.id,
         service_subscription_id=subscription.id,
         plan_id=plan.id,
-        provider=result["provider"],
-        provider_transaction_id=result["transaction_id"],
+        provider=provider,
+        provider_transaction_id=transaction_id,
         provider_subscription_id=result.get("subscription_id"),
         status=result.get("status") or "pending",
         checkout_url=result["checkout_url"],
@@ -223,6 +248,8 @@ def request_self_service_ai_agent_subscription(
                         company=company,
                         subscription=item,
                         plan=plan,
+                        customer_email=current_user.email,
+                        customer_name=current_user.full_name,
                     )
                     db.commit()
                     db.refresh(checkout)
@@ -283,6 +310,8 @@ def request_self_service_ai_agent_subscription(
                     company=company,
                     subscription=item,
                     plan=plan,
+                    customer_email=current_user.email,
+                    customer_name=current_user.full_name,
                 )
             except PaymentGatewayError as exc:
                 db.rollback()
