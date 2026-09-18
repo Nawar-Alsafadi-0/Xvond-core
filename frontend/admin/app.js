@@ -83,7 +83,11 @@ async function loadDashboard(){
     const cards=[
       ["Managed Delivery",adminNumber(sourceCounts.managed)],
       ["Self-Service",adminNumber(sourceCounts.self_service)],
-      ["Live Companies",adminNumber(lifecycle.live)],
+      ["Onboarding",adminNumber(lifecycle.onboarding)],
+      ["Testing",adminNumber(lifecycle.testing)],
+      ["Live",adminNumber(lifecycle.live)],
+      ["Paused",adminNumber(lifecycle.paused)],
+      ["Suspended",adminNumber(lifecycle.suspended)],
       ["Runtime Active",adminNumber(data.active_companies)],
       ["Active Employees",`${adminNumber(data.active_agents)} / ${adminNumber(data.agents)}`],
       ["Active Channels",adminNumber(data.active_channels)],
