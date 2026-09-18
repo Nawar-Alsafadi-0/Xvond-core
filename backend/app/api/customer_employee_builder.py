@@ -42,6 +42,7 @@ from backend.app.modules.ai_agent.self_service_policy import (
     is_self_service_company,
     self_service_channel_activation_blockers,
     self_service_channel_slots,
+    self_service_connection_status,
     self_service_readiness,
     self_service_spec_view,
 )
@@ -164,6 +165,10 @@ def _clear_current_build_evidence(builder: dict) -> None:
         "last_tested_compiled_at",
     ):
         builder.pop(key, None)
+    # Keep the serialized builder contract explicit for callers and existing
+    # stored workspaces: a revised/rolled-back draft is uncompiled, rather than
+    # having an ambiguous missing compilation field.
+    builder["compiled_spec"] = None
 
 
 def _builder_versions_view(builder: dict) -> list[dict]:

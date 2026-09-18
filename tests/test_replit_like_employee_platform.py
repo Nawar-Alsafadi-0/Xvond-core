@@ -44,7 +44,11 @@ def test_external_requirement_has_customer_connect_and_bind_path():
 
 
 def test_connected_systems_are_real_execution_not_read_only_metadata():
-    assert '{"xvond_internal", "integration"}' in WORKFLOW_TOOL
+    assert 'if destination_type == "integration":' in WORKFLOW_TOOL
+    assert 'adapter in {' in WORKFLOW_TOOL
+    assert '"booking",' in WORKFLOW_TOOL
+    assert '"business_record",' in WORKFLOW_TOOL
+    assert "return super().execute(arguments, context)" in WORKFLOW_TOOL
     assert "Connected Systems" in PORTAL
     assert "/manage/integrations/catalog" in PORTAL
     assert "/manage/integrations" in PORTAL
