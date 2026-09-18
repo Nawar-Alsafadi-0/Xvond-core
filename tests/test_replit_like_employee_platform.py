@@ -39,7 +39,7 @@ def test_external_requirement_has_customer_connect_and_bind_path():
     assert "integration_operations" in BUILDER
     assert "provision_compiled_capabilities(" in BUILDER
     assert "data-bind-integration" in BUILDER_UI
-    assert "/connections/\${encodeURIComponent(key)}" in BUILDER_UI
+    assert "/connections/${encodeURIComponent(key)}" in BUILDER_UI
     assert "/manage/integrations" in BUILDER_UI
 
 
