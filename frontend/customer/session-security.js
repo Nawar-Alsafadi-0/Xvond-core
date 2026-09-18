@@ -47,6 +47,7 @@ startPortal = async function(options = {}) {
         renderPortalNavigation();
         renderAccountInfo();
         renderDashboard();
+        await openInitialPortalPage();
     } catch (err) {
         clearSession();
         const error = document.getElementById("login-error");
