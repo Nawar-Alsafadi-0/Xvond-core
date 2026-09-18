@@ -492,6 +492,9 @@
             setupActions.map(journeyActionMarkup).join(""),
             "</div></div>",
         ].join("") : "";
+        const buildButton = pending.compiled
+            ? ""
+            : '<button type="button" id="pending-revision-build">Build revision</button>';
         const testButton = pending.compiled
             ? '<button type="button" id="pending-revision-test">' + (pending.current_build_tested ? "Test again" : "Test revision") + "</button>"
             : "";
@@ -510,7 +513,7 @@
             specMarkup,
             setupMarkup,
             '<div class="employee-builder-actions">',
-            testButton, applyButton,
+            buildButton, testButton, applyButton,
             '<button type="button" id="pending-revision-discard">Discard revision</button>',
             "</div>",
             '<div id="pending-revision-error" class="error"></div>',
@@ -1065,6 +1068,20 @@
                 }
             });
         }
+
+        document.getElementById("pending-revision-build")?.addEventListener("click", async event => {
+            const button = event.currentTarget;
+            const error = document.getElementById("pending-revision-error");
+            if (error) error.textContent = "";
+            button.disabled = true;
+            try {
+                await api("/customer/employee-builder/" + Number(employee.agent_id) + "/build-pending-revision", {method: "POST"});
+                await loadEmployeeBuilder();
+            } catch (err) {
+                if (error) error.textContent = err?.message || "Could not build this revision.";
+                if (document.body.contains(button)) button.disabled = false;
+            }
+        });
 
         document.getElementById("pending-revision-test")?.addEventListener("click", () => {
             const panel = document.getElementById("employee-builder-test-panel");
