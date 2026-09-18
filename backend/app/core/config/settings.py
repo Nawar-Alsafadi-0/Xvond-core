@@ -75,6 +75,10 @@ class Settings:
         "TAP_RECURRING_ENABLED",
         "false",
     ).strip().lower() in {"1", "true", "yes", "on"}
+    TAP_RENEWAL_LEAD_HOURS = max(
+        0,
+        min(168, int(os.getenv("TAP_RENEWAL_LEAD_HOURS", "24"))),
+    )
     KNOWLEDGE_SEMANTIC_ENABLED = os.getenv("KNOWLEDGE_SEMANTIC_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     KNOWLEDGE_EMBEDDING_PROVIDER = os.getenv("KNOWLEDGE_EMBEDDING_PROVIDER", "openai").strip().lower()
     KNOWLEDGE_EMBEDDING_MODEL = os.getenv("KNOWLEDGE_EMBEDDING_MODEL", "text-embedding-3-small").strip()
