@@ -2879,9 +2879,17 @@ def customer_employee_reject_automation(
             if isinstance(approval, dict):
                 output["approval"] = {**approval, "status": "rejected"}
             run.status = "rejected"
+            run.finished_at = datetime.utcnow()
+            trace = output.get("trace")
+            if isinstance(trace, dict):
+                trace = dict(trace)
+                trace["status"] = "rejected"
+                trace["finished_at"] = (
+                    run.finished_at.isoformat(timespec="milliseconds") + "Z"
+                )
+                output["trace"] = trace
             run.output_data = output
             run.error_message = None
-            run.finished_at = datetime.utcnow()
         db.commit()
         return {
             "request_id": request.id,
