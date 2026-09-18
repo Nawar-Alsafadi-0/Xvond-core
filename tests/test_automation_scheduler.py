@@ -1586,3 +1586,313 @@ def test_graph_media_node_consumes_explicit_resolved_context(monkeypatch):
     assert result["graph_outputs"]["image"]["media_url"].startswith(
         "https://api.xvond.test/"
     )
+
+
+
+def test_graph_browser_read_only_runs_without_approval(monkeypatch):
+    captured = {}
+
+    def fake_browser(**kwargs):
+        captured.update(kwargs)
+        return {
+            "url": "https://example.com",
+            "title": "Example",
+            "actions": [{"index": 0, "op": "extract_text", "value": "Hello"}],
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "run_browser_task",
+        fake_browser,
+    )
+
+    runtime = automation_runtime_module.AutomationRuntime()
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 7,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "page",
+                        "type": "browser",
+                        "depends_on": [],
+                        "params": {
+                            "url": "https://example.com",
+                            "actions": [
+                                {
+                                    "op": "extract_text",
+                                    "selector": "body",
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+        },
+        state={"_xvond_execution_key": "browser-read-only"},
+        run_id=1,
+        step_index=0,
+    )
+
+    assert captured["start_url"] == "https://example.com"
+    assert captured["allow_interactions"] is False
+    assert result["graph_outputs"]["page"]["title"] == "Example"
+
+
+def test_interactive_browser_pauses_and_resumes_same_run(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    calls = {"fetch": 0, "browser": 0}
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_request(**kwargs):
+        calls["fetch"] += 1
+        return {
+            "status_code": 200,
+            "response": '{"target":"https://example.com/form"}',
+            "truncated": False,
+        }
+
+    def fake_browser(**kwargs):
+        calls["browser"] += 1
+        assert kwargs["allow_interactions"] is True
+        return {
+            "url": kwargs["start_url"],
+            "title": "Form",
+            "actions": [{"index": 0, "op": "click", "clicked": True}],
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "run_browser_task",
+        fake_browser,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(
+            Company(
+                id=1,
+                name="Browser Approval",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Browser worker",
+                system_prompt="Use browser only when required.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Browser graph",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+            },
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "discover",
+                                "type": "http_get_json",
+                                "depends_on": [],
+                                "params": {"url": "https://example.com/config"},
+                            },
+                            {
+                                "id": "interact",
+                                "type": "browser",
+                                "depends_on": ["discover"],
+                                "params": {
+                                    "url": "$nodes.discover.result.target",
+                                    "actions": [
+                                        {
+                                            "op": "click",
+                                            "selector": "#submit",
+                                        }
+                                    ],
+                                },
+                            },
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        waiting = runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={},
+        )
+
+        assert waiting.status == "waiting_approval"
+        assert calls["fetch"] == 1
+        assert calls["browser"] == 0
+
+        request = (
+            db.query(ActionRequest)
+            .filter(ActionRequest.action_type == "browser_interaction")
+            .one()
+        )
+        assert request.status == "awaiting_confirmation"
+        assert waiting.output_data["approval"]["node_id"] == "interact"
+
+        request.status = "approved"
+        db.commit()
+
+        resumed = runtime.resume_approval(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=waiting,
+            request=request,
+        )
+
+        assert resumed.status == "success"
+        assert resumed.id == waiting.id
+        assert calls["fetch"] == 1
+        assert calls["browser"] == 1
+        assert (
+            resumed.output_data["steps"][-1]["result"]["graph_outputs"]["interact"]["title"]
+            == "Form"
+        )
+
+    engine.dispose()
+
+
+def test_browser_approval_cannot_authorize_different_node(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "run_browser_task",
+        lambda **kwargs: {
+            "url": kwargs["start_url"],
+            "title": "Unsafe",
+            "actions": [],
+        },
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Scoped Browser", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Scoped worker",
+                system_prompt="Scope approvals.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        request = ActionRequest(
+            company_id=1,
+            agent_id=1,
+            conversation_id=None,
+            action_type="browser_interaction",
+            details={
+                "_xvond_automation": {
+                    "run_id": 1,
+                    "workflow_id": 1,
+                    "workflow_step_index": 0,
+                    "node_id": "other_node",
+                }
+            },
+            summary="Other browser action",
+            status="approved",
+        )
+        db.add(request)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        try:
+            runtime.execute_step(
+                db=db,
+                company_id=1,
+                step={
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "current_node",
+                                "type": "browser",
+                                "depends_on": [],
+                                "params": {
+                                    "url": "https://example.com",
+                                    "actions": [
+                                        {"op": "click", "selector": "#go"}
+                                    ],
+                                },
+                            }
+                        ],
+                    },
+                },
+                state={
+                    "_xvond_execution_key": "browser-scope-test",
+                    "_xvond_approved_request_id": request.id,
+                },
+                run_id=1,
+                step_index=0,
+            )
+        except automation_runtime_module.AutomationApprovalRequired as exc:
+            assert exc.node_id == "current_node"
+        else:
+            raise AssertionError("approval from another node must not authorize browser")
+
+    engine.dispose()
