@@ -542,6 +542,10 @@ def revise_self_service_job_brief(
         )
         if agent is None:
             raise HTTPException(404, "AI employee not found")
+
+        # Serialize revision with launch so a stale readiness snapshot cannot
+        # enable an employee while its generated build artifacts are changing.
+        db.refresh(agent, with_for_update=True)
         if agent.enabled:
             raise HTTPException(
                 409,
@@ -549,6 +553,7 @@ def revise_self_service_job_brief(
             )
 
         config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
         try:
             blueprint = _build_final_blueprint(
                 EmployeeBuilderCreateRequest(
@@ -559,7 +564,6 @@ def revise_self_service_job_brief(
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
-        db.refresh(config, with_for_update=True)
         settings = dict(config.settings or {})
         builder = dict(settings.get("employee_builder") or {})
         builder.update(
@@ -735,7 +739,9 @@ def launch_self_service_employee(
         ).first()
         if agent is None:
             raise HTTPException(404, "AI employee not found")
+        db.refresh(agent, with_for_update=True)
         config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
 
         state = self_service_readiness(
             db,
