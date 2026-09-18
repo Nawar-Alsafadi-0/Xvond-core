@@ -318,6 +318,7 @@ Production deploy additionally:
 - requires a real WhatsApp Redis worker lease
 - requires a scheduler Redis heartbeat
 - requires API, WhatsApp worker and scheduler to use the same image ID
+- requires the canonical `PUBLIC_BASE_URL/health/ready` to succeed over HTTPS with healthy production JSON
 - supports customer-specific production acceptance after cutover
 
 ## External validation boundary
