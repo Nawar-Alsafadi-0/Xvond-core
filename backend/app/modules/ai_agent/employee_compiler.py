@@ -646,7 +646,10 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         if len(permissions) >= 50:
             break
 
-    setup_questions = _bounded_string_list(payload.get("setup_questions"), limit=30, item_limit=500)
+    # setup_questions is presentation-only. Derive it from the normalized
+    # smart intake so the UI never repeats a question for a fact already present
+    # in the Job Brief. Connection requirements remain represented separately.
+    setup_questions = []
     for item in intake_missing:
         label = str(item.get("label") or item.get("key") or "").strip()
         if label and label not in setup_questions:
