@@ -40,6 +40,10 @@ from backend.app.modules.integrations.catalog import (
     validate_integration_config,
 )
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.integrations.email_smtp import (
+    EmailConnectorError,
+    validate_smtp_connection,
+)
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.audit.service import audit_service
@@ -71,6 +75,12 @@ def _validate_live_connection(item: CompanyIntegration) -> dict:
             "mode": "safe_url_validation",
             "url": url,
         }
+
+    if integration_type == "email_smtp":
+        try:
+            return validate_smtp_connection(config, timeout=10.0)
+        except EmailConnectorError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     if integration_type == "instagram_publish":
         instagram_user_id = str(config.get("instagram_user_id") or "").strip()
