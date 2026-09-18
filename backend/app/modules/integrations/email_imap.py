@@ -18,26 +18,36 @@ class EmailReadConnectorError(ValueError):
     pass
 
 
-def _public_imap_host(value: str) -> str:
+def _public_imap_target(value: str, port: int) -> tuple[str, list[str]]:
     host = str(value or "").strip().lower().rstrip(".")
     if not host or len(host) > 253:
         raise EmailReadConnectorError("IMAP host is invalid")
     if host in {"localhost", "localhost.localdomain"}:
         raise EmailReadConnectorError("IMAP host cannot be local")
     try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise EmailReadConnectorError("IMAP host could not be resolved") from exc
     if not infos:
         raise EmailReadConnectorError("IMAP host could not be resolved")
+
+    addresses: list[str] = []
     for info in infos:
-        raw_ip = info[4][0]
+        raw_ip = str(info[4][0])
         try:
             ip = ipaddress.ip_address(raw_ip)
         except ValueError as exc:
             raise EmailReadConnectorError("IMAP host resolved to an invalid address") from exc
         if not ip.is_global:
             raise EmailReadConnectorError("IMAP host cannot resolve to private or reserved addresses")
+        normalized = str(ip)
+        if normalized not in addresses:
+            addresses.append(normalized)
+    return host, addresses
+
+
+def _public_imap_host(value: str) -> str:
+    host, _ = _public_imap_target(value, 993)
     return host
 
 
@@ -58,16 +68,52 @@ def _mailbox(value: str | None) -> str:
     return mailbox
 
 
+class _PinnedIMAP4SSL(imaplib.IMAP4_SSL):
+    def __init__(
+        self,
+        *,
+        host: str,
+        address: str,
+        port: int,
+        ssl_context,
+        timeout: float,
+    ):
+        self._xvond_pinned_address = address
+        super().__init__(
+            host=host,
+            port=port,
+            ssl_context=ssl_context,
+            timeout=timeout,
+        )
+
+    def _create_socket(self, timeout):
+        raw = socket.create_connection(
+            (self._xvond_pinned_address, self.port),
+            timeout=timeout,
+        )
+        return self.ssl_context.wrap_socket(
+            raw,
+            server_hostname=self.host,
+        )
+
+
 def _connect(config: dict, *, timeout: float):
-    host = _public_imap_host(config.get("imap_host"))
     port = _port(config.get("imap_port"))
+    host, addresses = _public_imap_target(config.get("imap_host"), port)
     context = ssl.create_default_context()
-    return imaplib.IMAP4_SSL(
-        host=host,
-        port=port,
-        ssl_context=context,
-        timeout=timeout,
-    )
+    last_error: Exception | None = None
+    for address in addresses:
+        try:
+            return _PinnedIMAP4SSL(
+                host=host,
+                address=address,
+                port=port,
+                ssl_context=context,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            last_error = exc
+    raise EmailReadConnectorError("IMAP public endpoints could not be reached") from last_error
 
 
 def _login_and_select(client, config: dict) -> str:
