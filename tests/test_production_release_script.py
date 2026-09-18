@@ -55,6 +55,7 @@ def test_release_stops_workers_before_app_and_recreates_same_image_afterwards():
     recreate_workers = SOURCE.index("--force-recreate whatsapp-worker automation-scheduler")
     worker_ready = SOURCE.index("wait_healthy xvond-whatsapp-worker")
     scheduler_ready = SOURCE.index("wait_healthy xvond-automation-scheduler")
+    worker_lease = SOURCE.index("wait_whatsapp_worker_lease", worker_ready)
     scheduler_heartbeat = SOURCE.index("wait_scheduler_heartbeat", scheduler_ready)
     scheduler_image = SOURCE.index("scheduler_image=")
     image_check = SOURCE.index(
@@ -66,6 +67,7 @@ def test_release_stops_workers_before_app_and_recreates_same_image_afterwards():
         < recreate_workers
         < worker_ready
         < scheduler_ready
+        < worker_lease
         < scheduler_heartbeat
         < scheduler_image
         < image_check
@@ -157,3 +159,12 @@ def test_release_requires_scheduler_heartbeat_before_completion():
     assert "REDIS_URL: redis://redis:6379/0" in scheduler_service
     assert "redis:" in scheduler_service
     assert "condition: service_healthy" in scheduler_service
+
+
+def test_release_requires_whatsapp_worker_lease_before_completion():
+    assert "WhatsApp worker did not acquire its Redis lease" in SOURCE
+    assert "whatsapp_job_queue.stats()" in SOURCE
+    worker_ready = SOURCE.index("wait_healthy xvond-whatsapp-worker")
+    worker_lease = SOURCE.index("wait_whatsapp_worker_lease", worker_ready)
+    scheduler_image = SOURCE.index("scheduler_image=")
+    assert worker_ready < worker_lease < scheduler_image
