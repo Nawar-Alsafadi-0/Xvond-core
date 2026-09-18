@@ -332,3 +332,69 @@ def test_builder_generic_setup_never_treats_credentials_as_plain_data():
 
     for key in ("workspace_id", "timezone", "target_market", "account_context"):
         assert is_sensitive_requirement_key(key) is False
+
+
+def test_compiler_smart_intake_keeps_known_facts_and_asks_only_for_missing_required_fields():
+    job_brief = "بدي موظف حجوزات لمطعم بيت الشام يرد على واتساب"
+    response = """{
+      "role": "Restaurant booking employee",
+      "scope": "business",
+      "summary": "Handle restaurant reservations.",
+      "intake": {
+        "known": [
+          {"key":"business_name","label":"اسم المطعم","value":"بيت الشام"},
+          {"key":"invented_city","label":"المدينة","value":"مسقط"}
+        ],
+        "missing": [
+          {"key":"business_name","label":"اسم المطعم","purpose":"Identify the restaurant"},
+          {"key":"working_hours","label":"أوقات الدوام","purpose":"Know when bookings can be accepted"},
+          {"key":"booking_capacity","label":"سعة الحجز","purpose":"Avoid overbooking"}
+        ]
+      },
+      "tasks": [{"name":"Reservations","description":"Handle bookings","trigger":"customer request"}],
+      "requirements": [
+        {"key":"booking","kind":"module","purpose":"Create and manage reservations"},
+        {"key":"whatsapp","kind":"channel","purpose":"Talk with customers"}
+      ],
+      "permissions": [{"action":"booking","mode":"ask_before"}],
+      "setup_questions": []
+    }"""
+    spec = parse_compiler_response(response, job_brief=job_brief)
+
+    assert spec["intake"]["known"] == [
+        {"key": "business_name", "label": "اسم المطعم", "value": "بيت الشام"}
+    ]
+    assert [item["key"] for item in spec["intake"]["missing"]] == [
+        "working_hours",
+        "booking_capacity",
+    ]
+    context = next(x for x in spec["requirements"] if x["key"] == "employee_context")
+    assert context["status"] == "customer_input_required"
+    assert context["customer_inputs"] == ["working_hours", "booking_capacity"]
+    assert context["customer_input_labels"] == {
+        "working_hours": "أوقات الدوام",
+        "booking_capacity": "سعة الحجز",
+    }
+    assert "business_name" not in context["customer_inputs"]
+    assert "employee_context" in spec["setup_required"]
+
+
+def test_compiled_runtime_prompt_includes_grounded_job_brief_context():
+    spec = {
+        "role": "Restaurant employee",
+        "scope": "business",
+        "job_brief": "مطعم بيت الشام",
+        "summary": "Help restaurant customers.",
+        "tasks": [],
+        "requirements": [],
+        "permissions": [],
+        "intake": {
+            "known": [
+                {"key": "business_name", "label": "اسم المطعم", "value": "بيت الشام"}
+            ],
+            "missing": [],
+        },
+    }
+    prompt = build_compiled_employee_system_prompt(owner_name="Workspace", spec=spec)
+    assert "KNOWN CONTEXT EXTRACTED FROM THE JOB BRIEF" in prompt
+    assert "اسم المطعم: بيت الشام" in prompt

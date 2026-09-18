@@ -151,6 +151,13 @@ def test_builder_journey_exposes_declared_setup_fields_and_never_plain_credentia
                 "status": "customer_input_required",
                 "purpose": "Know the target workspace",
                 "customer_inputs": ["workspace_id", "timezone"],
+                "customer_input_labels": {
+                    "workspace_id": "Workspace",
+                    "timezone": "Timezone",
+                },
+                "customer_input_purposes": {
+                    "workspace_id": "Choose the workspace this employee should use",
+                },
             }
         ],
         "delivery": {"provisioning_version": 1},
@@ -170,8 +177,12 @@ def test_builder_journey_exposes_declared_setup_fields_and_never_plain_credentia
     action = stage(journey, "setup")["actions"][0]
     assert action["type"] == "provide_input"
     assert action["fields"] == [
-        {"key": "workspace_id", "label": "workspace_id"},
-        {"key": "timezone", "label": "timezone"},
+        {
+            "key": "workspace_id",
+            "label": "Workspace",
+            "detail": "Choose the workspace this employee should use",
+        },
+        {"key": "timezone", "label": "Timezone", "detail": None},
     ]
 
     sensitive_spec = {

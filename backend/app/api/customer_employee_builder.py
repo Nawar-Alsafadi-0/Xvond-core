@@ -634,6 +634,16 @@ def _self_service_builder_journey(
                         )
                 else:
                     input_fields: list[dict] = []
+                    input_labels = (
+                        requirement.get("customer_input_labels")
+                        if isinstance(requirement.get("customer_input_labels"), dict)
+                        else {}
+                    )
+                    input_purposes = (
+                        requirement.get("customer_input_purposes")
+                        if isinstance(requirement.get("customer_input_purposes"), dict)
+                        else {}
+                    )
                     sensitive_input = is_sensitive_requirement_key(key)
                     for raw_field in requirement.get("customer_inputs") or []:
                         field_key = normalize_requirement_key(raw_field)
@@ -645,7 +655,9 @@ def _self_service_builder_journey(
                             input_fields.append(
                                 {
                                     "key": field_key,
-                                    "label": str(raw_field).strip() or field_key.replace("_", " "),
+                                    "label": str(input_labels.get(field_key) or raw_field).strip()
+                                    or field_key.replace("_", " "),
+                                    "detail": str(input_purposes.get(field_key) or "").strip() or None,
                                 }
                             )
                     if sensitive_input:

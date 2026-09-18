@@ -11,7 +11,7 @@ from backend.app.modules.channels.catalog import (
 )
 
 
-COMPILER_VERSION = 4
+COMPILER_VERSION = 5
 
 GENERIC_PRIMITIVES = {
     "workflow_engine",
@@ -200,6 +200,14 @@ Use this shape:
   "role": "short human-readable role",
   "scope": "business|personal|hybrid",
   "summary": "one concise sentence describing the job",
+  "intake": {
+    "known": [
+      {"key":"business_name","label":"Business name","value":"exact value already present in the Job Brief"}
+    ],
+    "missing": [
+      {"key":"working_hours","label":"Working hours","purpose":"why this fact is genuinely required to configure the employee"}
+    ]
+  },
   "tasks": [
     {"name": "task name", "description": "what must happen", "trigger": "when it happens"}
   ],
@@ -229,6 +237,11 @@ Use this shape:
 
 Rules:
 - Preserve every meaningful part of the customer's job. Do not silently drop unusual requirements.
+- Act like a smart product builder, not a static form. Extract useful facts already present in the Job Brief into intake.known and ask only for genuinely required missing facts in intake.missing.
+- Never put a field in intake.missing when the same fact is already present in the Job Brief. Examples include business name, brand name, working hours, services, prices, booking rules, target market, preferred tone, escalation contact or operating constraints.
+- Do not ask for optional preferences that Xvond can safely default. Only request facts whose absence would make the requested employee materially incorrect, unable to perform the requested job, or unsafe to launch.
+- Keep intake field keys stable snake_case identifiers. Labels should be short human-readable labels in the customer's language when practical.
+- intake.known values must be copied from information explicitly present in the Job Brief. Never invent values. Do not place passwords, API keys, access tokens or other credentials in intake.known; credentials belong to protected connection flows.
 - Never use a missing Xvond feature as a reason to reject the job. For a novel digital requirement, return it and give it useful generic primitives so Xvond can compose it.
 - Set requires_connection=true only when the customer must connect an external account, grant access or provide credentials for the work to function.
 - Separate reading from acting where permissions differ, e.g. email_read and email_send.
@@ -429,6 +442,67 @@ def _grounded_runtime_inputs(value: Any, *, job_brief: str) -> dict:
     return result
 
 
+def _normalize_smart_intake(value: Any, *, job_brief: str) -> dict:
+    """Normalize compiler intake into grounded known facts plus only missing fields."""
+
+    if not isinstance(value, dict):
+        return {"known": [], "missing": []}
+
+    source = str(job_brief or "").casefold()
+    known: list[dict] = []
+    known_keys: set[str] = set()
+    for item in value.get("known") or []:
+        if not isinstance(item, dict):
+            continue
+        key = normalize_requirement_key(item.get("key"))
+        if not key or key in known_keys or is_sensitive_requirement_key(key):
+            continue
+        raw_value = item.get("value")
+        if not isinstance(raw_value, (str, int, float, bool)):
+            continue
+        rendered = str(raw_value).strip()
+        if not rendered or rendered.casefold() not in source:
+            continue
+        known_keys.add(key)
+        known.append(
+            {
+                "key": key,
+                "label": _bounded_text(item.get("label"), limit=120)
+                or key.replace("_", " "),
+                "value": rendered,
+            }
+        )
+        if len(known) >= 30:
+            break
+
+    missing: list[dict] = []
+    missing_keys: set[str] = set()
+    for item in value.get("missing") or []:
+        if not isinstance(item, dict):
+            continue
+        key = normalize_requirement_key(item.get("key"))
+        if (
+            not key
+            or key in known_keys
+            or key in missing_keys
+            or is_sensitive_requirement_key(key)
+        ):
+            continue
+        missing_keys.add(key)
+        missing.append(
+            {
+                "key": key,
+                "label": _bounded_text(item.get("label"), limit=120)
+                or key.replace("_", " "),
+                "purpose": _bounded_text(item.get("purpose"), limit=500),
+            }
+        )
+        if len(missing) >= 30:
+            break
+
+    return {"known": known, "missing": missing}
+
+
 def normalize_requirement_key(value: Any) -> str:
     key = _bounded_text(value, limit=120).lower().replace(" ", "_")
     if key and not re.fullmatch(r"[a-z0-9][a-z0-9_\-]{0,127}", key):
@@ -443,6 +517,7 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
     if scope not in {"business", "personal", "hybrid"}:
         scope = "hybrid"
     summary = _bounded_text(payload.get("summary"), limit=1000) or _bounded_text(job_brief, limit=1000)
+    intake = _normalize_smart_intake(payload.get("intake"), job_brief=job_brief)
 
     tasks: list[dict] = []
     for item in payload.get("tasks") or []:
@@ -530,6 +605,34 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         if len(requirements) >= 50:
             break
 
+    intake_missing = list(intake.get("missing") or [])
+    if intake_missing and "employee_context" not in seen_keys:
+        input_fields = [item["key"] for item in intake_missing]
+        input_labels = {item["key"]: item["label"] for item in intake_missing}
+        input_purposes = {
+            item["key"]: item["purpose"]
+            for item in intake_missing
+            if item.get("purpose")
+        }
+        requirements.append(
+            {
+                "key": "employee_context",
+                "kind": "knowledge",
+                "purpose": "Complete only the missing facts required to configure this employee correctly.",
+                "status": "customer_input_required",
+                "delivery_mode": "configure",
+                "primitives": ["storage"],
+                "schedule": None,
+                "runtime_inputs": {},
+                "execution_plan": [],
+                "customer_inputs": input_fields,
+                "customer_input_labels": input_labels,
+                "customer_input_purposes": input_purposes,
+                "known_to_xvond": True,
+            }
+        )
+        seen_keys.add("employee_context")
+
     permissions: list[dict] = []
     for item in payload.get("permissions") or []:
         if not isinstance(item, dict):
@@ -543,7 +646,16 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         if len(permissions) >= 50:
             break
 
-    setup_questions = _bounded_string_list(payload.get("setup_questions"), limit=30, item_limit=500)
+    # setup_questions is presentation-only. Derive it from the normalized
+    # smart intake so the UI never repeats a question for a fact already present
+    # in the Job Brief. Connection requirements remain represented separately.
+    setup_questions = []
+    for item in intake_missing:
+        label = str(item.get("label") or item.get("key") or "").strip()
+        if label and label not in setup_questions:
+            setup_questions.append(label)
+        if len(setup_questions) >= 30:
+            break
 
     return {
         "version": COMPILER_VERSION,
@@ -551,6 +663,7 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         "role": role,
         "scope": scope,
         "summary": summary,
+        "intake": intake,
         "tasks": tasks,
         "requirements": requirements,
         "permissions": permissions,
@@ -588,6 +701,13 @@ def build_compiled_employee_system_prompt(*, owner_name: str, spec: dict) -> str
         f"- {item.get('key', 'requirement')}: {item.get('status', 'xvond_build')} — {item.get('purpose', '')}"
         for item in requirements
     ) or "- No additional requirements were identified."
+
+    intake = spec.get("intake") if isinstance(spec.get("intake"), dict) else {}
+    known_context_lines = "\n".join(
+        f"- {item.get('label') or item.get('key')}: {item.get('value')}"
+        for item in (intake.get("known") or [])
+        if isinstance(item, dict) and str(item.get("value") or "").strip()
+    ) or "- No additional facts were extracted from the Job Brief."
 
     customer_inputs = spec.get("customer_inputs") or {}
     rendered_customer_inputs: list[str] = []
@@ -630,6 +750,9 @@ PERMISSIONS:
 
 REQUIREMENTS AND DELIVERY STATUS:
 {requirement_lines}
+
+KNOWN CONTEXT EXTRACTED FROM THE JOB BRIEF:
+{known_context_lines}
 
 OWNER-PROVIDED SETUP DATA:
 {customer_input_lines}
