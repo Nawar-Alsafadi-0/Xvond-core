@@ -60,25 +60,6 @@ class AutomationApprovalRequired(RuntimeError):
         self.node_outputs = deepcopy(dict(node_outputs or {}))
 
 
-def _graph_action_contract(db, *, agent_id: int, action_type: str) -> dict:
-    assignment = (
-        db.query(AgentToolAssignment)
-        .filter(
-            AgentToolAssignment.agent_id == int(agent_id),
-            AgentToolAssignment.tool_name == "action_request",
-            AgentToolAssignment.enabled.is_(True),
-        )
-        .first()
-    )
-    if assignment is None:
-        raise ValueError("Action contract is not assigned to this employee")
-    config = reveal_config(assignment.config) or {}
-    action = (config.get("actions") or {}).get(str(action_type or "").strip())
-    if not isinstance(action, dict) or not action.get("enabled", True):
-        raise ValueError("Action contract is not enabled")
-    return action
-
-
 class AutomationRuntime:
     def execute(
         self,
@@ -466,51 +447,15 @@ class AutomationRuntime:
                         raise ValueError(
                             f"Execution graph action node {node_id} requires agent_id and action_type"
                         )
-                    action_contract = _graph_action_contract(
-                        db,
-                        agent_id=action_agent_id,
-                        action_type=action_type,
-                    )
-                    approval_request_id = int(state.get("_xvond_approved_request_id") or 0)
-                    if action_contract.get("confirmation_required", True):
-                        if int(state.get("_xvond_nested_graph_depth") or 0) > 0:
-                            raise ValueError(
-                                "Approval-required actions inside foreach are not supported yet"
-                            )
-                        approved = None
-                        if approval_request_id:
-                            approved = (
-                                db.query(ActionRequest)
-                                .filter(
-                                    ActionRequest.id == approval_request_id,
-                                    ActionRequest.company_id == company_id,
-                                    ActionRequest.agent_id == action_agent_id,
-                                    ActionRequest.action_type == action_type,
-                                    ActionRequest.status == "approved",
-                                )
-                                .first()
-                            )
-                        if approved is None:
-                            raise AutomationApprovalRequired(
-                                agent_id=action_agent_id,
-                                action_type=action_type,
-                                arguments=params.get("arguments") or {},
-                                summary=str(
-                                    params.get("summary")
-                                    or action_contract.get("description")
-                                    or action_contract.get("label")
-                                    or action_type
-                                ),
-                                workflow_step_index=step_index,
-                                node_id=node_id,
-                                node_outputs=node_outputs,
-                            )
                     nested_step = {
                         "type": "scheduled_action",
                         "agent_id": action_agent_id,
                         "action_type": action_type,
                         "arguments": params.get("arguments") or {},
-                        "approval_request_id": approval_request_id or None,
+                        "approval_request_id": (
+                            int(state.get("_xvond_approved_request_id") or 0) or None
+                        ),
+                        "_xvond_graph_action": True,
                     }
                 elif node_type == "http_get_json":
                     url = str(params.get("url") or "").strip()
@@ -836,7 +781,10 @@ class AutomationRuntime:
                         run_id=run_id,
                         step_index=(step_index * 1000) + node_index + 1,
                     )
-                except AutomationApprovalRequired:
+                except AutomationApprovalRequired as approval:
+                    approval.workflow_step_index = int(step_index)
+                    approval.node_id = node_id
+                    approval.node_outputs = deepcopy(node_outputs)
                     raise
                 except Exception as exc:
                     raise ValueError(
@@ -968,8 +916,27 @@ class AutomationRuntime:
                         .first()
                     )
                 if approval is None:
-                    raise ValueError(
-                        "Action requires an approved automation request before execution"
+                    if not step.get("_xvond_graph_action"):
+                        raise ValueError(
+                            "Scheduled action requires automatic permission or a graph approval checkpoint"
+                        )
+                    if int(state.get("_xvond_nested_graph_depth") or 0) > 0:
+                        raise ValueError(
+                            "Approval-required actions inside foreach are not supported yet"
+                        )
+                    raise AutomationApprovalRequired(
+                        agent_id=int(agent_id),
+                        action_type=action_type,
+                        arguments=step.get("arguments") or {},
+                        summary=str(
+                            step.get("summary")
+                            or action.get("description")
+                            or action.get("label")
+                            or action_type
+                        ),
+                        workflow_step_index=-1,
+                        node_id="",
+                        node_outputs={},
                     )
 
             details = {
