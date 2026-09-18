@@ -83,7 +83,7 @@ def test_instagram_publish_validation_uses_bearer_token_without_exposing_it_in_u
 
     assert result["validated"] is True
     assert result["mode"] == "instagram_live_read_only_request"
-    assert captured["url"] == "https://graph.facebook.com/178414000?fields=id,username"
+    assert captured["url"] == "https://graph.facebook.com/v26.0/178414000?fields=id,username"
     assert "secret-token" not in captured["url"]
     assert captured["headers"]["Authorization"] == "Bearer secret-token"
 
