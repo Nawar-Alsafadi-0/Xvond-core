@@ -13,6 +13,12 @@ from backend.app.modules.ai_agent.customer_access import can_view_conversations
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIConversation, AIMessage
 from backend.app.modules.audit.service import audit_service
+from backend.app.modules.channels.catalog import (
+    canonical_channel_type,
+    get_channel_capability,
+    live_managed_channel_types,
+    live_self_service_channel_types,
+)
 from backend.app.modules.channels.handoff import (
     activate_human_handoff,
     human_handoff_active,
@@ -31,7 +37,9 @@ from backend.app.modules.tools.business_models import HumanHandoff
 router = APIRouter(prefix="/customer/inbox", tags=["Customer Conversation Inbox"])
 ACTIVE_HANDOFF_STATUSES = {"pending", "in_progress"}
 HANDOFF_MANAGER_ROLES = {"owner", "admin", "manager"}
-LIVE_INBOX_CHANNELS = {"whatsapp", "website", "voice", "instagram"}
+LIVE_INBOX_CHANNELS = (
+    live_self_service_channel_types() | live_managed_channel_types()
+) - {"xvond"}
 
 # Handoff is a channel capability, not a generic button. Only expose controls when
 # Xvond has a real delivery path back to the customer on that channel.
@@ -104,20 +112,19 @@ def _visible_agents(db, current_user: User) -> list[AIAgent]:
 
 
 def _channel_label(channel_type: str | None) -> str:
-    value = (channel_type or "unknown").strip().lower()
-    labels = {
-        "website": "Website",
-        "whatsapp": "WhatsApp",
-        "instagram": "Instagram",
-        "voice": "Voice",
-        "portal_test": "Test Console",
-        "unknown": "Unclassified",
-    }
-    return labels.get(value, value.replace("_", " ").title())
+    value = canonical_channel_type(channel_type or "unknown")
+    if value == "portal_test":
+        return "Test Console"
+    if value == "unknown":
+        return "Unclassified"
+    capability = get_channel_capability(value)
+    if capability is not None:
+        return str(capability.get("name") or value)
+    return value.replace("_", " ").title()
 
 
 def _handoff_capabilities(channel_type: str | None) -> dict:
-    value = str(channel_type or "unknown").strip().lower()
+    value = canonical_channel_type(channel_type or "unknown")
     capabilities = HANDOFF_CAPABILITIES.get(value)
     if capabilities is None:
         capabilities = {
