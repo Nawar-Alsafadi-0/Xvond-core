@@ -345,6 +345,22 @@
     min-width: 0 !important;
 }
 
+.employee-builder-setup-answer {
+    display: grid;
+    gap: 8px;
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #fff;
+}
+
+.employee-builder-setup-answer textarea {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+}
+
 @media (max-width: 800px) {
     .employee-builder-principles,
     .employee-builder-review-grid,
