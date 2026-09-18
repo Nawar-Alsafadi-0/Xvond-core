@@ -301,6 +301,32 @@ def test_unprovisioned_spec_and_missing_adapter_block_go_live(database):
         assert "action_request" not in {item["name"] for item in ToolExecutor().get_agent_tools(db, 1)}
 
 
+def test_runtime_ready_generated_plan_is_exposed_to_employee(database):
+    factory, _ = database
+    payload = deepcopy(PAYLOAD)
+    payload["requirements"][0]["execution_plan"] = [
+        {"id": "fetch", "op": "http_get_json", "url_field": "url"},
+        {"id": "value", "op": "extract", "source": "fetch", "path": "value"},
+        {"id": "matched", "op": "compare", "source": "value", "operator": "gte", "value_field": "threshold"},
+        {"id": "notify", "op": "notify", "when": "matched", "title": "Monitor alert", "message": "Condition matched."},
+    ]
+    brief = "Monitor https://prices.example.com daily and notify me when the threshold matches."
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+
+    result = api.compile_employee(1, USER)
+    requirement = result["spec"]["requirements"][0]
+    assert requirement["execution_status"] == "ready"
+
+    with factory() as db:
+        assignment = _assignment(db)
+        action = reveal_config(assignment.config)["actions"][KEY]
+        destination = action["destination"]
+        assert destination["adapter"] == "generic_capability"
+        assert destination["allowed_hosts"] == ["prices.example.com"]
+        assert _action_state(db, 1, 1)["ready"] is True
+        assert "action_request" in {item["name"] for item in ToolExecutor().get_agent_tools(db, 1)}
+
+
 @pytest.mark.parametrize("mode,enabled,confirmation", [
     ("automatic", True, False), ("ask_before", True, True), ("never", False, True),
 ])
