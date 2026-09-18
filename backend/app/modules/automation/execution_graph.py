@@ -159,3 +159,41 @@ def graph_action_types(graph: dict) -> list[str]:
 
     visit(normalize_execution_graph(graph or {}))
     return result
+
+
+
+def extract_data_path(value: Any, path: str | None) -> Any:
+    current = value
+    clean_path = str(path or "").strip()
+    if not clean_path:
+        return current
+    for part in clean_path.split("."):
+        if isinstance(current, dict):
+            current = current.get(part)
+        elif isinstance(current, list) and part.isdigit():
+            index = int(part)
+            current = current[index] if 0 <= index < len(current) else None
+        else:
+            return None
+    return current
+
+
+def compare_values(left: Any, operator: str, right: Any) -> bool:
+    op = str(operator or "eq").strip().lower()
+    if op == "eq":
+        return left == right
+    if op == "neq":
+        return left != right
+    if op == "gt":
+        return left > right
+    if op == "gte":
+        return left >= right
+    if op == "lt":
+        return left < right
+    if op == "lte":
+        return left <= right
+    if op == "contains":
+        return right in left if left is not None else False
+    if op == "in":
+        return left in right if right is not None else False
+    raise ValueError(f"Unsupported comparison operator: {op}")
