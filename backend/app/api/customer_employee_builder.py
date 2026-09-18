@@ -10,7 +10,10 @@ from backend.app.core.company_lifecycle import portal_access_allowed
 from backend.app.core.config_secrets import reveal_config
 from backend.app.core.config.settings import settings
 from backend.app.core.database.connection import SessionLocal
-from backend.app.core.dependencies import require_customer_manager
+from backend.app.core.dependencies import (
+    require_customer_admin,
+    require_customer_manager,
+)
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
 from backend.app.models.user import User
@@ -2199,9 +2202,9 @@ def set_self_service_permission(
     agent_id: int,
     requirement_key: str,
     data: EmployeeBuilderPermissionRequest,
-    current_user: User = Depends(require_customer_manager),
+    current_user: User = Depends(require_customer_admin),
 ):
-    """Set an explicit owner grant for one executable employee capability."""
+    """Set an explicit owner/admin grant for one executable employee capability."""
 
     key = normalize_requirement_key(requirement_key)
     mode = str(data.mode or "").strip().lower()
