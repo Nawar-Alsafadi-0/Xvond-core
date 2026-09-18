@@ -505,3 +505,127 @@ def test_graph_runtime_supports_condition_gates(monkeypatch):
     assert result["graph_outputs"]["check"]["matched"] is False
     assert result["graph_outputs"]["act"]["skipped"] is True
     assert calls == []
+
+
+
+def test_graph_runtime_supports_bounded_foreach_with_item_references(monkeypatch):
+    seen = []
+
+    runtime = automation_runtime_module.AutomationRuntime()
+    original = runtime.execute_step
+
+    def dispatch(db, company_id, step, state, *, run_id, step_index):
+        if step.get("type") == "graph":
+            return original(
+                db,
+                company_id,
+                step,
+                state,
+                run_id=run_id,
+                step_index=step_index,
+            )
+        if step.get("type") == "scheduled_action":
+            seen.append(dict(step.get("arguments") or {}))
+            return {"executed": True}
+        raise AssertionError(step.get("type"))
+
+    monkeypatch.setattr(runtime, "execute_step", dispatch)
+
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 1,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "each",
+                        "type": "foreach",
+                        "depends_on": [],
+                        "params": {
+                            "items": "$input.contacts",
+                            "graph": {
+                                "version": 1,
+                                "nodes": [
+                                    {
+                                        "id": "send",
+                                        "type": "action",
+                                        "depends_on": [],
+                                        "params": {
+                                            "action_type": "contact_action",
+                                            "arguments": {
+                                                "email": "$item.email",
+                                                "position": "$index",
+                                            },
+                                        },
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                ],
+            },
+        },
+        state={
+            "_xvond_execution_key": "foreach-test",
+            "contacts": [
+                {"email": "a@example.com"},
+                {"email": "b@example.com"},
+            ],
+        },
+        run_id=1,
+        step_index=0,
+    )
+
+    assert seen == [
+        {"email": "a@example.com", "position": 0},
+        {"email": "b@example.com", "position": 1},
+    ]
+    assert result["graph_outputs"]["each"]["count"] == 2
+
+
+def test_graph_runtime_rejects_unbounded_foreach():
+    runtime = automation_runtime_module.AutomationRuntime()
+
+    try:
+        runtime.execute_step(
+            db=object(),
+            company_id=1,
+            step={
+                "type": "graph",
+                "agent_id": 1,
+                "graph": {
+                    "version": 1,
+                    "nodes": [
+                        {
+                            "id": "each",
+                            "type": "foreach",
+                            "depends_on": [],
+                            "params": {
+                                "items": list(range(101)),
+                                "graph": {
+                                    "version": 1,
+                                    "nodes": [
+                                        {
+                                            "id": "noop",
+                                            "type": "notify",
+                                            "depends_on": [],
+                                            "params": {"message": "done"},
+                                        }
+                                    ],
+                                },
+                            },
+                        }
+                    ],
+                },
+            },
+            state={"_xvond_execution_key": "foreach-limit"},
+            run_id=1,
+            step_index=0,
+        )
+    except ValueError as exc:
+        assert "exceeds 100 items" in str(exc)
+    else:
+        raise AssertionError("foreach over 100 items must fail closed")
