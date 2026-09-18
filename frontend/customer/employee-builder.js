@@ -287,6 +287,17 @@
                         <div id="employee-builder-manual-run-error" class="error"></div>
                     </div>
                 ` : ""}
+                <div id="employee-builder-approvals-panel" class="employee-builder-section">
+                    <div class="employee-builder-current-head">
+                        <div>
+                            <h3>Approvals</h3>
+                            <p class="muted">Review consequential actions this employee is waiting to execute.</p>
+                        </div>
+                        <button type="button" id="employee-builder-approvals-refresh">Refresh</button>
+                    </div>
+                    <div id="employee-builder-approvals-list"><p class="muted">No approval data loaded yet.</p></div>
+                    <div id="employee-builder-approvals-error" class="error"></div>
+                </div>
                 <div id="employee-builder-runs-panel" class="employee-builder-section">
                     <div class="employee-builder-current-head">
                         <div>
@@ -669,6 +680,91 @@
 
         document.getElementById("employee-builder-runs-refresh")?.addEventListener("click", loadExecutionHistory);
         loadExecutionHistory();
+
+        async function loadAutomationApprovals() {
+            const list = document.getElementById("employee-builder-approvals-list");
+            const error = document.getElementById("employee-builder-approvals-error");
+            if (!list) return;
+            if (error) error.textContent = "";
+            list.innerHTML = '<p class="muted">Loading approvals...</p>';
+            try {
+                const result = await api(`/customer/employee-builder/${Number(employee.agent_id)}/automation-approvals`);
+                const approvals = Array.isArray(result.approvals) ? result.approvals : [];
+                if (!approvals.length) {
+                    list.innerHTML = '<p class="muted">No actions are waiting for approval.</p>';
+                    return;
+                }
+                list.innerHTML = approvals.map(item => `
+                    <div class="note" data-automation-approval-row="${Number(item.id)}">
+                        <div class="employee-builder-current-head">
+                            <strong>${escapeHtml(item.summary || item.action_type || "Pending action")}</strong>
+                            ${badge("Waiting approval", "setup")}
+                        </div>
+                        <div class="muted">
+                            ${escapeHtml(String(item.action_type || ""))}
+                            ${item.node_id ? ` · node ${escapeHtml(String(item.node_id))}` : ""}
+                            ${item.run_id ? ` · run #${Number(item.run_id)}` : ""}
+                        </div>
+                        <pre class="employee-builder-run-output">${escapeHtml(JSON.stringify(item.details || {}, null, 2).slice(0, 4000))}</pre>
+                        <div class="employee-builder-actions">
+                            <button type="button" data-approve-automation="${Number(item.id)}">Approve & continue</button>
+                            <button type="button" data-reject-automation="${Number(item.id)}">Reject</button>
+                        </div>
+                        <div class="error" data-approval-error="${Number(item.id)}"></div>
+                    </div>
+                `).join("");
+
+                list.querySelectorAll("[data-approve-automation]").forEach(button => {
+                    button.addEventListener("click", async () => {
+                        const requestId = Number(button.dataset.approveAutomation || 0);
+                        const rowError = list.querySelector(`[data-approval-error="${requestId}"]`);
+                        if (rowError) rowError.textContent = "";
+                        button.disabled = true;
+                        try {
+                            await api(
+                                `/customer/employee-builder/${Number(employee.agent_id)}/automation-approvals/${requestId}/approve`,
+                                {method: "POST"}
+                            );
+                            await Promise.all([
+                                loadAutomationApprovals(),
+                                loadExecutionHistory(),
+                            ]);
+                        } catch (err) {
+                            if (rowError) rowError.textContent = err?.message || "Could not approve this action.";
+                            button.disabled = false;
+                        }
+                    });
+                });
+
+                list.querySelectorAll("[data-reject-automation]").forEach(button => {
+                    button.addEventListener("click", async () => {
+                        const requestId = Number(button.dataset.rejectAutomation || 0);
+                        const rowError = list.querySelector(`[data-approval-error="${requestId}"]`);
+                        if (rowError) rowError.textContent = "";
+                        button.disabled = true;
+                        try {
+                            await api(
+                                `/customer/employee-builder/${Number(employee.agent_id)}/automation-approvals/${requestId}/reject`,
+                                {method: "POST"}
+                            );
+                            await Promise.all([
+                                loadAutomationApprovals(),
+                                loadExecutionHistory(),
+                            ]);
+                        } catch (err) {
+                            if (rowError) rowError.textContent = err?.message || "Could not reject this action.";
+                            button.disabled = false;
+                        }
+                    });
+                });
+            } catch (err) {
+                list.innerHTML = "";
+                if (error) error.textContent = err?.message || "Could not load approvals.";
+            }
+        }
+
+        document.getElementById("employee-builder-approvals-refresh")?.addEventListener("click", loadAutomationApprovals);
+        loadAutomationApprovals();
 
         document.getElementById("employee-builder-manual-run")?.addEventListener("click", async () => {
             const input = document.getElementById("employee-builder-manual-run-input");
