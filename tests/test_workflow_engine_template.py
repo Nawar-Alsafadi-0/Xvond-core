@@ -135,3 +135,6 @@ def test_inbound_channel_gateway_calls_xvond_then_provider_without_exposing_cred
     assert "conversation_id" in confirm_body
     assert "response_message_id" in confirm_body
     assert "provider_message_id" in confirm_body
+    assert "request_id" not in confirm_body
+    gate = str(nodes["Provider Delivery Confirmed?"]["parameters"])
+    assert "provider_message_id" in gate
