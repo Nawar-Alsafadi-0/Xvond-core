@@ -118,5 +118,6 @@ def test_inbound_channel_gateway_calls_xvond_then_provider_without_exposing_cred
     assert "XVOND_INTERNAL_CHANNEL_URL" in str(nodes["Run Xvond Employee"]["parameters"])
     assert "XVOND_CHANNEL_ROUTES_JSON" in prepare
     assert "channel-reply:" in prepare
-    assert "provider_secret" in prepare
+    assert "provider_secret" not in prepare
+    assert "XVOND_CHANNEL_ROUTES_JSON" in str(nodes["Send Channel Reply"]["parameters"])
     assert "Send Channel Reply" in nodes
