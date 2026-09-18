@@ -127,10 +127,20 @@ class WorkflowActionRequestTool(ActionRequestTool):
             )
 
         destination = action.get("destination") or {}
-        # Xvond-native capabilities and customer-owned generic integrations
-        # stay inside the hardened Core path. This keeps customer secrets encrypted
-        # at rest in Xvond instead of propagating them through workflow payloads.
-        if str(destination.get("type") or "").strip() in {"xvond_internal", "integration"}:
+        destination_type = str(destination.get("type") or "").strip()
+        adapter = str(destination.get("adapter") or "").strip()
+
+        # Concrete Xvond-native business modules and customer-owned protected
+        # integrations execute through the hardened Core adapter. The bounded
+        # generic capability runtime deliberately continues through the managed
+        # workflow -> Xvond Internal callback so its durable/idempotent execution
+        # contract remains intact.
+        if destination_type == "integration":
+            return super().execute(arguments, context)
+        if destination_type == "xvond_internal" and adapter in {
+            "booking",
+            "business_record",
+        }:
             return super().execute(arguments, context)
 
         if operation == "check_availability":
