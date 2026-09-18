@@ -12,6 +12,7 @@ ALLOWED_GRAPH_NODE_TYPES = {
     "transform",
     "condition",
     "notify",
+    "foreach",
 }
 
 
@@ -90,6 +91,12 @@ def resolve_graph_value(value: Any, *, state: dict, node_outputs: dict) -> Any:
             return value
         if path[0] == "input":
             current: Any = state
+            path = path[1:]
+        elif path[0] == "item":
+            current = state.get("_xvond_loop_item")
+            path = path[1:]
+        elif path[0] == "index":
+            current = state.get("_xvond_loop_index")
             path = path[1:]
         elif path[0] == "nodes" and len(path) >= 2:
             current = node_outputs.get(path[1])
