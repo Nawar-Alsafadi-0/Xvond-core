@@ -820,9 +820,11 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             if (
                 action.get("enabled", True) != desired_enabled
                 or action.get("confirmation_required", True) != desired_confirmation
+                or action.get("_xvond_permission_mode") != permission_mode
             ):
                 action["enabled"] = desired_enabled
                 action["confirmation_required"] = desired_confirmation
+                action["_xvond_permission_mode"] = permission_mode
                 actions[key] = action
                 changed = True
         destination = action.get("destination") or {}
