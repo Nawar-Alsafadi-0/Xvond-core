@@ -281,10 +281,58 @@ def update_company_status(
 
 
 @router.get("/companies")
-def list_companies(current_admin: User = Depends(require_xvond_operator)):
+def list_companies(
+    source: str | None = None,
+    lifecycle: str | None = None,
+    search: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+    current_admin: User = Depends(require_xvond_operator),
+):
+    """List tenants with optional server-side filters for the admin control plane.
+
+    Omitting every filter preserves the legacy behavior and returns the complete
+    company list, so existing internal callers remain compatible.
+    """
+    normalized_source = str(source or "").strip().lower()
+    if normalized_source and normalized_source not in {"managed", "self_service"}:
+        raise HTTPException(status_code=400, detail="Invalid company source")
+
+    normalized_lifecycle = str(lifecycle or "").strip().lower()
+    allowed_lifecycle = {
+        "onboarding",
+        "testing",
+        "live",
+        "paused",
+        "suspended",
+        "cancelled",
+        "archived",
+    }
+    if normalized_lifecycle and normalized_lifecycle not in allowed_lifecycle:
+        raise HTTPException(status_code=400, detail="Invalid company lifecycle")
+
+    safe_offset = max(0, int(offset or 0))
+    safe_limit = None if limit is None else max(1, min(int(limit), 200))
+    search_term = str(search or "").strip()
+
     db = SessionLocal()
     try:
-        companies = db.query(Company).order_by(Company.id.asc()).all()
+        query = db.query(Company)
+        if normalized_source:
+            query = query.filter(Company.onboarding_source == normalized_source)
+        if normalized_lifecycle:
+            query = query.filter(Company.lifecycle_status == normalized_lifecycle)
+        if search_term:
+            query = query.filter(Company.name.ilike(f"%{search_term}%"))
+
+        total = query.count()
+        ordered = query.order_by(Company.id.asc())
+        if safe_offset:
+            ordered = ordered.offset(safe_offset)
+        if safe_limit is not None:
+            ordered = ordered.limit(safe_limit)
+        companies = ordered.all()
+
         return {
             "companies": [
                 {
@@ -297,7 +345,10 @@ def list_companies(current_admin: User = Depends(require_xvond_operator)):
                     "created_at": company.created_at,
                 }
                 for company in companies
-            ]
+            ],
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
         }
     finally:
         db.close()
