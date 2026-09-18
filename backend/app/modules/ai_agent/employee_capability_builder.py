@@ -9,6 +9,7 @@ from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
 from backend.app.models.company_profile import CompanyProfile
 from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.automation.schedule import ScheduleConfigError, normalize_schedule_config
 from backend.app.modules.ai_agent.employee_compiler import normalize_requirement_key
@@ -153,6 +154,55 @@ def build_internal_booking_action_config(*, requirement: dict, spec: dict) -> di
     return action
 
 
+def build_external_integration_action_config(*, requirement: dict, spec: dict) -> dict:
+    key = str(requirement.get("key") or "connected_action").strip()
+    purpose = str(requirement.get("purpose") or key.replace("_", " ")).strip()
+    integration_id = requirement.get("integration_id")
+    operations = requirement.get("integration_operations")
+    operations = dict(operations) if isinstance(operations, dict) else {}
+
+    fields = []
+    availability = {"mode": "none"}
+    if key == "booking":
+        fields = [
+            {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
+            {"key": "phone", "label": "Phone", "required": True, "type": "phone"},
+            {"key": "service", "label": "Service", "required": True, "type": "text"},
+            {"key": "date", "label": "Date", "required": True, "type": "date", "role": "date"},
+            {"key": "time", "label": "Time", "required": True, "type": "time", "role": "time"},
+            {"key": "notes", "label": "Notes", "required": False, "type": "text"},
+        ]
+        if isinstance(operations.get("availability"), dict):
+            availability = {
+                "mode": "integration",
+                "date_field": "date",
+                "time_field": "time",
+            }
+
+    module_map = {
+        "booking": "booking",
+        "orders": "orders",
+        "lead_management": "lead_management",
+        "quotation": "quotation",
+        "customer_support": "customer_support",
+    }
+    return {
+        "enabled": _permission_mode(spec, requirement) != "never",
+        "label": purpose[:200] or key,
+        "description": purpose[:1000],
+        "module": module_map.get(key, "tools"),
+        "fields": fields,
+        "confirmation_required": _permission_mode(spec, requirement) != "automatic",
+        "destination": {
+            "type": "integration",
+            "integration_id": integration_id,
+            "operations": operations,
+        },
+        "availability": availability,
+        "xvond_generated": True,
+    }
+
+
 def _permission_mode(spec: dict, requirement: dict) -> str:
     """Only an exact capability/purpose rule can grant automatic execution."""
     targets = {
@@ -201,8 +251,11 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
         for item in (requirement.get("primitives") or ["workflow_engine"])
         if str(item).strip()
     ]
-    if key == "booking" and str(requirement.get("fulfillment_mode") or "") == "xvond_internal":
+    fulfillment_mode = str(requirement.get("fulfillment_mode") or "")
+    if key == "booking" and fulfillment_mode == "xvond_internal":
         return build_internal_booking_action_config(requirement=requirement, spec=spec)
+    if fulfillment_mode == "external_connection" and requirement.get("integration_id"):
+        return build_external_integration_action_config(requirement=requirement, spec=spec)
 
     return {
         "enabled": _permission_mode(spec, requirement) != "never",
@@ -466,6 +519,20 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                 if action.get("_xvond_booking_setup_ready") is True
                 else "setup_required"
             )
+        elif destination.get("type") == "integration":
+            integration_id = destination.get("integration_id")
+            integration = None
+            if company is not None and integration_id:
+                integration = (
+                    db.query(CompanyIntegration)
+                    .filter(
+                        CompanyIntegration.id == int(integration_id),
+                        CompanyIntegration.company_id == company.id,
+                        CompanyIntegration.enabled.is_(True),
+                    )
+                    .first()
+                )
+            execution_status = "ready" if integration is not None else "setup_required"
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "generic_capability":
             plan = destination.get("execution_plan") or []
             needs_http = any(
