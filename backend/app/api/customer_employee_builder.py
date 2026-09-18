@@ -42,6 +42,7 @@ from backend.app.modules.ai_agent.self_service_policy import (
 from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
+from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord, CompanyAIProfile
 from backend.app.modules.tools.models import AgentToolAssignment
 
@@ -656,6 +657,25 @@ def revise_self_service_job_brief(
             agent_id=agent.id,
         )
 
+        desired_channels = set(communication_channels(blueprint.channels))
+        deactivated_channels = []
+        channel_rows = (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.company_id == company.id,
+                AgentChannel.agent_id == agent.id,
+                AgentChannel.enabled.is_(True),
+            )
+            .with_for_update()
+            .all()
+        )
+        for channel in channel_rows:
+            channel_type = str(channel.channel_type or "").strip().lower()
+            is_communication_channel = bool(communication_channels([channel_type]))
+            if is_communication_channel and channel_type not in desired_channels:
+                channel.enabled = False
+                deactivated_channels.append(channel_type)
+
         _reconcile_builder_runtime_tools(
             db,
             agent_id=agent.id,
@@ -689,6 +709,7 @@ def revise_self_service_job_brief(
             "compiled": False,
             "job_brief": blueprint.description,
             "requested_channels": list(communication_channels(blueprint.channels)),
+            "deactivated_channels": deactivated_channels,
             "missing_information": list(blueprint.missing_information),
         }
     except HTTPException:
