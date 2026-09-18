@@ -492,7 +492,7 @@ def _provision_self_service_graph_trigger(
     graph = normalize_execution_graph(execution_graph or {})
     trigger = graph.get("trigger") or {"type": "manual"}
     trigger_type = str(trigger.get("type") or "manual").strip().lower()
-    if trigger_type not in {"webhook", "event"}:
+    if trigger_type not in {"manual", "webhook", "event"}:
         return "not_required", None
     if trigger_type == "event" and not str(trigger.get("event") or "").strip():
         return "setup_required", None
