@@ -22,7 +22,9 @@ def test_support_has_distinct_read_only_operator_dependency():
 def test_support_can_read_operational_control_plane():
     assert 'def summary(current_admin: User = Depends(require_xvond_operator))' in DASHBOARD
     assert 'def company_full_view(company_id: int, current_admin: User = Depends(require_xvond_operator))' in COMPANY_VIEW
-    assert 'def list_companies(current_admin: User = Depends(require_xvond_operator))' in ADMIN
+    assert 'def list_companies(' in ADMIN
+    list_block = ADMIN.split('def list_companies(', 1)[1].split('finally:', 1)[0]
+    assert 'current_admin: User = Depends(require_xvond_operator)' in list_block
     assert 'def backup_status(current_admin: User = Depends(require_xvond_operator))' in OPERATIONS
     assert 'def company_usage(company_id: int, current_admin: User = Depends(require_xvond_operator))' in OPERATIONS
     assert 'def whatsapp_worker_status(current_admin: User = Depends(require_xvond_operator))' in OPERATIONS
