@@ -547,6 +547,13 @@ def build_compiled_employee_system_prompt(*, owner_name: str, spec: dict) -> str
         for item in requirements
     ) or "- No additional requirements were identified."
 
+    customer_inputs = spec.get("customer_inputs") or {}
+    customer_input_lines = "\n".join(
+        f"- {str(key).replace('_', ' ')}: {value}"
+        for key, value in customer_inputs.items()
+        if str(value or "").strip()
+    ) or "- No additional owner-provided setup data."
+
     return f"""You are one persistent Xvond AI employee for {owner_name}.
 
 ROLE:
@@ -569,6 +576,9 @@ PERMISSIONS:
 
 REQUIREMENTS AND DELIVERY STATUS:
 {requirement_lines}
+
+OWNER-PROVIDED SETUP DATA:
+{customer_input_lines}
 
 OPERATING RULES:
 - Treat the original job brief as authoritative. The structured specification helps you execute it; it does not narrow or replace it.
