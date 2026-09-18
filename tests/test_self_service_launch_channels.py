@@ -252,3 +252,50 @@ def test_future_catalog_channel_does_not_look_launch_ready_before_runtime_suppor
     assert state["ready"] is False
     assert state["prepared_channels"] == []
     assert state["missing_channels"] == ["voice"]
+
+
+def test_self_service_deactivate_stops_channels_and_can_relaunch(
+    launch_database,
+    monkeypatch,
+):
+    factory = launch_database
+    monkeypatch.setattr(
+        self_service_policy,
+        "whatsapp_connection_state",
+        lambda config, verify_remote=False: {
+            "connected": True,
+            "connection_issue": None,
+        },
+    )
+
+    api.launch_self_service_employee(1, USER)
+    stopped = api.deactivate_self_service_employee(1, USER)
+
+    assert stopped["status"] == "draft"
+    assert stopped["company_lifecycle"] == "paused"
+    assert stopped["deactivated_channels"] == ["whatsapp"]
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        agent = db.get(AIAgent, 1)
+        channel = db.query(AgentChannel).filter_by(
+            company_id=1,
+            agent_id=1,
+            channel_type="whatsapp",
+        ).one()
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+
+        assert company.active is False
+        assert company.lifecycle_status == "paused"
+        assert agent.enabled is False
+        assert channel.enabled is False
+        assert self_service_policy.self_service_readiness(
+            db,
+            company=company,
+            agent=agent,
+            config=config,
+        )["ready"] is True
+
+    restarted = api.launch_self_service_employee(1, USER)
+    assert restarted["status"] == "live"
+    assert restarted["active_channels"] == ["whatsapp"]
