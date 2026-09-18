@@ -562,6 +562,55 @@ def test_self_service_content_generation_schedule_builds_ai_then_action(database
         }
 
 
+def test_self_service_media_generation_schedule_builds_ai_media_then_action(database):
+    factory, _ = database
+    brief, payload = _scheduled_payload()
+    payload["requirements"][0]["purpose"] = "Create and publish the daily Instagram post"
+    payload["requirements"][0]["primitives"] = [
+        "content_generation",
+        "media_generation",
+        "scheduler",
+        "workflow_engine",
+    ]
+    payload["requirements"][0]["execution_plan"] = [
+        {
+            "id": "notify",
+            "op": "notify",
+            "title": "Content ready",
+            "message": "Scheduled content was generated.",
+        }
+    ]
+    payload["permissions"] = [
+        {"action": "Create and publish the daily Instagram post", "mode": "automatic"}
+    ]
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+    requirement = result["spec"]["requirements"][0]
+
+    assert requirement["execution_status"] == "ready"
+    assert requirement["schedule_status"] == "ready"
+
+    with factory() as db:
+        workflow = db.query(AutomationWorkflow).one()
+        assert [step["type"] for step in workflow.steps] == [
+            "ai",
+            "media_generation",
+            "scheduled_action",
+        ]
+        assert workflow.steps[1]["size"] == "1024x1024"
+        assert workflow.steps[2] == {
+            "type": "scheduled_action",
+            "agent_id": 1,
+            "action_type": KEY,
+        }
+
+
 def test_self_service_schedule_requires_explicit_automatic_permission(database):
     factory, _ = database
     brief, payload = _scheduled_payload(permission_mode="ask_before")
