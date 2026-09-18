@@ -39,6 +39,7 @@ def test_install_include_places_core_routes_in_requested_vhost(tmp_path, monkeyp
         "server {\n"
         "    listen 443 ssl;\n"
         "    server_name xvond.com;\n"
+        "    include /etc/nginx/snippets/xvond-core-locations.conf;\n"
         "    location / { return 200; }\n"
         "}\n\n"
         "server {\n"
@@ -56,9 +57,9 @@ def test_install_include_places_core_routes_in_requested_vhost(tmp_path, monkeyp
     rendered = target.read_text(encoding="utf-8")
 
     assert changed is True
-    assert rendered.count("include /etc/nginx/snippets/xvond-core-locations.conf;") == 1
+    assert rendered.count("include /etc/nginx/snippets/xvond-core-locations.conf;") == 2
     api_start = rendered.index("server_name api.xvond.com;")
-    include_at = rendered.index("include /etc/nginx/snippets/xvond-core-locations.conf;")
+    include_at = rendered.index("include /etc/nginx/snippets/xvond-core-locations.conf;", api_start)
     assert include_at > api_start
 
 
@@ -67,3 +68,31 @@ def test_env_file_is_used_when_public_base_url_is_not_exported(tmp_path, monkeyp
     (tmp_path / ".env").write_text("PUBLIC_BASE_URL=https://api.xvond.com\n", encoding="utf-8")
     monkeypatch.setattr(installer, "REPO_ROOT", tmp_path)
     assert installer._public_base_host() == "api.xvond.com"
+
+
+def test_install_include_is_idempotent_inside_target_vhost(tmp_path, monkeypatch):
+    target = tmp_path / "api.conf"
+    target.write_text(
+        "server {\n"
+        "    server_name api.xvond.com;\n"
+        "    include /etc/nginx/snippets/xvond-core-locations.conf;\n"
+        "    location / { return 200; }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        installer,
+        "INCLUDE_PATH",
+        Path("/etc/nginx/snippets/xvond-core-locations.conf"),
+    )
+    monkeypatch.setattr(
+        installer,
+        "INCLUDE_LINE",
+        "    include /etc/nginx/snippets/xvond-core-locations.conf;",
+    )
+
+    before = target.read_text(encoding="utf-8")
+    _target, changed = installer._install_include(target, "api.xvond.com")
+
+    assert changed is False
+    assert target.read_text(encoding="utf-8") == before
