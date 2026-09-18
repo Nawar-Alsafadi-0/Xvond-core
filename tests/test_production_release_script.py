@@ -12,6 +12,15 @@ def test_release_refuses_dirty_tree_and_validates_compose():
     assert "compose config" in SOURCE
 
 
+def test_release_requires_canonical_release_branch_by_default():
+    dirty_check = SOURCE.index("git status --porcelain")
+    branch_check = SOURCE.index('required_release_branch="${DEPLOY_RELEASE_BRANCH:-main}"')
+    env_check = SOURCE.index('if [ ! -f .env ]')
+    assert dirty_check < branch_check < env_check
+    assert "git symbolic-ref --quiet --short HEAD" in SOURCE
+    assert "Refusing production deploy: current branch" in SOURCE
+
+
 def test_release_rejects_missing_or_placeholder_environment_before_compose():
     env_check = SOURCE.index('if [ ! -f .env ]')
     required_core = SOURCE.index('for key in \\\n    DATABASE_URL')
