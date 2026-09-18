@@ -40,7 +40,7 @@ def test_backup_scripts_publish_status_only_after_success():
     local = (root / "scripts" / "backup_postgres.sh").read_text(encoding="utf-8")
     offsite = (root / "scripts" / "offsite_backup_loop.sh").read_text(encoding="utf-8")
 
-    assert local.index("pg_dump") < local.index("sha256sum") < local.index("local_success_epoch")
+    assert local.index("pg_dump") < local.index("pg_restore --list") < local.index("sha256sum") < local.index("local_success_epoch")
     assert offsite.index("restic backup") < offsite.index("restic check") < offsite.index("offsite_success_epoch")
 
 
