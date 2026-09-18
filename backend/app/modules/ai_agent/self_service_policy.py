@@ -143,7 +143,7 @@ def self_service_connection_status(item: dict) -> str | None:
         return None
     kind = str(item.get("kind") or "").strip().lower()
     if kind != "channel":
-        return "xvond_adapter_required"
+        return "self_service_integration_available"
 
     key = canonical_channel_type(item.get("key"))
     if key == "xvond_workspace":
