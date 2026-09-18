@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -81,7 +82,7 @@ class EmployeeBuilderTestRequest(BaseModel):
 
 
 class EmployeeBuilderReviseRequest(BaseModel):
-    description: str = Field(min_length=8, max_length=4000)
+    description: str = Field(min_length=8, max_length=12000)
 
 
 class EmployeeBuilderRefineRequest(BaseModel):
@@ -139,9 +140,9 @@ def _snapshot_builder_version(
             "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "reason": str(reason or "change")[:120],
             "source_description": snapshot_source[:12000],
-            "compiled_spec": snapshot_spec if isinstance(snapshot_spec, dict) else None,
+            "compiled_spec": deepcopy(snapshot_spec) if isinstance(snapshot_spec, dict) else None,
             "compiled_at": builder.get("compiled_at"),
-            "setup_answers": dict(builder.get("setup_answers") or {}),
+            "setup_answers": deepcopy(dict(builder.get("setup_answers") or {})),
             "requested_channels": list(builder.get("requested_channels") or []),
             "capabilities": dict(capabilities or {}),
         }
