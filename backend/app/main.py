@@ -44,6 +44,7 @@ from backend.app.api.internal_channel_gateway import router as internal_channel_
 from backend.app.api.public_channels import router as public_channels_router
 from backend.app.api.public_employee_builder import router as public_employee_builder_router
 from backend.app.api.public_billing import router as public_billing_router
+from backend.app.api.public_media import router as public_media_router
 from backend.app.api.voice_llm import router as voice_llm_router
 from backend.app.api.website_widget import router as website_widget_router
 from backend.app.api.ai_agents import router as ai_agents_router
@@ -235,6 +236,7 @@ for r in [
     public_channels_router,
     public_employee_builder_router,
     public_billing_router,
+    public_media_router,
     voice_llm_router,
     website_widget_router,
     modules_router,
