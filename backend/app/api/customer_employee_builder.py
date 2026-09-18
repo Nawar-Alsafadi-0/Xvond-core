@@ -757,6 +757,12 @@ def _self_service_builder_journey(
                                     "min": "5",
                                     "max": "720",
                                 },
+                                "capacity": {
+                                    "label": "Bookings allowed per time slot",
+                                    "type": "number",
+                                    "min": "1",
+                                    "max": "100",
+                                },
                             }.get(field_key, {})
                             input_fields.append(
                                 {
