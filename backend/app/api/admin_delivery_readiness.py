@@ -7,13 +7,18 @@ from backend.app.core.database.connection import SessionLocal
 from backend.app.core.dependencies import require_xvond_admin
 from backend.app.core.n8n_gateway import N8NGatewayError, n8n_gateway
 from backend.app.core.readiness import _channel_customer_accepted
+from backend.app.core.n8n_channel_gateway import N8NChannelGatewayError, n8n_channel_gateway
 from backend.app.models.company import Company
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.profile_models import AIAgentProfile
 from backend.app.modules.billing.limits import limits_service
-from backend.app.modules.channels.catalog import validate_channel_config
+from backend.app.modules.channels.catalog import (
+    N8N_CHANNEL_RUNTIME_ADAPTER,
+    get_channel_capability,
+    validate_channel_config,
+)
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
 from backend.app.modules.integrations.models import CompanyIntegration
@@ -117,12 +122,33 @@ def _channel_state(db, company_id: int, agent_id: int) -> dict:
             validate_channel_config(row.channel_type, config)
         except ValueError:
             continue
+        capability = get_channel_capability(row.channel_type) or {}
+        if capability.get("runtime_adapter") == N8N_CHANNEL_RUNTIME_ADAPTER:
+            if str(config.get("provisioning_state") or "").strip().lower() != "connected":
+                continue
         configured.append(row)
 
         connection = None
         if row.channel_type == "whatsapp":
             connection = whatsapp_connection_state(config, verify_remote=True)
             connected = bool(connection["connected"])
+        elif capability.get("runtime_adapter") == N8N_CHANNEL_RUNTIME_ADAPTER:
+            if not n8n_channel_gateway.configured():
+                connected = False
+            else:
+                try:
+                    route = n8n_channel_gateway.check_channel(
+                        company_id=row.company_id,
+                        agent_id=row.agent_id,
+                        channel_id=row.id,
+                        channel_type=row.channel_type,
+                    )
+                except N8NChannelGatewayError:
+                    route = {"success": False}
+                connected = bool(
+                    route.get("success")
+                    and (route.get("data") or {}).get("connected") is True
+                )
         else:
             connected = True
 
