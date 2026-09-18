@@ -236,9 +236,14 @@ async function xvondCustomerFinishMetaWhatsAppSignup(code) {
 
 async function xvondDecorateCustomerAgentsWithWhatsApp() {
     if (!currentUser || !["owner", "admin", "manager"].includes(currentUser.role)) return;
+    const selfService = portalOverview?.company?.onboarding_source === "self_service";
     const cards = Array.from(document.querySelectorAll("#agents-list .agent"));
     await Promise.all((agents || []).map(async (agent, index) => {
         const card = cards[index];
+        const slots = Array.isArray(agent?.self_service_channel_slots)
+            ? agent.self_service_channel_slots
+            : [];
+        if (selfService && !slots.includes("whatsapp")) return;
         if (!card || card.querySelector(".xvond-whatsapp-connect")) return;
 
         const box = document.createElement("div");
