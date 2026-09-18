@@ -14,6 +14,7 @@ from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.automation.execution_graph import (
     graph_action_types,
+    graph_nested_action_types,
     normalize_execution_graph,
 )
 from backend.app.modules.automation.schedule import ScheduleConfigError, normalize_schedule_config
@@ -514,13 +515,17 @@ def _provision_self_service_graph_trigger(
         return "setup_required", None
 
     action_types = graph_action_types(graph)
+    nested_action_types = set(graph_nested_action_types(graph))
     for action_type in action_types:
         action = actions.get(action_type)
         plan = action_plan.get(action_type) or {}
         if not isinstance(action, dict):
             return "setup_required", None
-        if action.get("confirmation_required", True):
-            return "approval_required", None
+        if (
+            action.get("confirmation_required", True)
+            and action_type in nested_action_types
+        ):
+            return "nested_approval_not_ready", None
         if str(plan.get("execution_status") or "") != "ready":
             return "setup_required", None
 
