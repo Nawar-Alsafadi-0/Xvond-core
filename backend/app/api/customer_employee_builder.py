@@ -114,6 +114,10 @@ class EmployeeBuilderGraphRunRequest(BaseModel):
     input_data: dict = Field(default_factory=dict)
 
 
+class EmployeeBuilderPermissionRequest(BaseModel):
+    mode: str = Field(min_length=4, max_length=20)
+
+
 DEFAULT_CUSTOMER_CONTROLS = {
     "can_enable_disable": True,
     "can_view_conversations": True,
@@ -125,6 +129,111 @@ DEFAULT_CUSTOMER_CONTROLS = {
 
 
 BUILDER_HISTORY_LIMIT = 20
+OWNER_PERMISSION_MODES = {"automatic", "ask_before", "never"}
+
+
+def _effective_compiled_permissions(spec: dict, builder: dict) -> dict:
+    """Resolve compiler suggestions against explicit owner grants.
+
+    Compiler output can suggest automatic execution, but it cannot grant that
+    authority. Owner overrides are keyed by normalized requirement key and are
+    the only path that can promote a consequential action to automatic.
+    """
+
+    prepared = deepcopy(spec)
+    raw_owner = builder.get("owner_permissions")
+    owner_permissions = {
+        normalize_requirement_key(key): str(value or "").strip().lower()
+        for key, value in (raw_owner.items() if isinstance(raw_owner, dict) else [])
+        if normalize_requirement_key(key)
+        and str(value or "").strip().lower() in OWNER_PERMISSION_MODES
+    }
+
+    raw_permissions = [
+        dict(item)
+        for item in (prepared.get("permissions") or [])
+        if isinstance(item, dict) and str(item.get("action") or "").strip()
+    ]
+    consumed: set[int] = set()
+    effective: list[dict] = []
+
+    for requirement in prepared.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        key = normalize_requirement_key(requirement.get("key"))
+        if not key:
+            continue
+        targets = {
+            key,
+            normalize_requirement_key(requirement.get("purpose")),
+        } - {""}
+        matching: list[tuple[int, dict]] = []
+        for index, permission in enumerate(raw_permissions):
+            action_key = normalize_requirement_key(permission.get("action"))
+            if action_key in targets:
+                matching.append((index, permission))
+                consumed.add(index)
+
+        suggested_modes = [
+            str(
+                permission.get("suggested_mode")
+                or permission.get("mode")
+                or "ask_before"
+            ).strip().lower()
+            for _, permission in matching
+        ]
+        suggested_mode = None
+        if "never" in suggested_modes:
+            suggested_mode = "never"
+        elif "automatic" in suggested_modes:
+            suggested_mode = "automatic"
+        elif matching:
+            suggested_mode = "ask_before"
+
+        owner_mode = owner_permissions.get(key)
+        if owner_mode is not None:
+            effective.append(
+                {
+                    "action": key,
+                    "mode": owner_mode,
+                    "suggested_mode": suggested_mode or "ask_before",
+                    "source": "owner",
+                }
+            )
+        elif matching:
+            effective.append(
+                {
+                    "action": key,
+                    "mode": "never" if suggested_mode == "never" else "ask_before",
+                    "suggested_mode": suggested_mode or "ask_before",
+                    "source": "compiler_suggestion",
+                }
+            )
+
+    for index, permission in enumerate(raw_permissions):
+        if index in consumed:
+            continue
+        suggested_mode = str(
+            permission.get("suggested_mode")
+            or permission.get("mode")
+            or "ask_before"
+        ).strip().lower()
+        if suggested_mode not in OWNER_PERMISSION_MODES:
+            suggested_mode = "ask_before"
+        effective.append(
+            {
+                "action": str(permission.get("action") or "").strip()[:500],
+                "mode": "never" if suggested_mode == "never" else "ask_before",
+                "suggested_mode": suggested_mode,
+                "source": "compiler_suggestion",
+            }
+        )
+        if len(effective) >= 50:
+            break
+
+    prepared["permissions"] = effective[:50]
+    prepared["owner_permissions"] = owner_permissions
+    return prepared
 
 
 def _snapshot_builder_version(
@@ -155,6 +264,7 @@ def _snapshot_builder_version(
             "requested_channels": list(builder.get("requested_channels") or []),
             "audience": builder.get("audience"),
             "permissions": deepcopy(dict(builder.get("permissions") or {})),
+            "owner_permissions": deepcopy(dict(builder.get("owner_permissions") or {})),
             "capabilities": dict(capabilities or {}),
         }
     )
@@ -323,6 +433,7 @@ def _store_provisioned_spec(
     db, *, company_id: int, agent: AIAgent, config: AgentConfig,
     settings: dict, builder: dict, spec: dict,
 ) -> dict:
+    spec = _effective_compiled_permissions(spec, builder)
     compiled_spec, delivery = provision_compiled_capabilities(db, agent_id=agent.id, spec=spec)
     setup_answers = builder.get("setup_answers") or {}
     if isinstance(setup_answers, dict):
@@ -1168,6 +1279,7 @@ def create_employee(
                 "permissions": dict(blueprint.permissions),
                 "missing_information": list(blueprint.missing_information),
                 "setup_answers": {},
+                "owner_permissions": {},
                 "onboarding_source": company.onboarding_source,
                 "delivery_mode": (
                     "self_service"
@@ -1321,6 +1433,7 @@ def revise_self_service_job_brief(
                 "permissions": dict(blueprint.permissions),
                 "missing_information": list(blueprint.missing_information),
                 "setup_answers": {},
+                "owner_permissions": {},
                 "onboarding_source": company.onboarding_source,
                 "delivery_mode": "self_service",
                 "compiled_spec": None,
