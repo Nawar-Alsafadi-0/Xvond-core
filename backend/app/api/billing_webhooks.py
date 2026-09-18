@@ -278,15 +278,7 @@ def _upsert_tap_payment_profile(
         or contract.get("customer_id")
         or ""
     ).strip()
-    card_id = str(
-        card.get("id")
-        or (
-            contract.get("id")
-            if str(contract.get("type") or "").upper() == "SAVED_CARD"
-            else ""
-        )
-        or ""
-    ).strip()
+    card_id = str(card.get("id") or "").strip()
     agreement_id = str(agreement.get("id") or "").strip()
 
     if not customer_id or not card_id or not agreement_id:
