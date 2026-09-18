@@ -43,6 +43,7 @@ def test_public_builder_is_open_ended_and_creates_directly_without_preview():
     assert "preview-btn" not in html
     assert "review-card" not in html
     assert "/customer/employee-builder/create" in html
+    assert "/customer-ui#employee-builder" in html
     assert "/auth/login" in html
     assert "/auth/signup" in html
     assert "sessionStorage" in html
@@ -66,6 +67,11 @@ def test_customer_portal_treats_job_brief_as_source_of_truth():
     assert "source of truth" in source
     assert "instead of limiting it to a predefined agent type" in source
     assert "Xvond builds this" in source
+    assert "BUILD PROGRESS" in source
+    assert "data-builder-action" in source
+    assert "setup_website" in source
+    assert "setup_whatsapp" in source
+    assert "manage_knowledge" in source
     assert "Capabilities" not in source
     assert "/customer/employee-builder/create" not in source
     assert "/customer/employee-builder/preview" not in source
