@@ -1,0 +1,211 @@
+{
+  "name": "Xvond Managed Channels Gateway",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "xvond-channels",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "xvond-channels-webhook",
+      "name": "Xvond Channels Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        260,
+        300
+      ],
+      "webhookId": "xvond-channels"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst suppliedSecret = headers['x-xvond-n8n-secret'] || headers['X-Xvond-N8N-Secret'];\nconst expectedSecret = $env.N8N_SHARED_SECRET;\nconst requestId = String(body.request_id || headers['x-xvond-request-id'] || '');\nconst action = String(body.action || '').trim();\nconst data = body.data && typeof body.data === 'object' ? body.data : {};\nconst fail = (error, code, extra = {}) => [{ json: { success: false, request_id: requestId, action, data: null, error_code: code, error, ...extra } }];\nif (!expectedSecret || suppliedSecret !== expectedSecret) return fail('Unauthorized channel workflow request', 'unauthorized');\nif (!requestId || !body.company_id || !body.agent_id || !action) return fail('Invalid channel workflow request contract', 'invalid_contract');\nif (!['channel.check', 'channel.send'].includes(action)) return fail('Unsupported channel workflow action', 'unsupported_action');\nconst channelId = Number(data.channel_id || 0);\nconst channelType = String(data.channel_type || '').trim().toLowerCase();\nif (!channelId || !channelType) return fail('Channel identity is required', 'invalid_channel');\nlet registry = {};\ntry { registry = JSON.parse($env.XVOND_WORKFLOW_CHANNELS_JSON || '{}'); }\ncatch (_e) { return fail('Channel route registry is invalid', 'provider_not_configured'); }\nconst routeKey = `${body.company_id}:${channelId}`;\nconst target = registry[routeKey];\nif (!target || target.type !== 'webhook' || typeof target.url !== 'string' || !target.url.startsWith('https://')) {\n  return fail('Managed channel route is not configured', 'provider_not_configured');\n}\nconst targetChannelType = String(target.channel_type || channelType).trim().toLowerCase();\nif (targetChannelType !== channelType) return fail('Managed channel route type mismatch', 'route_mismatch');\nif (action === 'channel.check') {\n  return [{ json: {\n    success: true,\n    request_id: requestId,\n    action,\n    data: { connected: true, channel_id: channelId, channel_type: channelType, route_key: routeKey },\n    error: null\n  }}];\n}\nconst contact = String(data.external_contact_id || '').trim();\nconst message = String(data.message || '').trim();\nconst idempotencyKey = String(data.idempotency_key || '').trim();\nif (!contact || !message || !idempotencyKey) return fail('Channel send requires contact, message and idempotency key', 'invalid_send_contract');\nreturn [{ json: {\n  _dispatch: 'send',\n  request_id: requestId,\n  action,\n  company_id: Number(body.company_id),\n  agent_id: Number(body.agent_id),\n  channel_id: channelId,\n  channel_type: channelType,\n  external_contact_id: contact,\n  message,\n  idempotency_key: idempotencyKey,\n  route_key: routeKey,\n  route_url: target.url,\n  route_secret: String(target.secret || '')\n}}];"
+      },
+      "id": "validate-channel-dispatch",
+      "name": "Validate Channel Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "dispatch-send",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "send",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-channel-send",
+      "name": "Send Channel Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.route_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Xvond-Channel-Secret",
+              "value": "={{ $json.route_secret }}"
+            },
+            {
+              "name": "X-Xvond-Request-ID",
+              "value": "={{ $json.request_id }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.idempotency_key }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ request_id: $json.request_id, company_id: $json.company_id, agent_id: $json.agent_id, channel_id: $json.channel_id, channel_type: $json.channel_type, external_contact_id: $json.external_contact_id, message: $json.message, idempotency_key: $json.idempotency_key }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "execute-channel-send",
+      "name": "Execute Channel Route",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1000,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const route = $('Validate Channel Route').first().json;\nconst provider = $input.first().json || {};\nconst success = provider.success === true;\nconst providerMessageId = provider.provider_message_id ?? provider.message_id ?? provider.id ?? null;\nreturn [{ json: {\n  success,\n  request_id: route.request_id,\n  action: route.action,\n  data: success ? {\n    connected: true,\n    channel_id: route.channel_id,\n    channel_type: route.channel_type,\n    provider_message_id: providerMessageId == null ? null : String(providerMessageId)\n  } : null,\n  error_code: success ? null : String(provider.error_code || provider.code || 'provider_send_failed'),\n  error: success ? null : 'Managed channel provider delivery failed'\n}}];"
+      },
+      "id": "normalize-channel-result",
+      "name": "Normalize Channel Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1240,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
+      "id": "channel-response",
+      "name": "Return Channel Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1480,
+        300
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Xvond Channels Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Channel Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Channel Route": {
+      "main": [
+        [
+          {
+            "node": "Send Channel Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Channel Message?": {
+      "main": [
+        [
+          {
+            "node": "Execute Channel Route",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Channel Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Channel Route": {
+      "main": [
+        [
+          {
+            "node": "Normalize Channel Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Channel Result": {
+      "main": [
+        [
+          {
+            "node": "Return Channel Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "44444444-4444-4444-8444-444444444444",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
