@@ -8,6 +8,7 @@ from backend.app.models.company_module import CompanyModule
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIConversation, AIUsage
+from backend.app.modules.ai_agent.self_service_policy import is_self_service_company, self_service_readiness
 from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.integrations.models import CompanyIntegration
@@ -92,6 +93,26 @@ def company_full_view(company_id: int, current_admin: User = Depends(require_xvo
             func.coalesce(func.sum(AIUsage.provider_cost), 0),
         ).filter(AIUsage.company_id == company_id).first()
 
+        self_service_states = {}
+        if is_self_service_company(company):
+            for agent in agents:
+                config = configs_by_agent.get(agent.id)
+                if config is None:
+                    continue
+                try:
+                    self_service_states[agent.id] = self_service_readiness(
+                        db,
+                        company=company,
+                        agent=agent,
+                        config=config,
+                    )
+                except HTTPException as exc:
+                    self_service_states[agent.id] = {
+                        "ready": False,
+                        "blockers": [str(exc.detail)],
+                        "employee_source": "self_service",
+                    }
+
         support_view = current_admin.role == "support"
         user_payload = [] if support_view else [
             {
@@ -153,6 +174,7 @@ def company_full_view(company_id: int, current_admin: User = Depends(require_xvo
                             dict,
                         )
                     ),
+                    "self_service_readiness": self_service_states.get(item.id),
                 }
                 for item in agents
             ],
