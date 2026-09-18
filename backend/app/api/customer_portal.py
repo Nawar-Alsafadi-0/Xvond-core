@@ -291,6 +291,17 @@ def overview(current_user: User = Depends(require_customer_user)):
                     "service_code": "ai_agents",
                 },
             )
+            if not any(item.get("id") == "integrations" for item in navigation):
+                navigation.insert(
+                    max(len(navigation) - 2, 2),
+                    {
+                        "id": "integrations",
+                        "label": "Connected Systems",
+                        "loader": "integrations",
+                        "group": "Connected Systems",
+                        "service_code": "ai_agents",
+                    },
+                )
         navigation.insert(
             max(len(navigation) - 1, 1),
             {
