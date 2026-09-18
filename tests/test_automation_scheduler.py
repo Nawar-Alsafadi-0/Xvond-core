@@ -10,6 +10,7 @@ from backend.app.api.admin_automation import validate_workflow
 from backend.app.core.database.base import Base
 from backend.app.models.company import Company
 from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.automation.schedule import (
     latest_due_slot,
@@ -937,3 +938,198 @@ def test_graph_runtime_supports_safe_public_web_fetch(monkeypatch):
     assert captured["max_response_bytes"] == 500_000
     assert result["graph_outputs"]["page"]["content"].endswith("</html>")
     assert result["graph_outputs"]["page"]["truncated"] is False
+
+
+
+def test_graph_runtime_persists_reads_and_deletes_agent_state():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    with Session(engine, autoflush=False) as db:
+        db.add(
+            Company(
+                id=1,
+                name="State Company",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Stateful worker",
+                system_prompt="Persist compact operational state.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+
+        write_result = runtime.execute_step(
+            db=db,
+            company_id=1,
+            step={
+                "type": "graph",
+                "agent_id": 1,
+                "graph": {
+                    "version": 1,
+                    "nodes": [
+                        {
+                            "id": "save",
+                            "type": "state_write",
+                            "depends_on": [],
+                            "params": {
+                                "namespace": "monitor",
+                                "key": "last_processed_id",
+                                "value": "abc-123",
+                            },
+                        },
+                        {
+                            "id": "read",
+                            "type": "state_read",
+                            "depends_on": ["save"],
+                            "params": {
+                                "namespace": "monitor",
+                                "key": "last_processed_id",
+                            },
+                        },
+                    ],
+                },
+            },
+            state={"_xvond_execution_key": "state-write-read"},
+            run_id=1,
+            step_index=0,
+        )
+
+        assert write_result["graph_outputs"]["save"]["written"] is True
+        assert write_result["graph_outputs"]["read"]["value"] == "abc-123"
+
+        db.commit()
+
+    with Session(engine, autoflush=False) as db:
+        runtime = automation_runtime_module.AutomationRuntime()
+        read_result = runtime.execute_step(
+            db=db,
+            company_id=1,
+            step={
+                "type": "graph",
+                "agent_id": 1,
+                "graph": {
+                    "version": 1,
+                    "nodes": [
+                        {
+                            "id": "read",
+                            "type": "state_read",
+                            "depends_on": [],
+                            "params": {
+                                "namespace": "monitor",
+                                "key": "last_processed_id",
+                            },
+                        },
+                        {
+                            "id": "delete",
+                            "type": "state_delete",
+                            "depends_on": ["read"],
+                            "params": {
+                                "namespace": "monitor",
+                                "key": "last_processed_id",
+                            },
+                        },
+                    ],
+                },
+            },
+            state={"_xvond_execution_key": "state-read-delete"},
+            run_id=2,
+            step_index=0,
+        )
+
+        assert read_result["graph_outputs"]["read"]["value"] == "abc-123"
+        assert read_result["graph_outputs"]["delete"]["deleted"] is True
+        db.commit()
+
+    with Session(engine, autoflush=False) as db:
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        root = (config.settings or {}).get("_xvond_runtime_state") or {}
+        assert "monitor" not in root
+
+    engine.dispose()
+
+
+def test_agent_state_rejects_large_values():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="State Company", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Stateful worker",
+                system_prompt="State",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        try:
+            runtime.execute_step(
+                db=db,
+                company_id=1,
+                step={
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "save",
+                                "type": "state_write",
+                                "depends_on": [],
+                                "params": {
+                                    "namespace": "memory",
+                                    "key": "too_large",
+                                    "value": "x" * 70000,
+                                },
+                            }
+                        ],
+                    },
+                },
+                state={},
+                run_id=1,
+                step_index=0,
+            )
+        except ValueError as exc:
+            assert "64 KB" in str(exc)
+        else:
+            raise AssertionError("oversized state value must be rejected")
+
+    engine.dispose()
