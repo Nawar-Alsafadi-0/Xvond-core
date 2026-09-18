@@ -144,6 +144,8 @@ def _snapshot_builder_version(
             "compiled_at": builder.get("compiled_at"),
             "setup_answers": deepcopy(dict(builder.get("setup_answers") or {})),
             "requested_channels": list(builder.get("requested_channels") or []),
+            "audience": builder.get("audience"),
+            "permissions": deepcopy(dict(builder.get("permissions") or {})),
             "capabilities": dict(capabilities or {}),
         }
     )
@@ -1502,7 +1504,9 @@ def rollback_self_service_employee(
         builder["source_description"] = restored_brief
         builder["job_brief"] = restored_brief
         builder["requested_channels"] = restored_channels
-        builder["setup_answers"] = dict(selected.get("setup_answers") or {})
+        builder["audience"] = selected.get("audience")
+        builder["permissions"] = deepcopy(dict(selected.get("permissions") or {}))
+        builder["setup_answers"] = deepcopy(dict(selected.get("setup_answers") or {}))
         _clear_current_build_evidence(builder)
 
         if isinstance(restored_spec, dict):
@@ -1569,7 +1573,11 @@ def rollback_self_service_employee(
                     else None
                 )
             else:
-                profile.business_type = builder.get("business_type")
+                profile.business_type = (
+                    "personal"
+                    if str(builder.get("audience") or "").strip().lower() == "personal"
+                    else None
+                )
 
         reconcile_managed_channel_requests(
             db,
