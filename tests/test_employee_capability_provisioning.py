@@ -116,7 +116,7 @@ def test_compile_provisions_and_atomically_stores_spec_action_contract_and_deliv
         assert spec["job_brief"] == BRIEF
         assert spec["requirements"][0]["status"] == "xvond_managed"
         assert spec["requirements"][0]["provisioned"] is True
-        assert spec["requirements"][0]["execution_status"] == "adapter_required"
+        assert spec["requirements"][0]["execution_status"] == "setup_required"
         assert spec["ready_requirements"] == []
         assert spec["build_required"] == []
         assert builder["missing_information"] == ["email_send", "knowledge"]
@@ -129,7 +129,10 @@ def test_compile_provisions_and_atomically_stores_spec_action_contract_and_deliv
         assignment = _assignment(db)
         assert set(assignment.config["actions"]) == {KEY}
         action = assignment.config["actions"][KEY]
-        assert action["destination"]["type"] == "workflow_engine"
+        assert action["destination"]["type"] == "xvond_internal"
+        assert action["destination"]["adapter"] == "generic_capability"
+        assert action["destination"]["execution_plan"] == []
+        assert action["destination"]["allowed_hosts"] == []
         assert action["destination"]["capability_key"] == KEY
         assert action["confirmation_required"] is True
         assert action["destination"]["job_brief"] == BRIEF
@@ -293,7 +296,7 @@ def test_unprovisioned_spec_and_missing_adapter_block_go_live(database):
     with factory() as db:
         state = _action_state(db, 1, 1)
         assert state["ready"] is False
-        assert any("execution adapter" in item for item in state["issues"])
+        assert any("generated execution plan" in item for item in state["issues"])
         assert _delivery_state(db, 1, 1)["payload"]["setup_ready"] is False
         assert "action_request" not in {item["name"] for item in ToolExecutor().get_agent_tools(db, 1)}
 
@@ -337,25 +340,23 @@ def test_novel_keys_produce_stable_generic_workflow_identifiers(key):
     assert normalize_compiled_spec(payload, job_brief=BRIEF) == spec
 
 
-def test_stored_contract_reaches_generic_workflow_and_fails_without_adapter(database, monkeypatch):
+def test_stored_contract_reaches_generic_runtime_and_fails_closed_without_plan(database, monkeypatch):
     factory, _ = database
     payload = deepcopy(PAYLOAD)
     payload["permissions"] = [{"action": KEY, "mode": "automatic"}]
     _cache(factory, normalize_compiled_spec(payload, job_brief=BRIEF))
     api.compile_employee(1, USER)
-    workflow = json.loads(Path("ops/n8n/xvond-actions.workflow.json").read_text(encoding="utf-8"))
-    code = next(node for node in workflow["nodes"] if node["name"] == "Validate and Dispatch")["parameters"]["jsCode"]
     captured = []
 
     def dispatch(**kwargs):
         captured.append(kwargs)
-        script = "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync(0,'utf8'));" \
-                 "const run=new Function('$input','$env',p.code);" \
-                 "const result=run({first:()=>({json:{headers:{'x-xvond-n8n-secret':'test'},body:p.body}})},{N8N_SHARED_SECRET:'test'});" \
-                 "process.stdout.write(JSON.stringify(result[0].json));"
-        output = subprocess.run(["node", "-e", script], input=json.dumps({"code": code, "body": kwargs}),
-                                text=True, capture_output=True, check=True, timeout=15)
-        return json.loads(output.stdout)
+        return {
+            "success": False,
+            "request_id": kwargs.get("request_id"),
+            "action": kwargs["action"],
+            "data": {"runtime": "generic_capability"},
+            "error": "execution_plan_required",
+        }
 
     monkeypatch.setattr("backend.app.modules.tools.workflow_action_request.n8n_gateway.execute", dispatch)
     with factory() as db:
@@ -364,9 +365,12 @@ def test_stored_contract_reaches_generic_workflow_and_fails_without_adapter(data
             {"db": db, "company_id": 1, "agent_id": 1, "config": reveal_config(_assignment(db).config)},
         )
         assert result.success is False
-        assert result.data["code"] == "provider_not_configured"
-        assert result.data["adapter"] == "business"
+        assert result.error == "execution_plan_required"
+        assert result.data["runtime"] == "generic_capability"
         assert db.query(ActionRequest).one().status == "external_failed"
     assert captured[0]["action"] == f"{KEY}.execute"
     assert captured[0]["data"]["idempotency_key"]
-    assert captured[0]["data"]["action_config"]["destination"]["capability_key"] == KEY
+    destination = captured[0]["data"]["action_config"]["destination"]
+    assert destination["type"] == "xvond_internal"
+    assert destination["adapter"] == "generic_capability"
+    assert destination["capability_key"] == KEY
