@@ -1686,10 +1686,16 @@ def rollback_self_service_employee(
         builder["audience"] = selected.get("audience")
         builder["permissions"] = deepcopy(dict(selected.get("permissions") or {}))
         builder["setup_answers"] = deepcopy(dict(selected.get("setup_answers") or {}))
+        builder["owner_permissions"] = deepcopy(
+            dict(selected.get("owner_permissions") or {})
+        )
         _clear_current_build_evidence(builder)
 
         if isinstance(restored_spec, dict):
-            restored_spec = deepcopy(restored_spec)
+            restored_spec = _effective_compiled_permissions(
+                deepcopy(restored_spec),
+                builder,
+            )
             restored_spec, delivery = provision_compiled_capabilities(
                 db,
                 agent_id=agent.id,
@@ -1714,6 +1720,7 @@ def rollback_self_service_employee(
             restored_capabilities = {item: True for item in blueprint.capabilities}
             builder["audience"] = blueprint.audience
             builder["permissions"] = dict(blueprint.permissions)
+            builder["owner_permissions"] = {}
             builder["missing_information"] = list(blueprint.missing_information)
             agent.system_prompt = build_employee_system_prompt(
                 owner_name=company.name,
