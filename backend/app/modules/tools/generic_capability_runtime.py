@@ -10,6 +10,9 @@ import httpx
 from sqlalchemy.exc import IntegrityError
 
 from backend.app.modules.customer_ops.models import NotificationEvent
+from backend.app.modules.ai_agent.self_service_policy import (
+    assert_self_service_runtime_subscription,
+)
 
 
 MAX_HTTP_RESPONSE_BYTES = 1_000_000
@@ -191,6 +194,10 @@ def execute_generic_capability(
     details: dict,
     idempotency_key: str,
 ) -> dict:
+    # Self-service background work must never bypass the paid employee
+    # entitlement. Managed employees keep their existing commercial/runtime path.
+    assert_self_service_runtime_subscription(db, company_id=company_id)
+
     readiness = generic_capability_readiness(action_config)
     if not readiness["ready"]:
         raise GenericCapabilityRuntimeError(str(readiness["reason"]))
