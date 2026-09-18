@@ -1,5 +1,7 @@
 from copy import deepcopy
 from datetime import UTC, datetime
+from hashlib import sha256
+from time import perf_counter
 
 from backend.app.core.agent_runtime import agent_runtime
 from backend.app.core.config_secrets import reveal_config
@@ -78,6 +80,71 @@ def _billing_contract(workflow: AutomationWorkflow) -> tuple[str, str]:
     return "automation", "runs"
 
 
+def _trace_id(*, company_id: int, workflow_id: int, execution_key: str) -> str:
+    digest = sha256(
+        f"{int(company_id)}:{int(workflow_id)}:{execution_key}".encode("utf-8")
+    ).hexdigest()[:24]
+    return f"xvond_trace_{digest}"
+
+
+def _trace_iso(value: datetime | None = None) -> str:
+    current = value or _utcnow_naive()
+    return current.isoformat(timespec="milliseconds") + "Z"
+
+
+def _new_trace(
+    *,
+    company_id: int,
+    workflow: AutomationWorkflow,
+    execution_key: str,
+) -> dict:
+    return {
+        "version": 1,
+        "trace_id": _trace_id(
+            company_id=company_id,
+            workflow_id=workflow.id,
+            execution_key=execution_key,
+        ),
+        "workflow_id": workflow.id,
+        "trigger_type": str(workflow.trigger_type or ""),
+        "execution_key": execution_key,
+        "started_at": _trace_iso(),
+        "finished_at": None,
+        "spans": [],
+    }
+
+
+def _append_step_span(
+    trace: dict,
+    *,
+    index: int,
+    step: dict,
+    started_at: str,
+    started_perf: float,
+    status: str,
+    phase: str = "execute",
+    node_id: str | None = None,
+    error: str | None = None,
+) -> None:
+    spans = trace.setdefault("spans", [])
+    spans.append(
+        {
+            "span_id": f"step-{int(index)}-{len(spans) + 1}",
+            "kind": "workflow_step",
+            "step_index": int(index),
+            "step_type": str(step.get("type") or ""),
+            "label": step.get("label"),
+            "phase": phase,
+            "status": status,
+            "node_id": str(node_id or "") or None,
+            "started_at": started_at,
+            "finished_at": _trace_iso(),
+            "duration_ms": round(max(0.0, perf_counter() - started_perf) * 1000, 2),
+            "error": str(error or "")[:2000] or None,
+        }
+    )
+
+
 class AutomationApprovalRequired(RuntimeError):
     def __init__(
         self,
@@ -143,16 +210,55 @@ class AutomationRuntime:
             original_input = dict(state)
             run.input_data = dict(original_input)
         step_results = []
+        execution_key = str(state.get("_xvond_execution_key") or "")
+        trace = _new_trace(
+            company_id=company_id,
+            workflow=workflow,
+            execution_key=execution_key,
+        )
 
         try:
             for index, step in enumerate(workflow.steps or []):
-                result = self.execute_step(
-                    db,
-                    company_id,
-                    step,
-                    state,
-                    run_id=run_id,
-                    step_index=index,
+                span_started_at = _trace_iso()
+                span_started_perf = perf_counter()
+                try:
+                    result = self.execute_step(
+                        db,
+                        company_id,
+                        step,
+                        state,
+                        run_id=run_id,
+                        step_index=index,
+                    )
+                except AutomationApprovalRequired as approval:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_approval",
+                        node_id=approval.node_id,
+                    )
+                    raise
+                except Exception as exc:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="failed",
+                        error=str(exc),
+                    )
+                    raise
+                _append_step_span(
+                    trace,
+                    index=index,
+                    step=step,
+                    started_at=span_started_at,
+                    started_perf=span_started_perf,
+                    status="success",
                 )
                 step_results.append(
                     {
@@ -166,8 +272,9 @@ class AutomationRuntime:
                     state.update(result)
 
             run.status = "success"
-            run.output_data = {"state": state, "steps": step_results}
             run.finished_at = _utcnow_naive()
+            trace["finished_at"] = _trace_iso(run.finished_at)
+            run.output_data = {"state": state, "steps": step_results, "trace": trace}
             db.commit()
             db.refresh(run)
             return run
@@ -196,6 +303,7 @@ class AutomationRuntime:
             run.output_data = {
                 "state": state,
                 "steps": step_results,
+                "trace": trace,
                 "approval": {
                     "request_id": request.id,
                     "agent_id": approval.agent_id,
@@ -214,7 +322,8 @@ class AutomationRuntime:
             return run
         except Exception as original_error:
             error_message = str(original_error)[:2000]
-            failed_output = {"state": state, "steps": step_results}
+            trace["finished_at"] = _trace_iso()
+            failed_output = {"state": state, "steps": step_results, "trace": trace}
             db.rollback()
 
             usage_recorded = True
