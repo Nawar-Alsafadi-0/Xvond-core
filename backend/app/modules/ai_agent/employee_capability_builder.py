@@ -481,10 +481,12 @@ def _provision_self_service_graph_trigger(
     db,
     *,
     company: Company,
+    timezone: str | None,
     agent_id: int,
     execution_graph: dict | None,
     actions: dict,
     action_plan: dict,
+    runtime_inputs: dict | None = None,
 ) -> tuple[str, int | None]:
     if str(company.onboarding_source or "").strip().lower() != "self_service":
         return "managed_delivery", None
@@ -494,8 +496,20 @@ def _provision_self_service_graph_trigger(
         return "not_required", None
     trigger = graph.get("trigger") or {"type": "manual"}
     trigger_type = str(trigger.get("type") or "manual").strip().lower()
-    if trigger_type not in {"manual", "webhook", "event"}:
+    if trigger_type not in {"manual", "schedule", "webhook", "event"}:
         return "not_required", None
+    normalized_graph_schedule = None
+    if trigger_type == "schedule":
+        raw_schedule = trigger.get("schedule")
+        if not isinstance(raw_schedule, dict):
+            return "schedule_required", None
+        try:
+            normalized_graph_schedule = normalize_schedule_config(
+                raw_schedule,
+                default_timezone=timezone,
+            )
+        except ScheduleConfigError:
+            return "schedule_setup_required", None
     if trigger_type == "event" and not str(trigger.get("event") or "").strip():
         return "setup_required", None
 
@@ -531,6 +545,14 @@ def _provision_self_service_graph_trigger(
                 **(
                     {"event_name": str(trigger.get("event") or "").strip()[:120]}
                     if trigger_type == "event"
+                    else {}
+                ),
+                **(
+                    {
+                        "schedule": normalized_graph_schedule,
+                        "input_data": dict(runtime_inputs or {}),
+                    }
+                    if trigger_type == "schedule"
                     else {}
                 ),
             },
@@ -755,6 +777,14 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
     automation_plan = {}
     changed = False
     company, company_timezone = _company_context(db, agent_id)
+    normalized_graph = normalize_execution_graph(prepared.get("execution_graph") or {})
+    graph_trigger_type = str(
+        (normalized_graph.get("trigger") or {}).get("type") or "manual"
+    ).strip().lower()
+    graph_owns_schedule = bool(
+        graph_trigger_type == "schedule"
+        and normalized_graph.get("nodes")
+    )
     for item in requirements:
         if not isinstance(item, dict):
             continue
@@ -832,6 +862,7 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             company is not None
             and execution_status == "ready"
             and "scheduler" in (item.get("primitives") or [])
+            and not graph_owns_schedule
         ):
             schedule_status, schedule_workflow_id = _provision_self_service_schedule(
                 db,
@@ -873,14 +904,21 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
 
     graph_trigger_status = "not_required"
     graph_trigger_workflow_id = None
+    graph_runtime_inputs: dict = {}
+    for requirement in requirements:
+        if isinstance(requirement, dict):
+            for key, value in (requirement.get("runtime_inputs") or {}).items():
+                graph_runtime_inputs.setdefault(str(key), value)
     if company is not None:
         graph_trigger_status, graph_trigger_workflow_id = _provision_self_service_graph_trigger(
             db,
             company=company,
+            timezone=company_timezone,
             agent_id=agent_id,
             execution_graph=prepared.get("execution_graph"),
             actions=actions,
             action_plan=action_plan,
+            runtime_inputs=graph_runtime_inputs,
         )
 
     if changed:
