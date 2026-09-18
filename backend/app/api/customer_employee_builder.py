@@ -560,18 +560,49 @@ def _carry_forward_requirement_bindings(previous_spec: dict | None, next_spec: d
         "validation_required",
         "requires_connection",
     }
+    previous_inputs = (
+        dict((previous_spec or {}).get("customer_inputs") or {})
+        if isinstance(previous_spec, dict)
+        else {}
+    )
+    carried_inputs: dict = {}
     for raw in updated.get("requirements") or []:
         if not isinstance(raw, dict):
             requirements.append(raw)
             continue
         item = dict(raw)
-        prior = previous.get(normalize_requirement_key(item.get("key")))
+        key = normalize_requirement_key(item.get("key"))
+        prior = previous.get(key)
         if isinstance(prior, dict):
             for field in carry_fields:
                 if field in prior and field not in item:
                     item[field] = deepcopy(prior[field])
+            if (
+                prior.get("integration_id")
+                and str(item.get("status") or "").strip().lower()
+                == "connection_required"
+            ):
+                item["status"] = "xvond_build"
+                item["delivery_mode"] = "compose"
+        if key and key in previous_inputs:
+            carried_inputs[key] = deepcopy(previous_inputs[key])
+            if (
+                str(item.get("status") or "").strip().lower()
+                == "customer_input_required"
+            ):
+                next_status = str(
+                    item.get("after_input_status") or "xvond_build"
+                ).strip().lower()
+                item["status"] = next_status
+                if next_status == "xvond_build":
+                    item["delivery_mode"] = "compose"
         requirements.append(item)
     updated["requirements"] = requirements
+    if carried_inputs:
+        updated["customer_inputs"] = {
+            **dict(updated.get("customer_inputs") or {}),
+            **carried_inputs,
+        }
     return updated
 
 
@@ -2675,6 +2706,226 @@ def test_draft_employee(
             "free_tests_remaining": free_tests_remaining,
             "tools_used": False,
             "channels_used": False,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/apply-pending-revision")
+def apply_pending_live_revision(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Atomically replace a live Self-Service employee with its tested staged revision."""
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Live revisions are available only for Self-Service employees",
+            )
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        if not agent.enabled:
+            raise HTTPException(409, "This employee is not live")
+
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = builder.get("pending_revision")
+        if not isinstance(pending, dict):
+            raise HTTPException(404, "No staged revision is available")
+        pending_spec = pending.get("compiled_spec")
+        if not isinstance(pending_spec, dict):
+            raise HTTPException(409, "Build the staged revision before applying it")
+        compiled_at = str(pending.get("compiled_at") or "").strip()
+        if (
+            not compiled_at
+            or str(pending.get("last_tested_compiled_at") or "").strip()
+            != compiled_at
+        ):
+            raise HTTPException(409, "Test the staged revision before applying it")
+        if str(pending.get("base_compiled_at") or "") != str(
+            builder.get("compiled_at") or ""
+        ):
+            raise HTTPException(
+                409,
+                "The live employee changed after this revision was staged. Rebuild the revision from the current live version.",
+            )
+
+        previous_capabilities = dict(config.capabilities or {})
+        next_capabilities = {
+            str(key): bool(value)
+            for key, value in dict(pending.get("capabilities") or {}).items()
+            if str(key).strip() and bool(value)
+        }
+        desired_channels = set(
+            communication_channels(pending.get("requested_channels") or [])
+        )
+
+        builder = _snapshot_builder_version(
+            builder,
+            reason="before_live_revision",
+            capabilities=previous_capabilities,
+        )
+        _clear_generated_self_service_build(
+            db,
+            company_id=company.id,
+            agent_id=agent.id,
+        )
+
+        for key in (
+            "source_description",
+            "job_brief",
+            "audience",
+            "requested_channels",
+            "permissions",
+            "setup_answers",
+            "compiled_at",
+            "compiler_provider",
+            "compiler_model",
+            "last_tested_at",
+            "last_tested_compiled_at",
+        ):
+            if key in pending:
+                builder[key] = deepcopy(pending[key])
+        builder["compiled_spec"] = deepcopy(pending_spec)
+        builder.pop("pending_revision", None)
+
+        _reconcile_builder_runtime_tools(
+            db,
+            agent_id=agent.id,
+            previous_capabilities=previous_capabilities,
+            next_capabilities=tuple(next_capabilities.keys()),
+        )
+        config.capabilities = next_capabilities
+        agent.description = str(builder.get("source_description") or "").strip()
+
+        settings_value["employee_builder"] = builder
+        compiled_spec = _store_provisioned_spec(
+            db,
+            company_id=company.id,
+            agent=agent,
+            config=config,
+            settings=settings_value,
+            builder=builder,
+            spec=deepcopy(pending_spec),
+        )
+
+        profile = (
+            db.query(AIAgentProfile)
+            .filter(
+                AIAgentProfile.company_id == company.id,
+                AIAgentProfile.agent_id == agent.id,
+            )
+            .first()
+        )
+        if profile is not None:
+            profile.instructions = agent.description
+            profile.business_type = (
+                "personal" if builder.get("audience") == "personal" else None
+            )
+
+        channel_rows = (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.company_id == company.id,
+                AgentChannel.agent_id == agent.id,
+            )
+            .with_for_update()
+            .all()
+        )
+        channels_by_type = {
+            str(row.channel_type or "").strip().lower(): row
+            for row in channel_rows
+        }
+        desired_external = {item for item in desired_channels if item != "xvond"}
+
+        for channel_type, channel in channels_by_type.items():
+            if (
+                channel.enabled
+                and communication_channels([channel_type])
+                and channel_type not in desired_external
+            ):
+                channel.enabled = False
+
+        missing_rows = [
+            item for item in sorted(desired_external)
+            if item not in channels_by_type
+        ]
+        if missing_rows:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "The staged revision needs channel setup before it can replace the live employee",
+                    "blockers": [
+                        f"Configure {item} before applying this revision"
+                        for item in missing_rows
+                    ],
+                },
+            )
+
+        for channel_type in sorted(desired_external):
+            channel = channels_by_type[channel_type]
+            blockers = self_service_channel_activation_blockers(
+                db,
+                company=company,
+                agent=agent,
+                channel=channel,
+            )
+            if blockers:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "message": f"{channel_type} is not ready for the staged revision",
+                        "blockers": blockers,
+                    },
+                )
+            if not channel.enabled:
+                limits_service.check_channel_limit(db, company.id)
+                channel.enabled = True
+                db.flush()
+
+        live = self_service_readiness(
+            db,
+            company=company,
+            agent=agent,
+            config=config,
+        )
+        if not live["ready"]:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "The staged revision is not ready to replace the live employee",
+                    "blockers": live["blockers"],
+                },
+            )
+
+        db.commit()
+        return {
+            **live,
+            "status": "revision_applied",
+            "agent_id": agent.id,
+            "compiled_spec": self_service_spec_view(compiled_spec),
+            "live_employee_replaced_atomically": True,
         }
     except HTTPException:
         db.rollback()
