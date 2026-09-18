@@ -48,6 +48,7 @@ from backend.app.modules.ai_agent.self_service_policy import (
     self_service_spec_view,
 )
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
+from backend.app.modules.automation.runtime import automation_runtime
 from backend.app.modules.automation.webhook_auth import automation_webhook_key
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
