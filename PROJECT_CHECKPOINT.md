@@ -225,9 +225,9 @@ The employee contract may request any registered communication surface. Xvond ke
 - **Website Chat** — Self-Service setup; live Xvond widget runtime.
 - **WhatsApp** — Self-Service setup; live Meta Cloud API runtime.
 - **Voice / Phone** — Xvond-managed setup; live Vapi runtime foundation. It is not service-ready until a real phone/call path passes end-to-end acceptance.
-- **Telegram, Instagram DM, Facebook Messenger, Email, SMS, Slack, Microsoft Teams and Custom/API channels** — valid employee channel requests handled by Xvond Managed delivery, but their channel runtime remains `adapter_required` until a real adapter is implemented and validated.
+- **Telegram, Instagram DM, Facebook Messenger, Email, SMS, Slack, Microsoft Teams and Custom/API channels** — use the shared Xvond Managed Channel Gateway runtime. Xvond Core remains the employee/control plane; the workflow engine normalizes provider events and performs provider-specific delivery behind Xvond. Each channel remains disabled until Xvond provisioning records `provisioning_state=connected`, a tenant-scoped `connection_key`, and the shared workflow gateway is actually configured.
 
-A requested Managed channel creates a durable, disabled provisioning work item for Xvond Admin. Removing that channel from the current Job Brief cancels/deactivates the request without fabricating a live connection.
+A requested Managed channel creates a durable, disabled provisioning work item for Xvond Admin. Removing that channel from the current Job Brief cancels/deactivates the request without fabricating a live connection. The shared runtime does not make a provider service-ready by itself: each provider workflow, credential set, webhook and real customer round-trip still require external acceptance before that connector is sold as live.
 
 A channel must never be presented or activated as live merely because configuration values exist. Runtime activation requires a registered live adapter plus channel-specific readiness evidence. Voice specifically requires successful Vapi provisioning evidence before launch.
 
@@ -265,7 +265,9 @@ Self-Service plan flow currently behaves truthfully:
 - an active subscription is not silently replaced by a customer plan change
 - when Xvond/Admin activates a pending paid subscription, its billing period starts from activation time
 
-**There is no real online payment checkout/provider in Xvond Core yet.** Paid-plan selection must not be described as completed payment.
+Xvond Core now has a provider-neutral online checkout boundary with Paddle as the first implementation. Paid plan selection creates a provider transaction/checkout only when billing is configured; entitlement remains `pending_payment` until a cryptographically verified payment webhook confirms completion. Checkout records and provider event identities are durable and webhook processing is idempotent. Subscription lifecycle events can activate, pause/past-due or cancel runtime entitlement.
+
+Online billing remains disabled by default until the production Merchant-of-Record account is approved and `BILLING_PROVIDER=paddle`, live API/webhook credentials, recurring price mappings and the production checkout/webhook URLs are configured. Code readiness must not be described as a live payment path before a sandbox and then real-money acceptance test succeeds.
 
 ## Security and privacy
 
@@ -364,10 +366,12 @@ Repository state through the Self-Service channel-contract work is **code valida
 
 Highest-priority remaining external/product work:
 
-1. Deploy the reviewed `main` release to the server using the canonical Nginx + deploy flow.
-2. Run real production end-to-end acceptance for Website, WhatsApp/Meta, Workflow Engine and the intended AI provider.
-3. Implement a real payment provider/checkout/webhook/idempotency path before calling paid Self-Service checkout automated.
-4. Implement and externally validate real Email/Instagram provider adapters before selling them as live connectors.
+1. Merge the validated global paid-checkout release and configure/approve the production Merchant-of-Record account, recurring prices and signed webhook destination.
+2. Add/configure provider-specific workflow bindings for the managed communication channels actually being launched first; run real provider round-trips before marking each connector service-ready.
+3. Deploy the reviewed `main` release to the server using the canonical Nginx + deploy flow.
+4. Run production end-to-end acceptance for Self-Service signup -> Job Brief -> dynamic missing information -> plan/checkout -> build -> required channel setup -> launch -> customer conversation/action -> handoff -> resume.
+5. Run managed-customer acceptance for the same employee runtime through Xvond Admin, proving the Managed and Self-Service provisioning models converge on one runtime without sharing lifecycle UX.
+6. Only after those acceptance gates pass, expose the launch publicly as a globally available Xvond AI Employee product.
 
 ## Branch model
 
