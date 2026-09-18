@@ -583,10 +583,17 @@
             try {
                 const result = await api("/manage/integrations");
                 const integrations = (result.integrations || []).filter(item => item.enabled && item.configured && item.validated);
-                const options = '<option value="">Choose a connected system</option>' + integrations.map(item =>
-                    `<option value="${Number(item.id)}" data-integration-type="${escapeHtml(item.integration_type)}">${escapeHtml(item.name)} · ${escapeHtml(item.integration_type)}</option>`
-                ).join("");
                 for (const select of selects) {
+                    const requirementKey = decodeURIComponent(String(select.dataset.integrationSelect || ""));
+                    const allowedTypes = requirementKey === "instagram_publish"
+                        ? new Set(["instagram_publish"])
+                        : null;
+                    const compatible = allowedTypes
+                        ? integrations.filter(item => allowedTypes.has(String(item.integration_type || "")))
+                        : integrations;
+                    const options = '<option value="">Choose a connected system</option>' + compatible.map(item =>
+                        `<option value="${Number(item.id)}" data-integration-type="${escapeHtml(item.integration_type)}">${escapeHtml(item.name)} · ${escapeHtml(item.integration_type)}</option>`
+                    ).join("");
                     select.innerHTML = options;
                     const syncEndpointFields = () => {
                         const encodedKey = String(select.dataset.integrationSelect || "");
