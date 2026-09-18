@@ -7,6 +7,7 @@ from sqlalchemy import func, or_
 
 from backend.app.core.config_secrets import reveal_config
 from backend.app.core.database.connection import SessionLocal
+from backend.app.core.n8n_gateway import N8NGatewayError, n8n_gateway
 from backend.app.core.dependencies import require_customer_operator
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.customer_access import can_view_conversations
@@ -14,6 +15,7 @@ from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIConversation, AIMessage
 from backend.app.modules.audit.service import audit_service
 from backend.app.modules.channels.catalog import (
+    N8N_CHANNEL_ADAPTER,
     canonical_channel_type,
     get_channel_capability,
     live_managed_channel_types,
@@ -125,6 +127,13 @@ def _channel_label(channel_type: str | None) -> str:
 
 def _handoff_capabilities(channel_type: str | None) -> dict:
     value = canonical_channel_type(channel_type or "unknown")
+    capability = get_channel_capability(value) or {}
+    if capability.get("runtime_adapter") == N8N_CHANNEL_ADAPTER:
+        return {
+            "handoff_supported": True,
+            "human_reply_supported": True,
+            "human_reply_delivery": "xvond_managed_channel",
+        }
     capabilities = HANDOFF_CAPABILITIES.get(value)
     if capabilities is None:
         capabilities = {
@@ -759,6 +768,96 @@ def send_human_reply(
             db.add(message)
             handoff.status = "in_progress"
             handoff.updated_at = datetime.utcnow()
+        elif delivery == "xvond_managed_channel":
+            channel = (
+                db.query(AgentChannel)
+                .filter(
+                    AgentChannel.id == conversation.channel_id,
+                    AgentChannel.company_id == current_user.company_id,
+                    AgentChannel.agent_id == conversation.agent_id,
+                    AgentChannel.channel_type == canonical_channel_type(conversation.channel_type),
+                    AgentChannel.enabled.is_(True),
+                )
+                .first()
+            )
+            if channel is None:
+                raise HTTPException(409, "The managed channel for this conversation is not active")
+            capability = get_channel_capability(channel.channel_type) or {}
+            if capability.get("runtime_adapter") != N8N_CHANNEL_ADAPTER:
+                raise HTTPException(409, "This conversation is not using the Xvond managed channel gateway")
+            config = reveal_config(channel.config) or {}
+            connection_key = str(config.get("connection_key") or "").strip()
+            if (
+                str(config.get("provisioning_state") or "").strip().lower() != "connected"
+                or not connection_key
+            ):
+                raise HTTPException(409, "The managed channel connection is not ready")
+            if not n8n_gateway.configured():
+                raise HTTPException(503, "Xvond managed channel gateway is unavailable")
+
+            client_message_id = data.client_message_id or str(uuid4())
+            source_key = (
+                f"xvond-human:{current_user.company_id}:{conversation.id}:"
+                f"{current_user.id}:{client_message_id}"
+            )
+            existing_message = (
+                db.query(AIMessage)
+                .filter(AIMessage.source_key == source_key)
+                .first()
+            )
+            if existing_message is not None:
+                if existing_message.conversation_id != conversation.id or existing_message.content != text:
+                    raise HTTPException(
+                        409,
+                        "This client message identity is already used by a different reply",
+                    )
+                message = existing_message
+            else:
+                message = AIMessage(
+                    conversation_id=conversation.id,
+                    role="human",
+                    content=text,
+                    source_key=source_key,
+                )
+                db.add(message)
+                handoff.status = "in_progress"
+                handoff.updated_at = datetime.utcnow()
+                _audit_handoff(
+                    db,
+                    action="customer_inbox.human_reply_prepared",
+                    conversation=conversation,
+                    current_user=current_user,
+                    details={**audit_details, "idempotency_key": source_key},
+                )
+                db.commit()
+                db.refresh(message)
+
+            try:
+                gateway_result = n8n_gateway.execute(
+                    company_id=current_user.company_id,
+                    agent_id=conversation.agent_id,
+                    conversation_id=conversation.id,
+                    action="channel.send",
+                    request_id=source_key,
+                    data={
+                        "channel_id": channel.id,
+                        "channel_type": canonical_channel_type(channel.channel_type),
+                        "connection_key": connection_key,
+                        "external_contact_id": str(conversation.external_contact_id or ""),
+                        "message": text,
+                        "idempotency_key": source_key,
+                    },
+                )
+            except N8NGatewayError as exc:
+                raise HTTPException(503, "Managed channel delivery is temporarily unavailable") from exc
+            if gateway_result.get("success") is not True:
+                raise HTTPException(502, "Managed channel delivery failed")
+            audit_details.update(
+                {
+                    "idempotency_key": source_key,
+                    "provider_result": gateway_result.get("data"),
+                }
+            )
         else:
             raise HTTPException(409, "No human reply delivery adapter exists for this channel")
 
@@ -778,7 +877,13 @@ def send_human_reply(
             "status": "sent",
             "mode": "human",
             "delivery": delivery,
-            "delivery_state": delivery_payload(delivery_row) if delivery_row is not None else None,
+            "delivery_state": (
+                delivery_payload(delivery_row)
+                if delivery_row is not None
+                else gateway_result
+                if delivery == "xvond_managed_channel"
+                else None
+            ),
             "message": {
                 "id": message.id,
                 "role": message.role,
