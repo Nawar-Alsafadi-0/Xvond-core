@@ -238,6 +238,7 @@ Use this shape:
 
 Rules:
 - Preserve every meaningful part of the customer's job. Do not silently drop unusual requirements.
+- The Job Brief may contain chronological OWNER REFINEMENT sections. Treat later explicit owner refinements as authoritative when they conflict with earlier wording, while preserving unrelated requirements.
 - Act like a smart product builder, not a static form. Extract useful facts already present in the Job Brief into intake.known and ask only for genuinely required missing facts in intake.missing.
 - Never put a field in intake.missing when the same fact is already present in the Job Brief. Examples include business name, brand name, working hours, services, prices, booking rules, target market, preferred tone, escalation contact or operating constraints.
 - Do not ask for optional preferences that Xvond can safely default. Only request facts whose absence would make the requested employee materially incorrect, unable to perform the requested job, or unsafe to launch.
