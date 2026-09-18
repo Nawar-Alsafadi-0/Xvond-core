@@ -178,8 +178,14 @@ def _process_subscription(
     attempt = db.get(ServiceRenewalAttempt, attempt.id)
     attempt.provider_transaction_id = transaction_id
     provider_status = str(result.get("status") or "").strip().lower()
-    attempt.status = "captured" if provider_status == "captured" else "submitted"
-    attempt.last_error_code = None
+    attempt.status = "submitted"
+    attempt.last_error_code = (
+        None
+        if provider_status in {"captured", "initiated", "in_progress", "pending"}
+        else f"tap_sync_{provider_status}"[:160]
+        if provider_status
+        else None
+    )
 
     checkout = _checkout_for_transaction(db, transaction_id)
     if checkout is None:
@@ -190,7 +196,7 @@ def _process_subscription(
             provider="tap",
             provider_transaction_id=transaction_id,
             provider_subscription_id=None,
-            status="completed" if provider_status == "captured" else "pending",
+            status="pending",
             checkout_url=None,
             amount=plan.monthly_price,
             currency=plan.currency,
