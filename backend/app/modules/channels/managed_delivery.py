@@ -162,7 +162,7 @@ def attempt_delivery(db, *, delivery_id: int) -> dict:
         return {"success": False, "permanent": True, **delivery_payload(row)}
     if channel is None:
         row.status = "failed"
-        row.retryable = False
+        row.retryable = True
         row.last_error_code = "channel_unavailable"
         row.failed_at = _now()
         db.commit()
@@ -178,7 +178,7 @@ def attempt_delivery(db, *, delivery_id: int) -> dict:
         or not n8n_gateway.configured()
     ):
         row.status = "failed"
-        row.retryable = False
+        row.retryable = True
         row.last_error_code = "managed_channel_not_ready"
         row.failed_at = _now()
         db.commit()
@@ -242,7 +242,7 @@ def attempt_delivery(db, *, delivery_id: int) -> dict:
         return {"success": True, **delivery_payload(row)}
 
     row.status = "failed"
-    row.retryable = False
+    row.retryable = True
     row.last_error_code = str(result.get("error_code") or "provider_rejected")[:160]
     row.failed_at = _now()
     db.commit()
