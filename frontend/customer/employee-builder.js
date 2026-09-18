@@ -911,7 +911,9 @@
                         ? new Set(["instagram_publish"])
                         : (requirementKey === "email_send"
                             ? new Set(["email_smtp"])
-                            : null);
+                            : (requirementKey === "email_read"
+                                ? new Set(["email_imap"])
+                                : null));
                     const compatible = allowedTypes
                         ? integrations.filter(item => allowedTypes.has(String(item.integration_type || "")))
                         : integrations;
@@ -925,7 +927,7 @@
                         const selectedType = String(select.selectedOptions?.[0]?.dataset?.integrationType || "");
                         if (wrapper) wrapper.classList.toggle(
                             "hidden",
-                            new Set(["instagram_publish", "email_smtp"]).has(selectedType)
+                            new Set(["instagram_publish", "email_smtp", "email_imap"]).has(selectedType)
                         );
                     };
                     select.addEventListener("change", syncEndpointFields);
