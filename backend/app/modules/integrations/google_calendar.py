@@ -19,7 +19,7 @@ class CalendarConnectorError(ValueError):
 
 
 def _provider(config: dict) -> str:
-    provider = str(config.get("provider") or "").strip().lower().replace("-", "_")
+    provider = str(config.get("provider") or "google").strip().lower().replace("-", "_")
     if provider not in {"google", "google_calendar"}:
         raise CalendarConnectorError(
             "Calendar provider is not supported yet; use Google Calendar"
@@ -28,9 +28,7 @@ def _provider(config: dict) -> str:
 
 
 def _calendar_id(config: dict) -> str:
-    value = str(config.get("calendar_id") or "").strip()
-    if not value:
-        raise CalendarConnectorError("Calendar ID is required")
+    value = str(config.get("calendar_id") or "primary").strip()
     if len(value) > 1024 or any(ch in value for ch in "\r\n"):
         raise CalendarConnectorError("Calendar ID is invalid")
     return value
