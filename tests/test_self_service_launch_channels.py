@@ -9,6 +9,7 @@ from backend.app.main import app  # noqa: F401 - register model metadata
 from backend.app.api import customer_employee_builder as api
 from backend.app.core.database.base import Base
 from backend.app.models.company import Company
+from backend.app.models.company_module import CompanyModule
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.ai_agent import self_service_policy
@@ -77,6 +78,13 @@ def launch_database(monkeypatch):
         )
         db.flush()
         db.add(
+            CompanyModule(
+                company_id=1,
+                module_name="channels",
+                enabled=True,
+            )
+        )
+        db.add(
             AgentConfig(
                 agent_id=1,
                 agent_type="employee",
@@ -116,7 +124,14 @@ def launch_database(monkeypatch):
 
 def test_draft_configured_channel_is_ready_for_atomic_launch(launch_database, monkeypatch):
     factory = launch_database
-    monkeypatch.setattr(api, "_activation_blockers", lambda db, channel: [])
+    monkeypatch.setattr(
+        self_service_policy,
+        "whatsapp_connection_state",
+        lambda config, verify_remote=False: {
+            "connected": True,
+            "connection_issue": None,
+        },
+    )
 
     with factory() as db:
         company = db.get(Company, 1)
@@ -158,9 +173,12 @@ def test_channel_activation_failure_rolls_back_entire_self_service_launch(
 ):
     factory = launch_database
     monkeypatch.setattr(
-        api,
-        "_activation_blockers",
-        lambda db, channel: ["WhatsApp remote connection is not ready"],
+        self_service_policy,
+        "whatsapp_connection_state",
+        lambda config, verify_remote=False: {
+            "connected": False,
+            "connection_issue": "WhatsApp remote connection is not ready",
+        },
     )
 
     with pytest.raises(HTTPException) as exc:
