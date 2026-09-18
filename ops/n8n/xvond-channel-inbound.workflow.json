@@ -1,0 +1,304 @@
+{
+  "id": "xvond-channel-inbound-v1",
+  "name": "Xvond Channel Inbound Gateway",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "xvond-channel-inbound",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "channel-inbound-webhook",
+      "name": "Xvond Channel Inbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "xvond-channel-inbound"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst supplied = headers['x-xvond-n8n-secret'] || headers['X-Xvond-N8N-Secret'];\nconst expected = $env.N8N_SHARED_SECRET;\nconst required = ['company_id','agent_id','channel_id','channel_type','external_contact_id','external_message_id','message'];\nconst missing = required.filter((key) => body[key] === undefined || body[key] === null || String(body[key]).trim() === '');\nif (!expected || supplied !== expected) {\n  return [{json:{success:false,_dispatch:'reject',error:'Unauthorized channel workflow request',code:'unauthorized'}}];\n}\nif (missing.length) {\n  return [{json:{success:false,_dispatch:'reject',error:'Invalid normalized channel message',code:'invalid_contract',missing}}];\n}\nreturn [{json:{\n  success:true,\n  _dispatch:'xvond',\n  request_id:String(body.request_id || body.external_message_id),\n  payload:{\n    company_id:Number(body.company_id),\n    agent_id:Number(body.agent_id),\n    channel_id:Number(body.channel_id),\n    channel_type:String(body.channel_type),\n    external_contact_id:String(body.external_contact_id),\n    external_message_id:String(body.external_message_id),\n    message:String(body.message)\n  }\n}}];"
+      },
+      "id": "validate-channel-inbound",
+      "name": "Validate Normalized Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "valid-xvond-dispatch",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "xvond",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-valid-channel",
+      "name": "Valid Channel Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.XVOND_INTERNAL_CHANNEL_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Xvond-N8N-Secret",
+              "value": "={{ $env.N8N_SHARED_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "execute-xvond-channel",
+      "name": "Run Xvond Employee",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        940,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const result = $input.first().json;\nif (!result || result.success !== true) {\n  return [{json:{success:false,_dispatch:'no_reply',error:'Xvond channel execution failed',data:result || null}}];\n}\nconst reply = String(result.reply || '').trim();\nif (!reply || result.mode !== 'ai') {\n  return [{json:{...result,_dispatch:'no_reply'}}];\n}\nlet registry = {};\ntry { registry = JSON.parse($env.XVOND_CHANNEL_ROUTES_JSON || '{}'); }\ncatch (_e) { return [{json:{success:false,_dispatch:'no_reply',error:'Channel route registry is invalid',data:{channel_id:result.channel_id}}}]; }\nconst routeKey = `${result.company_id}:${result.connection_key}`;\nconst target = registry[routeKey];\nif (!target || target.type !== 'webhook' || typeof target.url !== 'string' || !target.url.startsWith('https://')) {\n  return [{json:{success:false,_dispatch:'no_reply',error:'Managed channel route is not configured',data:{channel_id:result.channel_id,route_key:routeKey}}}];\n}\nreturn [{json:{\n  ...result,\n  _dispatch:'provider_reply',\n  route_key:routeKey,\n  provider_url:target.url,\n  provider_secret:target.secret || '',\n  request_id:`channel-reply:${result.channel_id}:${result.external_message_id}`,\n  outbound:{\n    channel_id:result.channel_id,\n    channel_type:result.channel_type,\n    external_contact_id:result.external_contact_id,\n    message:reply,\n    idempotency_key:`channel-reply:${result.channel_id}:${result.external_message_id}`\n  }\n}}];"
+      },
+      "id": "prepare-channel-reply",
+      "name": "Prepare Channel Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1180,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-provider-reply",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "provider_reply",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-provider-reply",
+      "name": "Send Provider Reply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1420,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.provider_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Xvond-Channel-Secret",
+              "value": "={{ $json.provider_secret }}"
+            },
+            {
+              "name": "X-Xvond-Request-ID",
+              "value": "={{ $json.request_id }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.outbound.idempotency_key }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ company_id: $json.company_id, agent_id: $json.agent_id, conversation_id: $json.conversation_id, channel_id: $json.channel_id, action: 'channel.send', request_id: $json.request_id, data: $json.outbound }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "send-channel-reply",
+      "name": "Send Channel Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1660,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
+      "id": "channel-inbound-response",
+      "name": "Return Channel Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1900,
+        260
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Xvond Channel Inbound": {
+      "main": [
+        [
+          {
+            "node": "Validate Normalized Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Normalized Message": {
+      "main": [
+        [
+          {
+            "node": "Valid Channel Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid Channel Message?": {
+      "main": [
+        [
+          {
+            "node": "Run Xvond Employee",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Channel Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Xvond Employee": {
+      "main": [
+        [
+          {
+            "node": "Prepare Channel Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Channel Reply": {
+      "main": [
+        [
+          {
+            "node": "Send Provider Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Provider Reply?": {
+      "main": [
+        [
+          {
+            "node": "Send Channel Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Channel Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Channel Reply": {
+      "main": [
+        [
+          {
+            "node": "Return Channel Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "44444444-4444-4444-8444-444444444444",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
