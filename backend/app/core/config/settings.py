@@ -1,4 +1,6 @@
 import os
+from urllib.parse import urlparse
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -97,8 +99,18 @@ class Settings:
                 errors.append("REDIS_URL is required in production")
             if not self.PUBLIC_BASE_URL:
                 errors.append("PUBLIC_BASE_URL is required in production")
-            elif not self.PUBLIC_BASE_URL.lower().startswith("https://"):
-                errors.append("PUBLIC_BASE_URL must use HTTPS in production")
+            else:
+                parsed_public_url = urlparse(self.PUBLIC_BASE_URL)
+                if parsed_public_url.scheme.lower() != "https" or not parsed_public_url.hostname:
+                    errors.append("PUBLIC_BASE_URL must use HTTPS in production")
+                if (
+                    parsed_public_url.username
+                    or parsed_public_url.password
+                    or parsed_public_url.query
+                    or parsed_public_url.fragment
+                    or parsed_public_url.path not in {"", "/"}
+                ):
+                    errors.append("PUBLIC_BASE_URL must be an HTTPS origin without credentials, path, query or fragment")
             if not self.TRUST_PROXY_HEADERS:
                 errors.append("TRUST_PROXY_HEADERS must be enabled in production behind the Xvond reverse proxy")
             if _looks_like_placeholder(self.DATABASE_URL):
