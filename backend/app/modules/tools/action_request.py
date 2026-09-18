@@ -99,7 +99,11 @@ def _action(config: dict, action_type: str) -> dict | None:
     if not isinstance(actions, dict):
         return None
     value = actions.get(action_type)
-    if not isinstance(value, dict) or not value.get("enabled", True):
+    if (
+        not isinstance(value, dict)
+        or not value.get("enabled", True)
+        or str(value.get("_xvond_permission_mode") or "").strip().lower() == "never"
+    ):
         return None
     return value
 
