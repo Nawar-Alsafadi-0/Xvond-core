@@ -36,6 +36,7 @@ def test_instagram_publish_creates_container_then_publishes(monkeypatch):
             }
         },
         operation="execute",
+        idempotency_key="instagram-test-success",
     )
 
     assert result.success is True
@@ -68,6 +69,7 @@ def test_instagram_publish_requires_real_media_url(monkeypatch):
         },
         payload={"details": {"ai_response": "Caption only"}},
         operation="execute",
+        idempotency_key="instagram-test-no-media",
     )
 
     assert result.success is False
@@ -98,7 +100,64 @@ def test_instagram_publish_does_not_claim_success_when_container_fails(monkeypat
             }
         },
         operation="execute",
+        idempotency_key="instagram-test-container-failure",
     )
 
     assert result.success is False
     assert "HTTP 400" in result.error
+
+
+
+def test_instagram_publish_rejects_duplicate_execution_claim(monkeypatch):
+    calls = []
+    monkeypatch.setattr(runtime, "validate_public_http_url", lambda url: url)
+
+    def fake_request(**kwargs):
+        calls.append(kwargs)
+        if kwargs["url"].endswith("/media"):
+            return {
+                "status_code": 200,
+                "response": '{"id":"creation-dup"}',
+                "truncated": False,
+            }
+        return {
+            "status_code": 200,
+            "response": '{"id":"media-dup"}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(runtime, "safe_http_request", fake_request)
+
+    first = runtime._instagram_publish_call(
+        config={
+            "instagram_user_id": "178414000",
+            "access_token": "secret-token",
+        },
+        payload={
+            "details": {
+                "image_url": "https://cdn.example.com/post.jpg",
+                "caption": "Post",
+            }
+        },
+        operation="execute",
+        idempotency_key="instagram-test-duplicate",
+    )
+    second = runtime._instagram_publish_call(
+        config={
+            "instagram_user_id": "178414000",
+            "access_token": "secret-token",
+        },
+        payload={
+            "details": {
+                "image_url": "https://cdn.example.com/post.jpg",
+                "caption": "Post",
+            }
+        },
+        operation="execute",
+        idempotency_key="instagram-test-duplicate",
+    )
+
+    assert first.success is True
+    assert second.success is False
+    assert second.data["reconciliation_required"] is True
+    assert len(calls) == 2
