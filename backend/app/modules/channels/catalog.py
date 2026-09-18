@@ -5,6 +5,13 @@ CHANNEL_SETUP_SELF_SERVICE = "self_service"
 CHANNEL_SETUP_MANAGED = "managed"
 CHANNEL_SETUP_INTERNAL = "internal"
 
+N8N_CHANNEL_ADAPTER = "n8n_channel_gateway"
+N8N_MANAGED_CHANNEL_FIELDS = [
+    {"name": "connection_key", "label": "Xvond Connection Key", "required": True, "secret": False},
+    {"name": "provider_account_label", "label": "Connected Account", "required": False, "secret": False},
+    {"name": "channel_instructions", "label": "Channel-only Instructions", "required": False, "secret": False},
+]
+
 
 CHANNEL_ALIASES = {
     "instagram_dm": "instagram",
@@ -89,88 +96,83 @@ CHANNEL_CATALOG = {
     },
     "telegram": {
         "name": "Telegram",
-        "description": "Telegram bot messaging",
+        "description": "Telegram bot messaging managed through Xvond",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
-        "config_fields": [
-            {"name": "bot_token", "label": "Bot Token", "required": True, "secret": True},
-        ],
+        "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "instagram": {
         "name": "Instagram DM",
-        "description": "Instagram direct-message channel",
+        "description": "Instagram direct-message channel managed through Xvond",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
-        "config_fields": [],
+        "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "messenger": {
         "name": "Facebook Messenger",
-        "description": "Facebook Page Messenger channel",
+        "description": "Facebook Page Messenger channel managed through Xvond",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
-        "config_fields": [],
+        "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "email": {
         "name": "Email",
-        "description": "Inbound and outbound employee email channel",
+        "description": "Inbound and outbound employee email channel managed through Xvond",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
-        "config_fields": [],
+        "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "sms": {
         "name": "SMS",
-        "description": "SMS messaging channel",
+        "description": "SMS messaging channel managed through Xvond",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
-        "config_fields": [],
+        "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "slack": {
         "name": "Slack",
-        "description": "Slack workspace messaging channel",
+        "description": "Slack workspace messaging channel managed through Xvond",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
-        "config_fields": [],
+        "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "teams": {
         "name": "Microsoft Teams",
-        "description": "Microsoft Teams messaging channel",
+        "description": "Microsoft Teams messaging channel managed through Xvond",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
-        "config_fields": [],
+        "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "custom": {
         "name": "Custom / API Channel",
-        "description": "Custom customer communication surface",
+        "description": "Custom customer communication surface managed through Xvond",
         "setup_mode": CHANNEL_SETUP_MANAGED,
-        "runtime_state": CHANNEL_RUNTIME_ADAPTER_REQUIRED,
-        "runtime_adapter": None,
+        "runtime_state": CHANNEL_RUNTIME_LIVE,
+        "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
-        "config_fields": [
-            {"name": "endpoint", "label": "Endpoint", "required": True, "secret": False},
-            {"name": "api_key", "label": "API Key", "required": False, "secret": True},
-        ],
+        "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
 }
 
@@ -252,6 +254,10 @@ def validate_channel_config(channel_type: str, config: dict):
         provider = str(config.get("provider") or "").strip().lower()
         if provider != "vapi" and not str(config.get("auth_token") or "").strip():
             missing.append("auth_token")
+
+    if definition.get("runtime_adapter") == N8N_CHANNEL_ADAPTER:
+        if str(config.get("provisioning_state") or "").strip().lower() != "connected":
+            missing.append("provisioning_state")
 
     if missing:
         missing = list(dict.fromkeys(missing))
