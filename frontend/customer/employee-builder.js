@@ -411,6 +411,36 @@
                                 <div id="job-brief-error" class="error"></div>
                             </div>
                         ` : ""}
+                        ${employee.delivery_mode === "self_service" && !employee.enabled ? `
+                            <div class="employee-builder-section">
+                                <h3>Tell Xvond what to change</h3>
+                                <p class="muted">Refine the same employee with a short instruction. Xvond keeps the rest of the Job Brief unless your new instruction overrides it.</p>
+                                <div class="chat-input">
+                                    <input id="employee-refine-instruction" maxlength="2000" placeholder="مثال: خليه يحكي رسمي أكثر، وخلي الحجز 30 دقيقة">
+                                    <button type="button" id="employee-refine-btn">Apply change</button>
+                                </div>
+                                <div id="employee-refine-error" class="error"></div>
+                            </div>
+                            ${(employee.versions || []).length ? `
+                                <details class="employee-builder-section">
+                                    <summary><strong>Version history</strong> · ${Number((employee.versions || []).length)} saved</summary>
+                                    <div style="margin-top:12px">
+                                        ${(employee.versions || []).slice(0, 10).map(version => `
+                                            <div class="note">
+                                                <div class="employee-builder-current-head">
+                                                    <div>
+                                                        <strong>${escapeHtml(version.reason || "Previous build")}</strong>
+                                                        <div class="muted">${escapeHtml(version.created_at || "")}</div>
+                                                    </div>
+                                                    <button type="button" data-rollback-version="${escapeHtml(version.id || "")}">Restore</button>
+                                                </div>
+                                                <p class="muted">${escapeHtml(String(version.job_brief || "").slice(0, 240))}</p>
+                                            </div>
+                                        `).join("")}
+                                    </div>
+                                </details>
+                            ` : ""}
+                        ` : ""}
                     </div>
 
                     <div class="employee-builder-summary-grid">
@@ -681,6 +711,37 @@
             });
         }
 
+        const refineButton = document.getElementById("employee-refine-btn");
+        const refineInput = document.getElementById("employee-refine-instruction");
+        if (refineButton && refineInput) {
+            refineButton.addEventListener("click", () => refineEmployee(employee.agent_id));
+            refineInput.addEventListener("keydown", event => {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    refineEmployee(employee.agent_id);
+                }
+            });
+        }
+
+        document.querySelectorAll("[data-rollback-version]").forEach(button => {
+            button.addEventListener("click", async () => {
+                const versionId = String(button.dataset.rollbackVersion || "");
+                if (!versionId || !confirm("Restore this employee version? The current draft will be saved in history first.")) return;
+                button.disabled = true;
+                try {
+                    await api(`/customer/employee-builder/${employee.agent_id}/rollback`, {
+                        method: "POST",
+                        body: JSON.stringify({version_id: versionId}),
+                    });
+                    await loadEmployeeBuilder();
+                } catch (err) {
+                    alert(err?.message || "Could not restore this version.");
+                } finally {
+                    if (document.body.contains(button)) button.disabled = false;
+                }
+            });
+        });
+
         const chooseSubscriptionButton = document.getElementById("choose-subscription-btn");
         if (chooseSubscriptionButton) {
             chooseSubscriptionButton.addEventListener("click", loadSubscriptionPlans);
@@ -693,6 +754,30 @@
         const launchButton = document.getElementById("launch-employee-btn");
         if (launchButton) {
             launchButton.addEventListener("click", () => launchEmployee(employee.agent_id));
+        }
+    }
+
+    async function refineEmployee(agentId) {
+        const input = document.getElementById("employee-refine-instruction");
+        const button = document.getElementById("employee-refine-btn");
+        const error = document.getElementById("employee-refine-error");
+        const instruction = String(input?.value || "").trim();
+        if (error) error.textContent = "";
+        if (instruction.length < 2) {
+            if (error) error.textContent = "Tell Xvond what you want to change.";
+            return;
+        }
+        if (button) button.disabled = true;
+        try {
+            await api(`/customer/employee-builder/${agentId}/refine`, {
+                method: "POST",
+                body: JSON.stringify({instruction}),
+            });
+            await loadEmployeeBuilder();
+        } catch (err) {
+            if (error) error.textContent = err?.message || "Could not apply this change.";
+        } finally {
+            if (button && document.body.contains(button)) button.disabled = false;
         }
     }
 
