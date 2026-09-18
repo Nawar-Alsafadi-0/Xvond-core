@@ -853,6 +853,27 @@ def _self_service_builder_journey(
                         f"Xvond execution setup is still required for {key.replace('_', ' ')}."
                     )
 
+        graph_trigger = (
+            (compiled_spec.get("delivery") or {}).get("graph_trigger")
+            if isinstance(compiled_spec.get("delivery"), dict)
+            else None
+        )
+        if (
+            isinstance(graph_trigger, dict)
+            and graph_trigger.get("trigger_type") == "webhook"
+            and graph_trigger.get("status") == "ready"
+            and graph_trigger.get("workflow_id")
+        ):
+            setup_actions.append(
+                _builder_action(
+                    "setup_webhook",
+                    "Configure webhook trigger",
+                    target="builder",
+                    key="webhook_trigger",
+                    detail="Copy the Xvond webhook URL and key into the external system that should trigger this employee.",
+                )
+            )
+
         for item in state.get("connected_system_setup") or []:
             if not isinstance(item, dict):
                 continue
