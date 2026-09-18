@@ -185,16 +185,19 @@ if [ "$workflow_enabled" = "true" ]; then
     probe_workflow_contract
 fi
 
-compose stop whatsapp-worker >/dev/null 2>&1 || true
+compose stop whatsapp-worker automation-scheduler >/dev/null 2>&1 || true
 compose up -d --no-deps --force-recreate app
 wait_healthy xvond-core
-compose up -d --no-deps --force-recreate whatsapp-worker
+compose up -d --no-deps --force-recreate whatsapp-worker automation-scheduler
+wait_healthy xvond-whatsapp-worker
+wait_healthy xvond-automation-scheduler
 
 app_image="$(docker inspect --format '{{.Image}}' xvond-core)"
 worker_image="$(docker inspect --format '{{.Image}}' xvond-whatsapp-worker)"
-if [ -z "$app_image" ] || [ "$app_image" != "$worker_image" ]; then
-    echo "Release rejected: API and WhatsApp worker are not running the same image" >&2
-    echo "app=$app_image worker=$worker_image" >&2
+scheduler_image="$(docker inspect --format '{{.Image}}' xvond-automation-scheduler)"
+if [ -z "$app_image" ] || [ "$app_image" != "$worker_image" ] || [ "$app_image" != "$scheduler_image" ]; then
+    echo "Release rejected: API, WhatsApp worker and automation scheduler are not running the same image" >&2
+    echo "app=$app_image worker=$worker_image scheduler=$scheduler_image" >&2
     exit 1
 fi
 
@@ -212,4 +215,5 @@ fi
 printf 'Xvond release complete: %s\n' "$release_sha"
 printf 'API image: %s\n' "$app_image"
 printf 'WhatsApp worker image: %s\n' "$worker_image"
+printf 'Automation scheduler image: %s\n' "$scheduler_image"
 printf 'Workflow engine enabled: %s\n' "$workflow_enabled"
