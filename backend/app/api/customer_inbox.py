@@ -7,7 +7,6 @@ from sqlalchemy import func, or_
 
 from backend.app.core.config_secrets import reveal_config
 from backend.app.core.database.connection import SessionLocal
-from backend.app.core.n8n_gateway import N8NGatewayError, n8n_gateway
 from backend.app.core.dependencies import require_customer_operator
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.customer_access import can_view_conversations
@@ -26,7 +25,12 @@ from backend.app.modules.channels.handoff import (
     human_handoff_active,
     resume_ai,
 )
-from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.channels.managed_delivery import (
+    attempt_delivery as attempt_managed_delivery,
+    delivery_payload as managed_delivery_payload,
+    ensure_delivery as ensure_managed_delivery,
+)
+from backend.app.modules.channels.models import AgentChannel, ManagedChannelOutboundDelivery
 from backend.app.modules.channels.whatsapp_delivery import (
     attempt_delivery,
     delivery_payload,
@@ -332,14 +336,20 @@ def _audit_handoff(db, *, action: str, conversation: AIConversation, current_use
 def _message_delivery_map(db, message_ids: list[int]) -> dict[int, dict]:
     if not message_ids:
         return {}
-    rows = (
+    whatsapp_rows = (
         db.query(WhatsAppOutboundDelivery)
         .filter(WhatsAppOutboundDelivery.message_id.in_(message_ids))
         .order_by(WhatsAppOutboundDelivery.id.desc())
         .all()
     )
+    managed_rows = (
+        db.query(ManagedChannelOutboundDelivery)
+        .filter(ManagedChannelOutboundDelivery.message_id.in_(message_ids))
+        .order_by(ManagedChannelOutboundDelivery.id.desc())
+        .all()
+    )
     result = {}
-    for row in rows:
+    for row in [*whatsapp_rows, *managed_rows]:
         result.setdefault(
             row.message_id,
             {
@@ -786,15 +796,10 @@ def send_human_reply(
             capability = get_channel_capability(channel.channel_type) or {}
             if capability.get("runtime_adapter") != N8N_CHANNEL_ADAPTER:
                 raise HTTPException(409, "This conversation is not using the Xvond managed channel gateway")
-            config = reveal_config(channel.config) or {}
-            connection_key = str(config.get("connection_key") or "").strip()
-            if (
-                str(config.get("provisioning_state") or "").strip().lower() != "connected"
-                or not connection_key
-            ):
-                raise HTTPException(409, "The managed channel connection is not ready")
-            if not n8n_gateway.configured():
-                raise HTTPException(503, "Xvond managed channel gateway is unavailable")
+
+            external_contact_id = str(conversation.external_contact_id or "").strip()
+            if not external_contact_id:
+                raise HTTPException(409, "The managed channel contact identity is unavailable")
 
             client_message_id = data.client_message_id or str(uuid4())
             source_key = (
@@ -821,6 +826,7 @@ def send_human_reply(
                     source_key=source_key,
                 )
                 db.add(message)
+                db.flush()
                 handoff.status = "in_progress"
                 handoff.updated_at = datetime.utcnow()
                 _audit_handoff(
@@ -830,42 +836,35 @@ def send_human_reply(
                     current_user=current_user,
                     details={**audit_details, "idempotency_key": source_key},
                 )
-                db.commit()
-                db.refresh(message)
 
-            try:
-                gateway_result = n8n_gateway.execute(
-                    company_id=current_user.company_id,
-                    agent_id=conversation.agent_id,
-                    conversation_id=conversation.id,
-                    action="channel.send",
-                    request_id=source_key,
-                    data={
-                        "channel_id": channel.id,
-                        "channel_type": canonical_channel_type(channel.channel_type),
-                        "connection_key": connection_key,
-                        "external_contact_id": str(conversation.external_contact_id or ""),
-                        "message": text,
-                        "idempotency_key": source_key,
-                    },
-                )
-            except N8NGatewayError as exc:
-                raise HTTPException(503, "Managed channel delivery is temporarily unavailable") from exc
-            if gateway_result.get("success") is not True:
-                raise HTTPException(502, "Managed channel delivery failed")
-            provider_data = (
-                gateway_result.get("data")
-                if isinstance(gateway_result.get("data"), dict)
-                else {}
+            delivery_row = ensure_managed_delivery(
+                db,
+                idempotency_key=source_key,
+                company_id=current_user.company_id,
+                agent_id=conversation.agent_id,
+                conversation_id=conversation.id,
+                channel_id=channel.id,
+                message_id=message.id,
+                external_contact_id=external_contact_id,
             )
-            gateway_delivery_state = {
-                "success": True,
-                "provider_message_id": provider_data.get("provider_message_id"),
-            }
+            db.commit()
+            result = attempt_managed_delivery(db, delivery_id=delivery_row.id)
+            if not result.get("success"):
+                if result.get("unknown"):
+                    raise HTTPException(
+                        502,
+                        "Managed channel delivery outcome is unknown; the saved reply will not be resent blindly",
+                    )
+                raise HTTPException(
+                    502,
+                    "Managed channel delivery failed; the saved reply needs review",
+                )
+            gateway_delivery_state = result
             audit_details.update(
                 {
-                    "idempotency_key": source_key,
-                    "provider_message_id": provider_data.get("provider_message_id"),
+                    "delivery_id": delivery_row.id,
+                    "delivery_status": result.get("status"),
+                    "provider_message_id": result.get("provider_message_id"),
                 }
             )
         else:
@@ -888,7 +887,9 @@ def send_human_reply(
             "mode": "human",
             "delivery": delivery,
             "delivery_state": (
-                delivery_payload(delivery_row)
+                managed_delivery_payload(delivery_row)
+                if delivery == "xvond_managed_channel" and delivery_row is not None
+                else delivery_payload(delivery_row)
                 if delivery_row is not None
                 else gateway_delivery_state
                 if delivery == "xvond_managed_channel"

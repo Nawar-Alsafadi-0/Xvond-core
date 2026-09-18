@@ -10,7 +10,8 @@ from backend.app.api import internal_channel_gateway as api
 from backend.app.core.database.base import Base
 from backend.app.models.company import Company
 from backend.app.modules.ai_agent.models import AIAgent, AIConversation, AIMessage
-from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.channels import managed_delivery
+from backend.app.modules.channels.models import AgentChannel, ManagedChannelOutboundDelivery
 from backend.app.modules.tools.business_models import HumanHandoff
 
 
@@ -22,6 +23,17 @@ def channel_gateway_database(monkeypatch):
     monkeypatch.setattr(api, "SessionLocal", factory)
     monkeypatch.setattr(api.settings, "N8N_SHARED_SECRET", "test-channel-secret")
     monkeypatch.setattr(api.audit_service, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(managed_delivery.n8n_gateway, "configured", lambda: True)
+    monkeypatch.setattr(
+        managed_delivery.n8n_gateway,
+        "execute",
+        lambda **kwargs: {
+            "success": True,
+            "request_id": kwargs.get("request_id"),
+            "action": kwargs.get("action"),
+            "data": {"provider_message_id": "provider-msg-1"},
+        },
+    )
 
     with factory() as db:
         db.add(
@@ -146,13 +158,20 @@ def test_channel_gateway_runs_same_employee_and_deduplicates_provider_retries(
     assert second["duplicate"] is True
     assert second["response_message_id"] == first["response_message_id"]
     assert second["reply"] == "reply:hello"
+    assert first["delivery"]["status"] == "accepted"
+    assert second["delivery"]["status"] == "accepted"
+    assert second["delivery"]["already_sent"] is True
     assert calls == ["hello"]
 
     with channel_gateway_database() as db:
         conversation = db.query(AIConversation).one()
+        delivery = db.query(ManagedChannelOutboundDelivery).one()
         assert conversation.channel_id == 10
         assert conversation.channel_type == "telegram"
         assert conversation.external_contact_id == "chat-55"
+        assert delivery.idempotency_key == "channel-reply:10:msg-1"
+        assert delivery.status == "accepted"
+        assert delivery.attempts == 1
 
 
 def test_channel_gateway_stores_inbound_message_without_ai_during_handoff(
@@ -293,3 +312,68 @@ def test_channel_delivery_confirmation_rejects_wrong_conversation(
         )
 
     assert exc.value.status_code == 404
+
+
+def test_channel_gateway_marks_ambiguous_delivery_unknown_without_resend(
+    channel_gateway_database,
+    monkeypatch,
+):
+    calls = {"send": 0}
+
+    def fake_chat(**kwargs):
+        db = kwargs["db"]
+        conversation = AIConversation(
+            company_id=kwargs["company_id"],
+            agent_id=kwargs["agent_id"],
+            channel_id=kwargs["channel_id"],
+            channel_type=kwargs["channel_type"],
+            external_contact_id=kwargs["external_contact_id"],
+            title=kwargs["message"],
+        )
+        db.add(conversation)
+        db.flush()
+        user = AIMessage(
+            conversation_id=conversation.id,
+            role="user",
+            content=kwargs["message"],
+            source_key=kwargs["user_message_source_key"],
+        )
+        reply = AIMessage(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="reply once",
+        )
+        db.add_all([user, reply])
+        db.commit()
+        return {
+            "conversation_id": conversation.id,
+            "response": {"id": reply.id, "content": reply.content},
+        }
+
+    def ambiguous_send(**kwargs):
+        calls["send"] += 1
+        raise managed_delivery.N8NGatewayError("network timeout")
+
+    monkeypatch.setattr(api.agent_runtime, "chat", fake_chat)
+    monkeypatch.setattr(managed_delivery.n8n_gateway, "execute", ambiguous_send)
+
+    first = api.receive_channel_message(
+        _payload(message_id="msg-unknown"),
+        x_xvond_n8n_secret="test-channel-secret",
+    )
+    second = api.receive_channel_message(
+        _payload(message_id="msg-unknown"),
+        x_xvond_n8n_secret="test-channel-secret",
+    )
+
+    assert first["delivery"]["status"] == "unknown"
+    assert first["delivery"]["unknown"] is True
+    assert second["delivery"]["status"] == "unknown"
+    assert second["delivery"]["unknown"] is True
+    assert calls["send"] == 1
+
+    with channel_gateway_database() as db:
+        delivery = db.query(ManagedChannelOutboundDelivery).one()
+        assert delivery.status == "unknown"
+        assert delivery.retryable is False
+        assert delivery.attempts == 1

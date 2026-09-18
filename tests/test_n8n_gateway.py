@@ -134,3 +134,27 @@ def test_n8n_gateway_is_off_by_default_when_not_enabled():
 
     with pytest.raises(N8NGatewayError, match="disabled"):
         gateway.execute(company_id=1, agent_id=2, action="send_email")
+
+
+def test_n8n_gateway_can_disable_retries_for_durable_side_effects(monkeypatch):
+    gateway = configured_gateway()
+    gateway.max_retries = 3
+    calls = {"count": 0}
+
+    def fail_post(*args, **kwargs):
+        calls["count"] += 1
+        request = httpx.Request("POST", gateway.webhook_url)
+        raise httpx.ConnectTimeout("timeout", request=request)
+
+    monkeypatch.setattr(httpx, "post", fail_post)
+
+    with pytest.raises(N8NGatewayError):
+        gateway.execute(
+            company_id=1,
+            agent_id=2,
+            action="channel.send",
+            request_id="durable-send-1",
+            max_retries_override=0,
+        )
+
+    assert calls["count"] == 1

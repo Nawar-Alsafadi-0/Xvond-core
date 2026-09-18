@@ -263,6 +263,39 @@
         2140,
         20
       ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "core-owns-durable-delivery",
+              "leftValue": "={{ String(!!($json.delivery && $json.delivery.delivery_id)) }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "core-owns-delivery",
+      "name": "Core Owns Delivery?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1160,
+        180
+      ]
     }
   ],
   "pinData": {},
@@ -311,7 +344,7 @@
       "main": [
         [
           {
-            "node": "Prepare Channel Reply",
+            "node": "Core Owns Delivery?",
             "type": "main",
             "index": 0
           }
@@ -381,6 +414,24 @@
         [
           {
             "node": "Return Channel Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Core Owns Delivery?": {
+      "main": [
+        [
+          {
+            "node": "Return Channel Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Channel Reply",
             "type": "main",
             "index": 0
           }

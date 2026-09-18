@@ -54,7 +54,8 @@ def test_customer_delivery_flow_supports_reply_only_and_operational_employees():
 def test_customer_delivery_flow_checks_execution_dependencies_only_when_needed():
     assert 'destination.get("type") == "integration"' in READINESS_API
     assert "required_integration_ids" in READINESS_API
-    assert "Workflow Engine is not ready for enabled business actions" in READINESS_API
+    assert "Workflow Engine is not ready for enabled business actions or managed customer channels" in READINESS_API
+    assert "managed_workflow_count" in READINESS_API
     assert "Connected App #" in READINESS_API
 
 

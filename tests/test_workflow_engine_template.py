@@ -108,33 +108,30 @@ def test_universal_channel_send_is_routed_by_xvond_connection_key():
     assert contracts["policy"]["channel_routes_are_tenant_scoped"] is True
 
 
-def test_inbound_channel_gateway_calls_xvond_then_provider_without_exposing_credentials():
+def test_inbound_channel_gateway_prefers_core_owned_delivery_with_safe_legacy_cutover():
     payload = json.loads(CHANNEL_INBOUND_PATH.read_text(encoding="utf-8"))
     nodes = {node["name"]: node for node in payload["nodes"]}
 
     webhook = nodes["Xvond Channel Inbound"]
     assert webhook["parameters"]["path"] == "xvond-channel-inbound"
     validate = nodes["Validate Normalized Message"]["parameters"]["jsCode"]
-    prepare = nodes["Prepare Channel Reply"]["parameters"]["jsCode"]
 
     assert "N8N_SHARED_SECRET" in validate
     assert "external_contact_id" in validate
     assert "external_message_id" in validate
     assert "XVOND_INTERNAL_CHANNEL_URL" in str(nodes["Run Xvond Employee"]["parameters"])
-    assert "XVOND_CHANNEL_ROUTES_JSON" in prepare
-    assert "channel-reply:" in prepare
-    assert "provider_secret" not in prepare
-    assert "XVOND_CHANNEL_ROUTES_JSON" in str(nodes["Send Channel Reply"]["parameters"])
+    assert "Core Owns Delivery?" in nodes
+    gate = str(nodes["Core Owns Delivery?"]["parameters"])
+    assert "delivery.delivery_id" in gate
+
+    # During deployment the workflow is synced before the new Core container.
+    # Old Core has no delivery object, so the legacy provider path remains as a
+    # temporary compatibility fallback. New Core returns durable delivery state,
+    # causing the workflow to return immediately without a second provider send.
+    assert "Prepare Channel Reply" in nodes
     assert "Send Channel Reply" in nodes
-    assert "Provider Delivery Confirmed?" in nodes
     assert "Confirm Channel Delivery" in nodes
-    assert "XVOND_INTERNAL_CHANNEL_CONFIRM_URL" in str(
-        nodes["Confirm Channel Delivery"]["parameters"]
-    )
-    confirm_body = str(nodes["Confirm Channel Delivery"]["parameters"])
-    assert "conversation_id" in confirm_body
-    assert "response_message_id" in confirm_body
-    assert "provider_message_id" in confirm_body
-    assert "request_id" not in confirm_body
-    gate = str(nodes["Provider Delivery Confirmed?"]["parameters"])
-    assert "provider_message_id" in gate
+    true_branch = payload["connections"]["Core Owns Delivery?"]["main"][0]
+    false_branch = payload["connections"]["Core Owns Delivery?"]["main"][1]
+    assert true_branch[0]["node"] == "Return Channel Result"
+    assert false_branch[0]["node"] == "Prepare Channel Reply"

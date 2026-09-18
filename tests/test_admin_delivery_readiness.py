@@ -21,7 +21,9 @@ def test_conversational_employee_does_not_require_actions_or_workflow_engine():
 
 def test_operational_employee_requires_workflow_and_configured_integrations():
     assert '"requires_workflow_engine": bool(enabled_actions)' in READINESS
-    assert "Workflow Engine is not ready for enabled business actions" in READINESS
+    assert "Workflow Engine is not ready for enabled business actions or managed customer channels" in READINESS
+    assert "managed_workflow_count" in READINESS
+    assert "N8N_CHANNEL_ADAPTER" in READINESS
     assert "Connected App #" in READINESS
     assert "N8N_SHARED_SECRET" in READINESS
 

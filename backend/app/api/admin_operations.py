@@ -16,7 +16,10 @@ from backend.app.models.user import User
 from backend.app.modules.ai_agent.models import AIUsage
 from backend.app.modules.audit.service import audit_service
 from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
-from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.channels.acceptance import mark_customer_roundtrip
+from backend.app.modules.channels.catalog import canonical_channel_type
+from backend.app.modules.channels.managed_delivery import attempt_delivery as attempt_managed_delivery
+from backend.app.modules.channels.models import AgentChannel, ManagedChannelOutboundDelivery
 from backend.app.modules.channels.whatsapp_delivery import attempt_delivery
 from backend.app.modules.channels.whatsapp_models import WhatsAppOutboundDelivery
 from backend.app.modules.channels.whatsapp_queue import whatsapp_job_queue
@@ -31,6 +34,12 @@ RECONCILIATION_OUTCOMES = {"executed", "not_executed", "cancelled"}
 
 class ReconcileExternalOperation(BaseModel):
     outcome: str
+    note: str | None = None
+
+
+class ReconcileManagedChannelDelivery(BaseModel):
+    outcome: str
+    provider_message_id: str | None = None
     note: str | None = None
 
 
@@ -108,6 +117,26 @@ def _delivery_metadata(item: WhatsAppOutboundDelivery) -> dict:
         "accepted_at": item.accepted_at,
         "delivered_at": item.delivered_at,
         "read_at": item.read_at,
+        "failed_at": item.failed_at,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    }
+
+
+def _managed_delivery_metadata(item: ManagedChannelOutboundDelivery) -> dict:
+    """Operator-safe managed transport metadata without customer content."""
+    return {
+        "id": item.id,
+        "company_id": item.company_id,
+        "agent_id": item.agent_id,
+        "conversation_id": item.conversation_id,
+        "channel_id": item.channel_id,
+        "status": item.status,
+        "retryable": bool(item.retryable),
+        "attempts": int(item.attempts or 0),
+        "provider_message_id": item.provider_message_id,
+        "last_error_code": item.last_error_code,
+        "accepted_at": item.accepted_at,
         "failed_at": item.failed_at,
         "created_at": item.created_at,
         "updated_at": item.updated_at,
@@ -356,6 +385,202 @@ def retry_whatsapp_delivery(
             "status": "retried",
             "delivery": _delivery_metadata(refreshed),
         }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.get("/managed-channels/deliveries/unresolved")
+def unresolved_managed_channel_deliveries(
+    company_id: int | None = None,
+    limit: int = 100,
+    current_admin: User = Depends(require_xvond_operator),
+):
+    db = SessionLocal()
+    try:
+        safe_limit = max(1, min(int(limit or 100), 500))
+        query = db.query(ManagedChannelOutboundDelivery).filter(
+            ManagedChannelOutboundDelivery.status.in_(UNRESOLVED_DELIVERY)
+        )
+        if company_id is not None:
+            get_company_or_404(db, company_id)
+            query = query.filter(
+                ManagedChannelOutboundDelivery.company_id == company_id
+            )
+        rows = (
+            query.order_by(ManagedChannelOutboundDelivery.id.desc())
+            .limit(safe_limit)
+            .all()
+        )
+        return {
+            "count": len(rows),
+            "deliveries": [_managed_delivery_metadata(row) for row in rows],
+        }
+    finally:
+        db.close()
+
+
+@router.post("/managed-channels/deliveries/{delivery_id}/retry")
+def retry_managed_channel_delivery(
+    delivery_id: int,
+    current_admin: User = Depends(require_xvond_admin),
+):
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(ManagedChannelOutboundDelivery)
+            .filter(ManagedChannelOutboundDelivery.id == delivery_id)
+            .with_for_update()
+            .first()
+        )
+        if row is None:
+            raise HTTPException(404, "Managed channel delivery not found")
+        if row.status == "unknown":
+            raise HTTPException(
+                409,
+                "Delivery outcome is unknown and must be reconciled before any resend",
+            )
+        if row.status != "failed" or not row.retryable:
+            raise HTTPException(409, "Managed channel delivery is not safely retryable")
+
+        audit_service.log(
+            db=db,
+            company_id=row.company_id,
+            action="managed_channel.delivery_retry_requested",
+            resource_type="managed_channel_delivery",
+            resource_id=row.id,
+            user_id=current_admin.id,
+            details={
+                "conversation_id": row.conversation_id,
+                "channel_id": row.channel_id,
+                "attempts_before": int(row.attempts or 0),
+                "previous_error_code": row.last_error_code,
+            },
+        )
+        db.commit()
+
+        result = attempt_managed_delivery(db, delivery_id=row.id)
+        refreshed = db.get(ManagedChannelOutboundDelivery, row.id)
+        audit_service.log(
+            db=db,
+            company_id=row.company_id,
+            action="managed_channel.delivery_retry_completed",
+            resource_type="managed_channel_delivery",
+            resource_id=row.id,
+            user_id=current_admin.id,
+            details={
+                "conversation_id": row.conversation_id,
+                "channel_id": row.channel_id,
+                "status": (
+                    refreshed.status
+                    if refreshed is not None
+                    else result.get("status")
+                ),
+                "attempts": (
+                    int(refreshed.attempts or 0)
+                    if refreshed is not None
+                    else result.get("attempts")
+                ),
+            },
+        )
+        db.commit()
+        return {
+            "status": "retried",
+            "delivery": _managed_delivery_metadata(refreshed),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.patch("/managed-channels/deliveries/{delivery_id}/reconcile")
+def reconcile_managed_channel_delivery(
+    delivery_id: int,
+    data: ReconcileManagedChannelDelivery,
+    current_admin: User = Depends(require_xvond_admin),
+):
+    outcome = str(data.outcome or "").strip().lower()
+    if outcome not in {"sent", "not_sent"}:
+        raise HTTPException(400, "Invalid reconciliation outcome")
+
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(ManagedChannelOutboundDelivery)
+            .filter(ManagedChannelOutboundDelivery.id == delivery_id)
+            .with_for_update()
+            .first()
+        )
+        if row is None:
+            raise HTTPException(404, "Managed channel delivery not found")
+        if row.status != "unknown":
+            raise HTTPException(409, "Only unknown deliveries require reconciliation")
+
+        now = _utcnow_naive()
+        provider_message_id = str(data.provider_message_id or "").strip()
+        if outcome == "sent":
+            if not provider_message_id:
+                raise HTTPException(
+                    400,
+                    "Provider message id is required when confirming a sent delivery",
+                )
+            row.status = "accepted"
+            row.retryable = False
+            row.provider_message_id = provider_message_id[:255]
+            row.last_error_code = None
+            row.accepted_at = now
+
+            channel = (
+                db.query(AgentChannel)
+                .filter(
+                    AgentChannel.id == row.channel_id,
+                    AgentChannel.company_id == row.company_id,
+                    AgentChannel.agent_id == row.agent_id,
+                )
+                .first()
+            )
+            if channel is not None:
+                mark_customer_roundtrip(
+                    channel,
+                    source=(
+                        f"{canonical_channel_type(channel.channel_type)}"
+                        "_provider_reconciled"
+                    ),
+                )
+        else:
+            row.status = "failed"
+            row.retryable = True
+            row.last_error_code = "reconciled_not_sent"
+            row.failed_at = now
+
+        audit_service.log(
+            db=db,
+            company_id=row.company_id,
+            action="managed_channel.delivery_reconciled",
+            resource_type="managed_channel_delivery",
+            resource_id=row.id,
+            user_id=current_admin.id,
+            details={
+                "conversation_id": row.conversation_id,
+                "channel_id": row.channel_id,
+                "outcome": outcome,
+                "provider_message_id": provider_message_id or None,
+                "note": (data.note or "").strip()[:1000] or None,
+            },
+        )
+        db.commit()
+        db.refresh(row)
+        return _managed_delivery_metadata(row)
     except HTTPException:
         db.rollback()
         raise
