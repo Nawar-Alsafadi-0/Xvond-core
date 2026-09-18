@@ -595,3 +595,51 @@ def test_instagram_publish_includes_media_generation_primitive():
     assert "content_generation" in requirement["primitives"]
     assert "media_generation" in requirement["primitives"]
     assert "messaging" in requirement["primitives"]
+
+
+
+def test_compiler_normalizes_general_execution_graph():
+    spec = normalize_compiled_spec(
+        {
+            "role": "General worker",
+            "requirements": [
+                {
+                    "key": "custom_publish",
+                    "kind": "custom",
+                    "purpose": "Publish a generated result",
+                }
+            ],
+            "execution_graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "draft",
+                        "type": "ai",
+                        "depends_on": [],
+                        "params": {"prompt": "Create the final content"},
+                    },
+                    {
+                        "id": "publish",
+                        "type": "action",
+                        "depends_on": ["draft"],
+                        "params": {
+                            "action_type": "custom_publish",
+                            "arguments": {
+                                "body": "$nodes.draft.ai_response"
+                            },
+                        },
+                    },
+                ],
+            },
+        },
+        job_brief="Create content and publish the result.",
+    )
+
+    graph = spec["execution_graph"]
+    assert graph["version"] == 1
+    assert [node["id"] for node in graph["nodes"]] == ["draft", "publish"]
+    assert graph["nodes"][1]["depends_on"] == ["draft"]
+    assert (
+        graph["nodes"][1]["params"]["arguments"]["body"]
+        == "$nodes.draft.ai_response"
+    )
