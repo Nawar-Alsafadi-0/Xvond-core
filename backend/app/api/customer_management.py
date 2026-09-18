@@ -404,6 +404,9 @@ def _serialize_integration(item: CompanyIntegration) -> dict:
         "execution_adapter": definition.get("execution_adapter"),
         "requirement_keys": list(definition.get("requirement_keys") or []),
         "generic_requirements": bool(definition.get("generic_requirements") is True),
+        "allow_generic_alternatives": bool(
+            definition.get("allow_generic_alternatives") is True
+        ),
         "operation_endpoints": bool(definition.get("operation_endpoints") is True),
         "config": public_config(item.config),
         "configured_secret_fields": configured_secret_fields(item.config),
