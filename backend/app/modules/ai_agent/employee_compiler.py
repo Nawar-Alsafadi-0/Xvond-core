@@ -240,7 +240,7 @@ Use this shape:
     "nodes": [
       {
         "id": "stable_node_id",
-        "type": "ai|media|action|http_get_json|transform|condition|notify|foreach",
+        "type": "ai|media|action|http_get_json|transform|condition|notify|foreach|select|filter|aggregate",
         "depends_on": [],
         "params": {}
       }
@@ -265,6 +265,9 @@ Rules:
 - action nodes must reference a requirement key in params.action_type. Do not encode provider-specific logic in the graph.
 - condition nodes use params.left, params.operator and params.right. Supported operators are eq, neq, gt, gte, lt, lte and contains. Any later node may use "when":"$nodes.<condition_id>.matched" to run only when that condition is true.
 - foreach nodes iterate over params.items, which may reference $input.* or a previous node output. Put the reusable per-item work in params.graph. Inside that nested graph, $item refers to the current item and $index to its zero-based index. Keep loops bounded to practical customer work; the runtime enforces a hard maximum.
+- select nodes project a list into requested fields using params.items and params.fields.
+- filter nodes keep matching list items using params.items, params.path, params.operator and params.value. Supported operators match condition nodes plus in.
+- aggregate nodes calculate count, sum, avg, min or max from params.items; numeric operations may use params.path to select the numeric field.
 - Node dependencies belong in depends_on. Keep the graph acyclic and order nodes so every dependency appears before the node that depends on it.
 - Text/content generation itself is a native employee capability and does not need a fake external action or execution_plan. When generated content must be published, sent, stored or otherwise acted on externally, represent that side effect as its own requirement (for example instagram_publish) and include content_generation in that side-effect requirement's primitives.
 - For recurring pipelines such as "generate and publish every day", attach the schedule to the requirement that performs the real side effect and include every needed primitive there. For Instagram feed publishing, include content_generation + media_generation + scheduler + messaging + workflow_engine so Xvond can create both the caption and publishable media. Do not emit a disconnected standalone scheduling requirement when it would separate one requested pipeline into pieces that cannot execute together.
