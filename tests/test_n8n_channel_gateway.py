@@ -82,6 +82,8 @@ def test_n8n_channel_check_uses_normalized_xvond_contract(monkeypatch):
         "channel_type": "instagram",
         "route_key": "12:9",
     }
+    assert "provider_message_id" not in result["data"]
+    assert "provider_reference" not in result["data"]
 
 
 def test_n8n_channel_send_requires_stable_delivery_identity(monkeypatch):
