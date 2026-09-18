@@ -115,6 +115,10 @@
 
     function journeyActionMarkup(action) {
         const type = String(action?.type || "");
+        if (type === "choose_plan" && !["owner", "admin"].includes(String(currentUser?.role || ""))) {
+            return '<span class="muted">A company Owner or Admin must choose the plan.</span>';
+        }
+
         if (type === "provide_input") {
             const encodedKey = encodeURIComponent(String(action?.key || ""));
             return `
@@ -195,6 +199,10 @@
                         </div>
                     `).join("")}
                 </div>
+                <div id="subscription-plans" class="employee-builder-section hidden"></div>
+                <div id="subscription-error" class="error"></div>
+                <div id="prepare-employee-error" class="error"></div>
+                <div id="launch-employee-error" class="error"></div>
             </div>
         `;
     }
@@ -205,7 +213,6 @@
         const subscription = state.subscription || {};
         const limit = state.channel_limit == null ? "—" : String(state.channel_limit);
         const used = Number(state.channel_slots_used || 0);
-        const blockers = (state.blockers || []).map(item => `<li>${escapeHtml(item)}</li>`).join("");
         const modeLabels = {
             personal: "Personal agent",
             background: "Background worker",
@@ -232,22 +239,18 @@
                         <div class="employee-builder-missing">${badge(subscription.active ? (subscription.plan_name || "Active") : "Subscription required", subscription.active ? "ready" : "setup")}</div>
                     </div>
                 </div>
-                ${blockers ? `
-                    <div class="employee-builder-section">
-                        <h3>Before launch</h3>
-                        <ul>${blockers}</ul>
+                <div class="employee-builder-section">
+                    <h3>Runtime readiness</h3>
+                    <div class="employee-builder-missing">
+                        ${badge(
+                            employee.enabled ? "Live" : (state.ready ? "Ready to launch" : "Follow build progress"),
+                            employee.enabled || state.ready ? "ready" : "setup"
+                        )}
                     </div>
-                ` : `
-                    <div class="employee-builder-section">
-                        <p class="muted">Everything required for this self-service employee is ready.</p>
-                    </div>
-                `}
-                ${employee.can_launch ? `
-                    <div class="employee-builder-actions">
-                        <button type="button" id="launch-employee-btn">Launch employee</button>
-                    </div>
-                    <div id="launch-employee-error" class="error"></div>
-                ` : ""}
+                    <p class="muted">${state.ready || employee.enabled
+                        ? "The runtime readiness gate is satisfied."
+                        : "The Build Progress above is the customer-facing source for the next required step."}</p>
+                </div>
             </div>
         `;
     }
@@ -302,8 +305,6 @@
         if (!target) return;
         const lifecycleTone = employee.enabled ? "ready" : "setup";
         const provisioned = employee.compiled_spec?.delivery?.provisioning_version === 1;
-        const subscriptionStatus = String(employee.self_service_readiness?.subscription?.status || "");
-        const canManageSubscription = ["owner", "admin"].includes(String(currentUser?.role || ""));
         const channels = (employee.requested_channels || []).map(item => badge(labelFor(CHANNELS, item))).join("") || '<span class="muted">No channel selected yet.</span>';
 
         target.innerHTML = `
@@ -350,10 +351,10 @@
                         </div>
                     </div>
 
-                    ${provisioned ? "" : employee.can_compile ? `
+                    ${employee.delivery_mode === "self_service" ? "" : (provisioned ? "" : employee.can_compile ? `
                         <div class="employee-builder-section">
                             <h3>Build this employee</h3>
-                            <p class="muted">Xvond will understand the complete job, break it into tasks, compose any missing digital capabilities and identify only the external accounts, permissions or data it needs from you.</p>
+                            <p class="muted">Xvond will understand the complete job, break it into tasks and identify the setup it needs.</p>
                             <div class="employee-builder-actions">
                                 <button type="button" id="prepare-employee-btn">Build employee</button>
                             </div>
@@ -362,26 +363,16 @@
                     ` : `
                         <div class="employee-builder-section">
                             <h3>Next step</h3>
-                            ${subscriptionStatus === "pending_payment" ? `
-                                <p class="muted">Your selected plan is pending payment or Xvond approval. AI-backed build, test and launch stay locked until the subscription becomes active.</p>
-                                <div class="employee-builder-missing">${badge("Payment pending", "setup")}</div>
-                            ` : `
-                                <p class="muted">Choose an AI Employee plan to build, test and launch this employee. Saving the Job Brief itself used no paid AI.</p>
-                                ${canManageSubscription ? `
-                                    <div class="employee-builder-actions">
-                                        <button type="button" id="choose-subscription-btn">Choose plan</button>
-                                    </div>
-                                    <div id="subscription-plans" class="employee-builder-section hidden"></div>
-                                    <div id="subscription-error" class="error"></div>
-                                ` : `<p class="muted">A company Owner or Admin must choose the subscription plan.</p>`}
-                            `}
+                            <p class="muted">Activate the required AI Employee service before building.</p>
+                        </div>
+                    `)}
+
+                    ${employee.delivery_mode === "self_service" ? "" : `
+                        <div class="employee-builder-section">
+                            <h3>Needed from you</h3>
+                            ${missingMarkup(employee.missing_information)}
                         </div>
                     `}
-
-                    <div class="employee-builder-section">
-                        <h3>Needed from you</h3>
-                        ${missingMarkup(employee.missing_information)}
-                    </div>
                 </div>
 
                 ${journeyMarkup(employee)}
