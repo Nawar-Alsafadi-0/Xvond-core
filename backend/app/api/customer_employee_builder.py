@@ -256,7 +256,13 @@ def _clear_generated_self_service_build(db, *, company_id: int, agent_id: int) -
             trigger_config.get("_xvond_source") == "self_service_employee"
             and int(trigger_config.get("_xvond_agent_id") or 0) == int(agent_id)
         ):
-            db.delete(workflow)
+            # Keep historical AutomationRun rows valid. A revised Job Brief
+            # retires generated schedules instead of deleting their history.
+            retired_config = dict(trigger_config)
+            retired_config["_xvond_source"] = "self_service_employee_retired"
+            retired_config["_xvond_retired_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            workflow.trigger_config = retired_config
+            workflow.enabled = False
 
 
 def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: AgentConfig) -> dict:
