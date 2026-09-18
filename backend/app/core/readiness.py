@@ -331,7 +331,7 @@ def company_readiness(db, company_id: int):
                     channel_config,
                     verify_remote=True,
                 )
-                connected = bool(connection["connected"])
+                connected = bool(connection["connected"] is True)
             elif (
                 configured
                 and capability.get("runtime_adapter") == N8N_CHANNEL_RUNTIME_ADAPTER
