@@ -55,7 +55,7 @@ def test_release_stops_workers_before_app_and_recreates_same_image_afterwards():
     recreate_workers = SOURCE.index("--force-recreate whatsapp-worker automation-scheduler")
     worker_ready = SOURCE.index("wait_healthy xvond-whatsapp-worker")
     scheduler_ready = SOURCE.index("wait_healthy xvond-automation-scheduler")
-    scheduler_heartbeat = SOURCE.index("wait_scheduler_heartbeat")
+    scheduler_heartbeat = SOURCE.index("wait_scheduler_heartbeat", scheduler_ready)
     scheduler_image = SOURCE.index("scheduler_image=")
     image_check = SOURCE.index(
         'if [ -z "$app_image" ] || [ "$app_image" != "$worker_image" ] || [ "$app_image" != "$scheduler_image" ]'
