@@ -904,9 +904,24 @@ class AutomationRuntime:
                 raise ValueError("Scheduled action is not enabled")
             destination = action.get("destination") or {}
             if action.get("confirmation_required", True):
-                raise ValueError(
-                    "Scheduled action requires automatic permission before background execution"
-                )
+                approval_request_id = int(step.get("approval_request_id") or 0)
+                approval = None
+                if approval_request_id:
+                    approval = (
+                        db.query(ActionRequest)
+                        .filter(
+                            ActionRequest.id == approval_request_id,
+                            ActionRequest.company_id == company_id,
+                            ActionRequest.agent_id == int(agent_id),
+                            ActionRequest.action_type == action_type,
+                            ActionRequest.status == "approved",
+                        )
+                        .first()
+                    )
+                if approval is None:
+                    raise ValueError(
+                        "Action requires an approved automation request before execution"
+                    )
 
             details = {
                 key: value
