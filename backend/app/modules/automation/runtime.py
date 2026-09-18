@@ -169,11 +169,21 @@ class AutomationRuntime:
                     node_outputs[node_id] = {"skipped": True}
                     continue
 
-                params = resolve_graph_value(
-                    node.get("params") or {},
-                    state=state,
-                    node_outputs=node_outputs,
-                )
+                raw_params = node.get("params") or {}
+                if node_type == "foreach" and isinstance(raw_params, dict):
+                    params = dict(raw_params)
+                    params["items"] = resolve_graph_value(
+                        raw_params.get("items"),
+                        state=state,
+                        node_outputs=node_outputs,
+                    )
+                    params["graph"] = raw_params.get("graph") or {}
+                else:
+                    params = resolve_graph_value(
+                        raw_params,
+                        state=state,
+                        node_outputs=node_outputs,
+                    )
                 if not isinstance(params, dict):
                     params = {}
 
