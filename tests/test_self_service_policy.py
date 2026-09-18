@@ -137,8 +137,8 @@ def test_email_and_instagram_actions_remain_integrations_while_channels_are_expl
     assert state["channel_slots_used"] == 0
     assert state["channels_required"] is False
     assert state["ready"] is False
-    assert "email_read: Xvond connection adapter required" in state["blockers"]
-    assert "instagram_publish: Xvond connection adapter required" in state["blockers"]
+    assert "email_read: setup required" in state["blockers"]
+    assert "instagram_publish: setup required" in state["blockers"]
 
     channel_state = evaluate_readiness(
         subscribed=True,
@@ -236,7 +236,7 @@ def test_self_service_spec_view_annotates_cached_connection_truth_without_recomp
     rows = {item["key"]: item for item in rendered["requirements"]}
 
     assert rows["whatsapp"]["self_service_connection_status"] == "self_service_available"
-    assert rows["email_send"]["self_service_connection_status"] == "xvond_adapter_required"
+    assert rows["email_send"]["self_service_connection_status"] == "self_service_integration_available"
     assert rows["voice"]["self_service_connection_status"] == "xvond_managed_available"
     assert rows["voice"]["channel_delivery"]["setup_mode"] == "managed"
     assert rows["voice"]["channel_delivery"]["runtime_state"] == "live"
