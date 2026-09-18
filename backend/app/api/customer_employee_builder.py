@@ -879,6 +879,22 @@ def _self_service_builder_journey(
                 )
             )
 
+        if isinstance(graph_trigger, dict):
+            graph_trigger_status = str(graph_trigger.get("status") or "not_required")
+            if graph_trigger_status == "nested_approval_not_ready":
+                waiting_reasons.append(
+                    "This employee needs approval inside a foreach loop. Xvond must finish durable nested approval resume support before launch."
+                )
+            elif graph_trigger_status in {
+                "schedule_required",
+                "schedule_setup_required",
+                "setup_required",
+                "disabled",
+            }:
+                waiting_reasons.append(
+                    "Xvond execution trigger setup is not ready yet."
+                )
+
         for item in state.get("connected_system_setup") or []:
             if not isinstance(item, dict):
                 continue
