@@ -39,6 +39,7 @@ from backend.app.modules.ai_agent.self_service_policy import (
     is_self_service_company,
     self_service_channel_activation_blockers,
     self_service_readiness,
+    self_service_spec_view,
 )
 from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.billing.limits import limits_service
@@ -414,6 +415,7 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
         company = _company_or_404(db, current_user.company_id)
         self_service_state = None
         if is_self_service_company(company):
+            compiled_spec = self_service_spec_view(compiled_spec)
             self_service_state = self_service_readiness(
                 db,
                 company=company,
