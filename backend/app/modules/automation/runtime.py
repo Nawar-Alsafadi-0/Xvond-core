@@ -4,6 +4,11 @@ from backend.app.core.agent_runtime import agent_runtime
 from backend.app.core.config_secrets import reveal_config
 from backend.app.core.http_security import safe_http_request
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
+from backend.app.modules.automation.agent_state import (
+    delete_agent_state,
+    read_agent_state,
+    write_agent_state,
+)
 from backend.app.modules.automation.execution_graph import (
     compare_values,
     extract_data_path,
@@ -259,6 +264,84 @@ class AutomationRuntime:
                         "content": str(result.get("response") or ""),
                         "status_code": status,
                         "truncated": bool(result.get("truncated")),
+                    }
+                    continue
+                elif node_type == "state_read":
+                    agent_id = int(params.get("agent_id") or graph_agent_id or 0)
+                    if not agent_id:
+                        raise ValueError(
+                            f"Execution graph state_read node {node_id} requires agent_id"
+                        )
+                    namespace = str(params.get("namespace") or "default").strip()
+                    key = str(params.get("key") or "").strip()
+                    if not key:
+                        raise ValueError(
+                            f"Execution graph state_read node {node_id} requires key"
+                        )
+                    value = read_agent_state(
+                        db,
+                        company_id=company_id,
+                        agent_id=agent_id,
+                        namespace=namespace,
+                        key=key,
+                        default=params.get("default"),
+                    )
+                    node_outputs[node_id] = {
+                        "value": value,
+                        "namespace": namespace,
+                        "key": key,
+                    }
+                    continue
+                elif node_type == "state_write":
+                    agent_id = int(params.get("agent_id") or graph_agent_id or 0)
+                    if not agent_id:
+                        raise ValueError(
+                            f"Execution graph state_write node {node_id} requires agent_id"
+                        )
+                    namespace = str(params.get("namespace") or "default").strip()
+                    key = str(params.get("key") or "").strip()
+                    if not key:
+                        raise ValueError(
+                            f"Execution graph state_write node {node_id} requires key"
+                        )
+                    value = write_agent_state(
+                        db,
+                        company_id=company_id,
+                        agent_id=agent_id,
+                        namespace=namespace,
+                        key=key,
+                        value=params.get("value"),
+                    )
+                    node_outputs[node_id] = {
+                        "value": value,
+                        "namespace": namespace,
+                        "key": key,
+                        "written": True,
+                    }
+                    continue
+                elif node_type == "state_delete":
+                    agent_id = int(params.get("agent_id") or graph_agent_id or 0)
+                    if not agent_id:
+                        raise ValueError(
+                            f"Execution graph state_delete node {node_id} requires agent_id"
+                        )
+                    namespace = str(params.get("namespace") or "default").strip()
+                    key = str(params.get("key") or "").strip()
+                    if not key:
+                        raise ValueError(
+                            f"Execution graph state_delete node {node_id} requires key"
+                        )
+                    deleted = delete_agent_state(
+                        db,
+                        company_id=company_id,
+                        agent_id=agent_id,
+                        namespace=namespace,
+                        key=key,
+                    )
+                    node_outputs[node_id] = {
+                        "namespace": namespace,
+                        "key": key,
+                        "deleted": bool(deleted),
                     }
                     continue
                 elif node_type == "transform":
