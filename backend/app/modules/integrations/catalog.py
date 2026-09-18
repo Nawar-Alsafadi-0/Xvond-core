@@ -19,8 +19,8 @@ INTEGRATION_CATALOG = {
             {
                 "name": "validation_endpoint",
                 "label": "Validation Endpoint",
-                "required": true,
-                "secret": false,
+                "required": True,
+                "secret": False,
             },
         ],
     },
@@ -44,8 +44,8 @@ INTEGRATION_CATALOG = {
             {
                 "name": "validation_endpoint",
                 "label": "Validation Endpoint",
-                "required": true,
-                "secret": false,
+                "required": True,
+                "secret": False,
             },
         ],
     },
@@ -69,8 +69,8 @@ INTEGRATION_CATALOG = {
             {
                 "name": "validation_endpoint",
                 "label": "Validation Endpoint",
-                "required": true,
-                "secret": false,
+                "required": True,
+                "secret": False,
             },
         ],
     },
@@ -138,8 +138,8 @@ INTEGRATION_CATALOG = {
             {
                 "name": "validation_endpoint",
                 "label": "Validation Endpoint",
-                "required": true,
-                "secret": false,
+                "required": True,
+                "secret": False,
             },
         ],
     },
