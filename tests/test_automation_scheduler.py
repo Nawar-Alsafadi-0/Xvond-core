@@ -781,3 +781,111 @@ def test_internal_event_dispatch_runs_matching_graph_once(monkeypatch):
     assert captured[0]["_xvond_event_name"] == "booking.created"
     assert captured[0]["_xvond_execution_key"].endswith(":evt-123")
     engine.dispose()
+
+
+
+def test_graph_runtime_supports_filter_select_and_aggregate():
+    runtime = automation_runtime_module.AutomationRuntime()
+
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 1,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "qualified",
+                        "type": "filter",
+                        "depends_on": [],
+                        "params": {
+                            "items": "$input.leads",
+                            "path": "score",
+                            "operator": "gte",
+                            "value": 80,
+                        },
+                    },
+                    {
+                        "id": "public_fields",
+                        "type": "select",
+                        "depends_on": ["qualified"],
+                        "params": {
+                            "items": "$nodes.qualified.items",
+                            "fields": ["name", "score"],
+                        },
+                    },
+                    {
+                        "id": "average_score",
+                        "type": "aggregate",
+                        "depends_on": ["qualified"],
+                        "params": {
+                            "items": "$nodes.qualified.items",
+                            "operation": "avg",
+                            "path": "score",
+                        },
+                    },
+                ],
+            },
+        },
+        state={
+            "_xvond_execution_key": "transform-test",
+            "leads": [
+                {"name": "A", "score": 95, "secret": "x"},
+                {"name": "B", "score": 70, "secret": "y"},
+                {"name": "C", "score": 85, "secret": "z"},
+            ],
+        },
+        run_id=1,
+        step_index=0,
+    )
+
+    outputs = result["graph_outputs"]
+    assert outputs["qualified"]["count"] == 2
+    assert outputs["public_fields"]["items"] == [
+        {"name": "A", "score": 95},
+        {"name": "C", "score": 85},
+    ]
+    assert outputs["average_score"]["value"] == 90.0
+
+
+def test_graph_runtime_filter_handles_missing_fields_without_failing():
+    runtime = automation_runtime_module.AutomationRuntime()
+
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "filtered",
+                        "type": "filter",
+                        "depends_on": [],
+                        "params": {
+                            "items": "$input.items",
+                            "path": "nested.value",
+                            "operator": "eq",
+                            "value": "yes",
+                        },
+                    }
+                ],
+            },
+        },
+        state={
+            "items": [
+                {"nested": {"value": "yes"}},
+                {"nested": {}},
+                {"other": 1},
+            ]
+        },
+        run_id=1,
+        step_index=0,
+    )
+
+    assert result["graph_outputs"]["filtered"]["items"] == [
+        {"nested": {"value": "yes"}}
+    ]
