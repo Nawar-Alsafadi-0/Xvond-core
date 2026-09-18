@@ -1,6 +1,22 @@
 {
   "version": 2,
   "actions": {
+    "channel.send": {
+      "adapter": "channel",
+      "required_data": [
+        "channel_id",
+        "connection_key",
+        "external_contact_id",
+        "message",
+        "idempotency_key"
+      ],
+      "required_detail_fields": [],
+      "side_effect": true,
+      "idempotent": true,
+      "success_data": [
+        "provider_message_id"
+      ]
+    },
     "booking.check_availability": {
       "adapter": "booking",
       "required_data": [
@@ -144,20 +160,18 @@
         "notification_id"
       ]
     },
-    "channel.send": {
+    "channel.check": {
       "adapter": "channel",
       "required_data": [
         "channel_id",
-        "connection_key",
-        "external_contact_id",
-        "message",
-        "idempotency_key"
+        "connection_key"
       ],
       "required_detail_fields": [],
-      "side_effect": true,
+      "side_effect": false,
       "idempotent": true,
       "success_data": [
-        "provider_message_id"
+        "configured",
+        "channel_id"
       ]
     }
   },
