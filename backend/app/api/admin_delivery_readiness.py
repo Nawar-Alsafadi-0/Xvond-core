@@ -13,7 +13,11 @@ from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.profile_models import AIAgentProfile
 from backend.app.modules.billing.limits import limits_service
-from backend.app.modules.channels.catalog import validate_channel_config
+from backend.app.modules.channels.catalog import (
+    N8N_CHANNEL_ADAPTER,
+    get_channel_capability,
+    validate_channel_config,
+)
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
 from backend.app.modules.integrations.models import CompanyIntegration
@@ -110,6 +114,7 @@ def _channel_state(db, company_id: int, agent_id: int) -> dict:
     live = []
     customer_ready = []
     acceptance_pending = []
+    managed_workflow_channels = []
 
     for row in rows:
         config = reveal_config(row.config) or {}
@@ -118,6 +123,9 @@ def _channel_state(db, company_id: int, agent_id: int) -> dict:
         except ValueError:
             continue
         configured.append(row)
+        capability = get_channel_capability(row.channel_type) or {}
+        if capability.get("runtime_adapter") == N8N_CHANNEL_ADAPTER:
+            managed_workflow_channels.append(row.channel_type)
 
         connection = None
         if row.channel_type == "whatsapp":
@@ -153,6 +161,8 @@ def _channel_state(db, company_id: int, agent_id: int) -> dict:
         "configured": bool(configured),
         "live": bool(live),
         "customer_ready": fully_customer_ready,
+        "managed_workflow_count": len(managed_workflow_channels),
+        "managed_workflow_channels": sorted(set(managed_workflow_channels)),
     }
 
 
@@ -177,7 +187,7 @@ def _assert_workflow_runtime_ready(company_id: int, agent_id: int) -> None:
             detail={
                 "message": "Workflow Engine health check failed",
                 "blockers": [
-                    "Workflow Engine is not reachable for enabled business actions"
+                    "Workflow Engine is not reachable for this employee's actions or managed channels"
                 ],
             },
         ) from exc
@@ -256,7 +266,10 @@ def _delivery_state(db, company_id: int, agent_id: int) -> dict:
                 f"Connected App #{integration_id} is missing or not configured"
             )
 
-    workflow_required = actions["requires_workflow_engine"]
+    workflow_required = bool(
+        actions["requires_workflow_engine"]
+        or channels["managed_workflow_count"]
+    )
     workflow_ready = (
         not workflow_required
         or (
@@ -295,7 +308,9 @@ def _delivery_state(db, company_id: int, agent_id: int) -> dict:
     setup_blockers.extend(actions["issues"])
     setup_blockers.extend(integration_issues)
     if workflow_required and not workflow_ready:
-        setup_blockers.append("Workflow Engine is not ready for enabled business actions")
+        setup_blockers.append(
+            "Workflow Engine is not ready for enabled business actions or managed customer channels"
+        )
 
     setup_ready = not setup_blockers
     blockers = list(setup_blockers)
@@ -349,6 +364,7 @@ def _delivery_state(db, company_id: int, agent_id: int) -> dict:
                 "customer_ready_channels": channels["customer_ready_count"],
                 "acceptance_pending_channels": channels["acceptance_pending_count"],
                 "enabled_actions": actions["enabled_count"],
+                "managed_workflow_channels": channels["managed_workflow_count"],
                 "legacy_business_tools": len(actions["legacy_business_tools"]),
                 "required_connected_apps": len(actions["required_integration_ids"]),
             },
