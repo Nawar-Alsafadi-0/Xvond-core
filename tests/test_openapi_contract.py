@@ -74,7 +74,7 @@ paths:
 """
     )
     assert contract["operations"]["search_items"]["method"] == "GET"
-    assert contract["operations"]["searchitems"]["input_mode"] == "query"
+    assert contract["operations"]["search_items"]["input_mode"] == "query"
 
 
 def test_openapi_rejects_non_contract_and_unsafe_path_parameters():
