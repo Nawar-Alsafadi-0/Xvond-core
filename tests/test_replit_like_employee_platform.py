@@ -48,6 +48,8 @@ def test_generic_connection_can_import_openapi_contracts():
     assert 'plain["operations"] = operations' in MANAGEMENT
     assert "configured_operations" in BUILDER
     assert "integration_config.get(\"operations\")" in BUILDER
+    assert "importCustomerIntegrationOpenAPI" in PORTAL
+    assert "/openapi" in PORTAL
 
 
 def test_connected_systems_are_real_execution_not_read_only_metadata():
