@@ -1,4 +1,5 @@
 from backend.app.core.config.settings import settings
+from backend.app.modules.integrations.http_api_auth import validate_http_api_auth_config
 
 INTEGRATION_CATALOG = {
 
@@ -304,8 +305,40 @@ INTEGRATION_CATALOG = {
                 "secret": False,
             },
             {
+                "name": "auth_type",
+                "label": "Authentication",
+                "required": False,
+                "secret": False,
+                "default": "none",
+                "choices": ["none", "bearer", "api_key_header", "api_key_query", "basic"],
+            },
+            {
                 "name": "api_key",
-                "label": "API Key",
+                "label": "API Key / Token",
+                "required": False,
+                "secret": True,
+            },
+            {
+                "name": "api_key_name",
+                "label": "API Key Header / Query Name",
+                "required": False,
+                "secret": False,
+            },
+            {
+                "name": "api_key_prefix",
+                "label": "API Key Prefix",
+                "required": False,
+                "secret": False,
+            },
+            {
+                "name": "username",
+                "label": "Basic Auth Username",
+                "required": False,
+                "secret": False,
+            },
+            {
+                "name": "password",
+                "label": "Basic Auth Password",
                 "required": False,
                 "secret": True,
             },
@@ -437,6 +470,9 @@ def validate_integration_config(
             "Missing integration configuration: "
             + ", ".join(missing)
         )
+
+    if str(integration_type or "").strip().lower() == "custom_api":
+        validate_http_api_auth_config(config)
 
     if str(integration_type or "").strip().lower() == "calendar":
         access_token = str(config.get("access_token") or "").strip()

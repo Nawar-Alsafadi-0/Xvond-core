@@ -15,6 +15,7 @@ from backend.app.modules.channels.handoff import activate_human_handoff
 from backend.app.modules.channels.whatsapp_models import WhatsAppSession
 from backend.app.modules.integrations.catalog import integration_validation_ready
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.integrations.http_api_auth import apply_http_api_auth
 from backend.app.modules.integrations.email_smtp import (
     EmailConnectorError,
     send_smtp_email,
@@ -655,9 +656,6 @@ def _integration_call(
                 error="Integration endpoint must be a relative path",
             )
         url = base_url + "/" + endpoint.lstrip("/")
-        api_key = config.get("api_key")
-        if api_key:
-            headers.setdefault("Authorization", f"Bearer {api_key}")
     else:
         return ToolResult(
             success=False,
@@ -693,6 +691,17 @@ def _integration_call(
         if query_items:
             separator = "&" if "?" in url else "?"
             url = url + separator + urlencode(query_items)
+
+    if integration_type in {"custom_api", "pos", "crm", "erp"}:
+        try:
+            url, headers = apply_http_api_auth(
+                url=url,
+                headers=headers,
+                config=config,
+            )
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc))
+
     try:
         validate_public_http_url(url)
         result = safe_http_request(

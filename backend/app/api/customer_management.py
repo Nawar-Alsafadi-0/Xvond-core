@@ -40,6 +40,7 @@ from backend.app.modules.integrations.catalog import (
     validate_integration_config,
 )
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.integrations.http_api_auth import apply_http_api_auth
 from backend.app.modules.integrations.email_smtp import (
     EmailConnectorError,
     validate_smtp_connection,
@@ -157,13 +158,19 @@ def _validate_live_connection(item: CompanyIntegration) -> dict:
         raise HTTPException(400, "Validation endpoint must be a relative path")
 
     headers = {"Accept": "application/json"}
-    api_key = str(config.get("api_key") or "").strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    url = base_url + "/" + endpoint.lstrip("/")
+    try:
+        url, headers = apply_http_api_auth(
+            url=url,
+            headers=headers,
+            config=config,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
     try:
         result = safe_http_request(
-            url=base_url + "/" + endpoint.lstrip("/"),
+            url=url,
             method="GET",
             headers=headers,
             timeout=10,
