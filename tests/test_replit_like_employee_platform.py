@@ -42,6 +42,13 @@ def test_external_requirement_has_customer_connect_and_bind_path():
     assert "/connections/${encodeURIComponent(key)}" in BUILDER_UI
     assert "/manage/integrations" in BUILDER_UI
 
+def test_generic_connection_can_import_openapi_contracts():
+    assert '@router.post("/integrations/{integration_id}/openapi")' in MANAGEMENT
+    assert "fetch_openapi_contract" in MANAGEMENT
+    assert 'plain["operations"] = operations' in MANAGEMENT
+    assert "configured_operations" in BUILDER
+    assert "integration_config.get(\"operations\")" in BUILDER
+
 
 def test_connected_systems_are_real_execution_not_read_only_metadata():
     assert 'if destination_type == "integration":' in WORKFLOW_TOOL
