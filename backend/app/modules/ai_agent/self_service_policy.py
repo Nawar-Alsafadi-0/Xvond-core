@@ -644,6 +644,16 @@ def _execution_blockers(
             blockers.append(prefix + "schedule configuration required")
         elif graph_status == "schedule_setup_required":
             blockers.append(prefix + "valid workspace timezone or schedule setup required")
+        elif graph_status == "runtime_input_conflict":
+            conflicts = ", ".join(
+                str(item)
+                for item in (graph_trigger.get("runtime_input_conflicts") or [])
+            )
+            blockers.append(
+                prefix
+                + "conflicting runtime input keys"
+                + (f" ({conflicts})" if conflicts else "")
+            )
         elif graph_status == "disabled":
             blockers.append(prefix + "generated workflow is disabled")
         else:
