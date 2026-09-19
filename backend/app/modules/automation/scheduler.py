@@ -26,6 +26,10 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _utcnow_naive() -> datetime:
+    return _utcnow().replace(tzinfo=None)
+
+
 def _schedule_payload(workflow: AutomationWorkflow) -> dict:
     config = dict(workflow.trigger_config or {})
     nested = config.get("schedule")
@@ -47,6 +51,171 @@ def _try_workflow_lock(db, workflow_id: int) -> bool:
         {"key": f"automation-schedule:{int(workflow_id)}"},
     ).scalar()
     return bool(value)
+
+
+def _try_wait_lock(db, run_id: int) -> bool:
+    bind = db.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return True
+    value = db.execute(
+        text("SELECT pg_try_advisory_xact_lock(hashtext(:key))"),
+        {"key": f"automation-wait:{int(run_id)}"},
+    ).scalar()
+    return bool(value)
+
+
+def run_due_waiting_run(run_id: int, *, now: datetime | None = None) -> dict:
+    db = SessionLocal()
+    try:
+        current = now or _utcnow()
+        if current.tzinfo is not None:
+            current_naive = current.astimezone(UTC).replace(tzinfo=None)
+        else:
+            current_naive = current
+
+        run = (
+            db.query(AutomationRun)
+            .filter(
+                AutomationRun.id == int(run_id),
+                AutomationRun.status == "waiting_time",
+            )
+            .first()
+        )
+        if run is None:
+            return {"run_id": int(run_id), "status": "inactive"}
+        if run.resume_at is None:
+            return {"run_id": run.id, "status": "invalid_wait"}
+        if run.resume_at > current_naive:
+            return {"run_id": run.id, "status": "not_due"}
+
+        if not _try_wait_lock(db, run.id):
+            db.rollback()
+            return {"run_id": run.id, "status": "locked"}
+
+        # Re-read under the transaction-level lock so a concurrent worker cannot
+        # resume the same durable checkpoint twice.
+        db.refresh(run)
+        if run.status != "waiting_time":
+            db.rollback()
+            return {"run_id": run.id, "status": "already_resumed"}
+        if run.resume_at is None or run.resume_at > current_naive:
+            db.rollback()
+            return {"run_id": run.id, "status": "not_due"}
+
+        workflow = (
+            db.query(AutomationWorkflow)
+            .filter(AutomationWorkflow.id == run.workflow_id)
+            .first()
+        )
+        if workflow is None:
+            db.rollback()
+            return {"run_id": run.id, "status": "workflow_missing"}
+        if not workflow.enabled:
+            db.rollback()
+            return {"run_id": run.id, "status": "workflow_inactive"}
+
+        company = db.query(Company).filter(Company.id == run.company_id).first()
+        if company is None:
+            db.rollback()
+            return {"run_id": run.id, "status": "company_missing"}
+        if not company.active or str(company.lifecycle_status or "").lower() != "live":
+            db.rollback()
+            return {"run_id": run.id, "status": "company_not_live"}
+
+        trigger_config = dict(workflow.trigger_config or {})
+        generated_agent_id = int(trigger_config.get("_xvond_agent_id") or 0)
+        if generated_agent_id:
+            employee = (
+                db.query(AIAgent)
+                .filter(
+                    AIAgent.id == generated_agent_id,
+                    AIAgent.company_id == run.company_id,
+                )
+                .first()
+            )
+            if employee is None or not employee.enabled:
+                db.rollback()
+                return {"run_id": run.id, "status": "employee_not_live"}
+
+        resumed = automation_runtime.resume_wait(
+            db,
+            company_id=run.company_id,
+            workflow=workflow,
+            run=run,
+            now=current_naive,
+        )
+        return {
+            "run_id": resumed.id,
+            "workflow_id": workflow.id,
+            "status": resumed.status,
+        }
+    finally:
+        db.close()
+
+
+def run_due_waits_once(
+    *,
+    now: datetime | None = None,
+    batch_size: int = 200,
+) -> dict:
+    safe_batch_size = max(1, min(int(batch_size), 1000))
+    current = now or _utcnow()
+    if current.tzinfo is not None:
+        current_naive = current.astimezone(UTC).replace(tzinfo=None)
+    else:
+        current_naive = current
+
+    results = []
+    last_id = 0
+    while True:
+        db = SessionLocal()
+        try:
+            run_ids = [
+                row[0]
+                for row in (
+                    db.query(AutomationRun.id)
+                    .filter(
+                        AutomationRun.id > last_id,
+                        AutomationRun.status == "waiting_time",
+                        AutomationRun.resume_at.is_not(None),
+                        AutomationRun.resume_at <= current_naive,
+                    )
+                    .order_by(AutomationRun.id.asc())
+                    .limit(safe_batch_size)
+                    .all()
+                )
+            ]
+        finally:
+            db.close()
+
+        if not run_ids:
+            break
+
+        for run_id in run_ids:
+            try:
+                results.append(run_due_waiting_run(run_id, now=current_naive))
+            except Exception:
+                logger.exception(
+                    "Durable automation wait resume failed",
+                    extra={"run_id": run_id},
+                )
+                results.append({"run_id": run_id, "status": "failed"})
+
+        last_id = run_ids[-1]
+        if len(run_ids) < safe_batch_size:
+            break
+
+    return {
+        "checked": len(results),
+        "resumed": sum(
+            1
+            for item in results
+            if item.get("status")
+            in {"success", "waiting_time", "waiting_approval"}
+        ),
+        "failed": sum(1 for item in results if item.get("status") == "failed"),
+        "results": results,
+    }
 
 
 def _slot_already_recorded(db, workflow_id: int, slot_key: str) -> bool:

@@ -881,3 +881,54 @@ def test_compiler_normalizes_generic_one_time_schedule():
         "at": "2026-10-01T09:00:00+04:00",
         "source_text": "2026-10-01T09:00:00+04:00",
     }
+
+
+
+def test_compiler_preserves_generic_durable_wait_node():
+    job_brief = "جهز المسودة وبعدها انتظر يومين ثم راجع النتيجة"
+    response = """{
+      "role":"Long-running worker",
+      "scope":"personal",
+      "summary":"Prepare work, wait, then continue.",
+      "tasks":[{"name":"Long task","description":"Prepare and continue later","trigger":"manual"}],
+      "requirements":[],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{"type":"manual"},
+        "nodes":[
+          {
+            "id":"prepare",
+            "type":"transform",
+            "depends_on":[],
+            "params":{"values":{"stage":"prepared"}}
+          },
+          {
+            "id":"pause",
+            "type":"wait",
+            "depends_on":["prepare"],
+            "params":{
+              "duration":2,
+              "unit":"days",
+              "source_text":"انتظر يومين"
+            }
+          },
+          {
+            "id":"continue",
+            "type":"ai",
+            "depends_on":["pause"],
+            "params":{"prompt":"Review the result after the requested wait."}
+          }
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+    nodes = spec["execution_graph"]["nodes"]
+
+    assert spec["version"] == 7
+    assert [node["type"] for node in nodes] == ["transform", "wait", "ai"]
+    assert nodes[1]["params"]["duration"] == 2
+    assert nodes[1]["params"]["unit"] == "days"
+    assert nodes[1]["params"]["source_text"] == "انتظر يومين"

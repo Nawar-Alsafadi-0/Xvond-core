@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 from typing import Any
 
 GRAPH_VERSION = 1
@@ -21,6 +22,7 @@ ALLOWED_GRAPH_NODE_TYPES = {
     "state_read",
     "state_write",
     "state_delete",
+    "wait",
 }
 
 GRAPH_COMPARE_OPERATORS = {"eq", "neq", "gt", "gte", "lt", "lte", "contains", "in"}
@@ -38,6 +40,8 @@ BROWSER_ACTION_OPERATIONS = {
 }
 MAX_GRAPH_VALIDATION_DEPTH = 2
 MAX_BROWSER_ACTIONS = 30
+WAIT_DURATION_UNITS = {"seconds", "minutes", "hours", "days", "weeks"}
+MAX_WAIT_DURATION_SECONDS = 365 * 24 * 60 * 60
 
 
 def _clean_id(value: Any) -> str:
@@ -275,6 +279,47 @@ def graph_contract_errors(
         elif node_type == "notify":
             if not str(params.get("message") or label).strip():
                 errors.append(f"{node_id}: notify node requires message or label")
+
+        elif node_type == "wait":
+            has_until = bool(str(params.get("until") or "").strip())
+            has_duration = params.get("duration") is not None
+            if has_until == has_duration:
+                errors.append(
+                    f"{node_id}: wait node requires exactly one of until or duration"
+                )
+            if has_until:
+                try:
+                    parsed_until = datetime.fromisoformat(
+                        str(params.get("until")).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    errors.append(f"{node_id}: wait until must be ISO-8601")
+                else:
+                    if parsed_until.tzinfo is None:
+                        errors.append(
+                            f"{node_id}: wait until must include a timezone offset"
+                        )
+            if has_duration:
+                try:
+                    duration = float(params.get("duration"))
+                except (TypeError, ValueError):
+                    errors.append(f"{node_id}: wait duration must be numeric")
+                else:
+                    unit = str(params.get("unit") or "seconds").strip().lower()
+                    if unit not in WAIT_DURATION_UNITS:
+                        errors.append(f"{node_id}: unsupported wait duration unit")
+                    multiplier = {
+                        "seconds": 1,
+                        "minutes": 60,
+                        "hours": 3600,
+                        "days": 86400,
+                        "weeks": 604800,
+                    }.get(unit, 0)
+                    seconds = duration * multiplier
+                    if seconds <= 0 or seconds > MAX_WAIT_DURATION_SECONDS:
+                        errors.append(
+                            f"{node_id}: wait duration must be positive and at most one year"
+                        )
 
         elif node_type == "foreach":
             if "items" not in params:

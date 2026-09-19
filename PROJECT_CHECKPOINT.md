@@ -252,6 +252,8 @@ The public Builder, employee compiler, Self-Service readiness, Customer Portal a
 
 Recurring/background Self-Service employees use the production automation scheduler.
 
+The generic execution graph also supports durable in-job waits. A `wait` node may pause the same AutomationRun for a bounded relative duration or until an explicit timezone-aware timestamp. Xvond persists the checkpoint and `resume_at`, the scheduler resumes the same run when due, and previously completed graph work is not replayed. This is a general runtime primitive for any employee; it is not tied to follow-up, content, monitoring, sales or another named use case.
+
 Release/runtime truth:
 
 - scheduler runs the same reviewed application image as the API and WhatsApp worker
