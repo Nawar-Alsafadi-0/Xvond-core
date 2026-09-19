@@ -104,3 +104,14 @@ def test_custom_api_catalog_enforces_conditional_auth_contract():
                 "username": "alice",
             },
         )
+
+
+
+def test_custom_api_can_be_created_before_validation_endpoint_is_known():
+    assert validate_integration_config(
+        "custom_api",
+        {
+            "base_url": "https://api.example.com",
+            "auth_type": "none",
+        },
+    ) is True
