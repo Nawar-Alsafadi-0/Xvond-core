@@ -27,6 +27,7 @@ class AutomationRun(Base):
     __tablename__ = "automation_runs"
     __table_args__ = (
         Index("ix_automation_runs_company_created", "company_id", "created_at"),
+        Index("ix_automation_runs_status_resume_at", "status", "resume_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -36,6 +37,7 @@ class AutomationRun(Base):
     input_data: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     output_data: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     error_message: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    resume_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
