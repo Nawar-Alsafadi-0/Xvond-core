@@ -420,6 +420,12 @@ def _serialize_integration(item: CompanyIntegration) -> dict:
             definition.get("allow_generic_alternatives") is True
         ),
         "operation_endpoints": bool(definition.get("operation_endpoints") is True),
+        "openapi_import_supported": str(item.integration_type or "").strip().lower() in {
+            "custom_api", "pos", "crm", "erp"
+        },
+        "operation_count": len(plain.get("operations") or {})
+        if isinstance(plain.get("operations"), dict)
+        else 0,
         "config": public_config(item.config),
         "configured_secret_fields": configured_secret_fields(item.config),
         "configured": configured,
