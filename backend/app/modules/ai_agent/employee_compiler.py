@@ -12,7 +12,7 @@ from backend.app.modules.channels.catalog import (
 )
 
 
-COMPILER_VERSION = 5
+COMPILER_VERSION = 6
 
 GENERIC_PRIMITIVES = {
     "workflow_engine",
@@ -222,7 +222,7 @@ Use this shape:
       "fulfillment_mode": "xvond_internal|external_connection|auto",
       "customer_inputs": [],
       "primitives": ["workflow_engine"],
-      "schedule": {"kind":"interval|daily|weekly","every_minutes":60,"hour":8,"minute":0,"weekdays":[0,1,2,3,4],"timezone":"Asia/Muscat","source_text":"exact cadence/time words copied from the customer Job Brief"},
+      "schedule": {"kind":"interval|once|daily|weekly|monthly","every_minutes":60,"at":"2026-10-01T09:00:00+04:00","hour":8,"minute":0,"weekdays":[0,1,2,3,4],"day_of_month":1,"timezone":"Asia/Muscat","source_text":"exact cadence/time words copied from the customer Job Brief"},
       "runtime_inputs": {"url":"https://example.com/data","target_price":100},
       "execution_plan": [
         {"id":"fetch","op":"http_get_json","url_field":"url"},
@@ -284,7 +284,7 @@ Rules:
 - Customer-selected communication surfaces must be represented as kind=channel requirements using their channel key. Email as a conversation surface is key=email; reading/sending mailbox work remains email_read/email_send. Instagram DM as a conversation surface is key=instagram; publishing remains instagram_publish.
 - Publishing, sending, purchasing, deleting, booking, changing external data, or other consequential external actions should normally use ask_before unless the customer's brief explicitly says to do them automatically.
 - Monitoring and recurring work must include scheduling/workflow primitives.
-- When the customer explicitly gives a recurring cadence or clock time, include a structured schedule on the requirement. Use kind=interval with every_minutes, kind=daily with hour/minute, or kind=weekly with weekdays (0=Monday..6=Sunday) plus hour/minute. Include timezone only when the customer explicitly gave one; otherwise Xvond will use the workspace timezone. Always include schedule.source_text copied verbatim from the Job Brief words that authorize that cadence/time.
+- When the customer explicitly gives a cadence or execution time, include a structured schedule on the requirement. Use kind=interval with every_minutes, kind=once with an ISO-8601 at timestamp for a one-time task, kind=daily with hour/minute, kind=weekly with weekdays (0=Monday..6=Sunday) plus hour/minute, or kind=monthly with day_of_month plus hour/minute. Include timezone only when the customer explicitly gave one; otherwise Xvond will use the workspace timezone. Always include schedule.source_text copied verbatim from the Job Brief words that authorize that cadence/time.
 - Do not invent a cadence, clock time, weekday, or timezone that the customer did not request.
 - For recurring/background work the customer explicitly asked to happen automatically, use permission mode automatic for that exact capability/purpose. If automatic execution is not authorized, keep ask_before and Xvond will not schedule it.
 - runtime_inputs may contain only simple scalar values explicitly present in the customer's Job Brief and required by execution_plan. Never invent runtime input values.
@@ -411,7 +411,7 @@ def _normalize_schedule_spec(value: Any, *, job_brief: str) -> dict | None:
     if not isinstance(value, dict):
         return None
     kind = str(value.get("kind") or "").strip().lower()
-    if kind not in {"interval", "daily", "weekly"}:
+    if kind not in {"interval", "once", "daily", "weekly", "monthly"}:
         return None
 
     source_text = _bounded_text(value.get("source_text"), limit=500)
@@ -427,6 +427,22 @@ def _normalize_schedule_spec(value: Any, *, job_brief: str) -> dict | None:
         if every_minutes < 5 or every_minutes > 60 * 24 * 30:
             return None
         return {"kind": "interval", "every_minutes": every_minutes, "source_text": source_text}
+
+    if kind == "once":
+        at = _bounded_text(value.get("at"), limit=100)
+        if not at:
+            return None
+        try:
+            parsed = __import__("datetime").datetime.fromisoformat(at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None and not _bounded_text(value.get("timezone"), limit=100):
+            return None
+        result = {"kind": "once", "at": at, "source_text": source_text}
+        timezone = _bounded_text(value.get("timezone"), limit=100)
+        if timezone:
+            result["timezone"] = timezone
+        return result
 
     try:
         hour = int(value.get("hour"))
@@ -453,6 +469,16 @@ def _normalize_schedule_spec(value: Any, *, job_brief: str) -> dict | None:
         if not weekdays:
             return None
         result["weekdays"] = sorted(weekdays)
+
+    if kind == "monthly":
+        try:
+            day_of_month = int(value.get("day_of_month"))
+        except (TypeError, ValueError):
+            return None
+        if not 1 <= day_of_month <= 31:
+            return None
+        result["day_of_month"] = day_of_month
+
     return result
 
 
