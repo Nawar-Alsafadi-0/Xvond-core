@@ -55,6 +55,7 @@ Import and activate the Xvond-owned gateway/provider workflows:
 - `ops/n8n/xvond-telegram-provider.workflow.json` for Telegram Bot API inbound/outbound transport.
 - `ops/n8n/xvond-meta-messaging-provider.workflow.json` for Instagram DM and Facebook Messenger transport.
 - `ops/n8n/xvond-slack-provider.workflow.json` for Slack Events API inbound and Web API outbound transport.
+- `ops/n8n/xvond-custom-channel-provider.workflow.json` for the signed provider-neutral Custom/API channel protocol.
 
 The first supported action is intentionally non-destructive: `health_check`.
 
@@ -211,6 +212,51 @@ sh scripts/validate_slack_channel_route.sh <company_id> <connection_key>
 The validator checks both route registries and calls Slack `auth.test` with the workflow-only bot token. It never prints the bot token, signing secret or provider secret.
 
 Slack remains subject to real provider acceptance: install the app into the intended workspace, grant the event/message scopes needed for the sold path, configure the Events API Request URL, and prove one real inbound/outbound round trip before calling that customer channel service-ready.
+
+
+### Custom / API provider
+
+Custom/API is a packaged provider-neutral channel protocol for communication surfaces that do not yet have a dedicated Xvond provider workflow.
+
+Configure both registries with the same tenant-scoped key `company_id:connection_key`:
+
+- `XVOND_CHANNEL_ROUTES_JSON` points the generic channel gateway to `https://<workflow-host>/webhook/xvond-custom-channel-provider` and carries the Xvond provider-route secret.
+- `XVOND_CUSTOM_CHANNEL_ROUTES_JSON` contains `company_id`, `agent_id`, `channel_id`, `inbound_secret`, `outbound_url`, `outbound_secret`, and the matching `provider_secret`.
+
+Inbound messages POST JSON to:
+
+`https://<workflow-host>/webhook/xvond-custom-channel-inbound?company_id=<id>&connection_key=<key>`
+
+The body contract is:
+
+```json
+{
+  "external_contact_id": "provider-conversation-or-recipient-id",
+  "external_message_id": "stable-provider-message-id",
+  "message": "customer message text"
+}
+```
+
+The sender must include the current Unix timestamp in `X-Xvond-Custom-Timestamp` and `X-Xvond-Custom-Signature: v1=<hex hmac>`, where the HMAC-SHA256 input is `<timestamp>.<raw_request_body>` using the route's `inbound_secret`. Requests outside the five-minute window fail closed.
+
+Outbound delivery POSTs to the route's credential-free HTTPS `outbound_url` with `X-Xvond-Custom-Secret`, `X-Xvond-Request-ID` and `Idempotency-Key`. The receiver must return:
+
+```json
+{
+  "success": true,
+  "provider_message_id": "stable-confirmed-delivery-id"
+}
+```
+
+Xvond does not accept delivery without a non-empty `provider_message_id`.
+
+Validate route structure before marking the Xvond channel connected:
+
+```sh
+sh scripts/validate_custom_channel_route.sh <company_id> <connection_key>
+```
+
+The validation command checks HTTPS destination policy, secret presence/length and registry consistency without making a customer-facing provider side effect. One real signed inbound plus provider-confirmed outbound round trip remains mandatory before that exact Custom/API connection is service-ready.
 
 
 ## Booking adapter
