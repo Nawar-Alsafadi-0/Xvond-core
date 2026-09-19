@@ -351,6 +351,41 @@ def _store_approval_checkpoint(
     return run
 
 
+def event_payload_matches(payload: dict | None, match: dict | None) -> bool:
+    source = payload if isinstance(payload, dict) else {}
+    rules = match if isinstance(match, dict) else {}
+    for path, expected in rules.items():
+        if extract_data_path(source, str(path)) != expected:
+            return False
+    return True
+
+
+def _mark_event_received(
+    graph_resume: dict,
+    *,
+    event_name: str,
+    event_id: str,
+    payload: dict,
+) -> dict:
+    checkpoint = deepcopy(graph_resume)
+    foreach = checkpoint.get("foreach")
+    if isinstance(foreach, dict) and isinstance(foreach.get("child_resume"), dict):
+        foreach["child_resume"] = _mark_event_received(
+            foreach["child_resume"],
+            event_name=event_name,
+            event_id=event_id,
+            payload=payload,
+        )
+        checkpoint["foreach"] = foreach
+        return checkpoint
+
+    checkpoint["event_received"] = True
+    checkpoint["event_name"] = str(event_name)
+    checkpoint["event_id"] = str(event_id)
+    checkpoint["event_payload"] = deepcopy(payload)
+    return checkpoint
+
+
 class AutomationEventRequired(RuntimeError):
     def __init__(
         self,
