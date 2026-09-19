@@ -17,7 +17,7 @@ from backend.app.modules.channels.catalog import (
 )
 
 
-COMPILER_VERSION = 11
+COMPILER_VERSION = 12
 
 GENERIC_PRIMITIVES = {
     "workflow_engine",
@@ -229,6 +229,7 @@ Use this shape:
       "primitives": ["workflow_engine"],
       "schedule": {"kind":"interval|once|daily|weekly|monthly","every_minutes":60,"at":"2026-10-01T09:00:00+04:00","hour":8,"minute":0,"weekdays":[0,1,2,3,4],"day_of_month":1,"timezone":"Asia/Muscat","source_text":"exact cadence/time words copied from the customer Job Brief"},
       "runtime_inputs": {"url":"https://example.com/data","target_price":100},
+      "integration_operations": {"execute":{"method":"POST","endpoint":"/relative/path"}},
       "execution_plan": [
         {"id":"fetch","op":"http_get_json","url_field":"url"},
         {"id":"value","op":"extract","source":"fetch","path":"price"},
@@ -319,6 +320,8 @@ Rules:
 - requirement.execution_plan exists only for backward compatibility with older compiled employees. For newly compiled work, leave it empty unless the requested job is genuinely a tiny read-only fetch/extract/compare/internal-notify task and no richer graph behavior is required.
 - A novel capability must become executable graph composition, not merely a named requirement. If it needs reasoning, browsing, transformation, iteration, state, waiting, media, an external action, or multiple steps, represent those steps explicitly in execution_graph/execution_routines.
 - When the requested job needs a capability that cannot execute with native graph nodes alone, represent the missing side effect as an action requirement and make the graph depend on that action. Ask for a customer connection only when external account access/credentials are genuinely required.
+- For an external API/account requirement, use fulfillment_mode=external_connection and emit integration_operations when the operation paths/methods are explicitly known from the customer's brief or supplied API documentation. Operation names are stable snake_case identifiers such as execute, lookup, create_order, publish, cancel. Endpoints MUST be relative paths and methods may be GET, POST, PUT, PATCH or DELETE. Never put credentials, Authorization headers, API keys, cookies or secrets in integration_operations.
+- Do not invent API endpoints. If the endpoint/API contract is not known, leave integration_operations empty and request the API connection/documentation needed to finish the build.
 - execution_plan is declarative legacy data, never code. Do not emit Python, JavaScript, shell commands, SQL, arbitrary HTTP methods, headers, credentials or secrets.
 - http_get_json reads an HTTPS JSON endpoint; web_fetch/browser cover public web work; action nodes perform authorized side effects through requirement contracts.
 - The final compiled employee should be runnable end-to-end once its explicitly reported setup/connection requirements are satisfied; do not emit advisory-only capabilities for work the customer asked Xvond to perform.
@@ -835,6 +838,43 @@ def normalize_requirement_key(value: Any) -> str:
     return key
 
 
+def _normalize_integration_operations(value: Any) -> dict[str, dict]:
+    """Normalize a bounded external API operation contract without credentials."""
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, dict] = {}
+    for raw_name, raw in value.items():
+        name = normalize_requirement_key(raw_name)
+        if not name or not isinstance(raw, dict):
+            continue
+        method = str(raw.get("method") or "POST").strip().upper()
+        if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            continue
+        endpoint = str(raw.get("endpoint") or "").strip()
+        if (
+            not endpoint
+            or endpoint.startswith("//")
+            or endpoint.lower().startswith(("http://", "https://"))
+            or ".." in endpoint.split("/")
+        ):
+            continue
+        operation = {
+            "method": method,
+            "endpoint": "/" + endpoint.lstrip("/"),
+        }
+        try:
+            timeout = float(raw.get("timeout") or 15)
+        except (TypeError, ValueError):
+            timeout = 15
+        operation["timeout"] = max(1, min(timeout, 30))
+        # Headers in compiler output are deliberately ignored. Authentication
+        # and secrets belong to the protected connected-system configuration.
+        result[name] = operation
+        if len(result) >= 20:
+            break
+    return result
+
+
 def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
     role = _bounded_text(payload.get("role"), limit=160) or "AI Employee"
     scope = str(payload.get("scope") or "hybrid").strip().lower()
@@ -974,6 +1014,7 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
             "primitives": primitives,
             "schedule": schedule,
             "runtime_inputs": runtime_inputs,
+            "integration_operations": _normalize_integration_operations(item.get("integration_operations")),
             "execution_plan": _normalize_execution_plan(item.get("execution_plan")),
             "customer_inputs": customer_inputs,
             "requires_connection": requires_connection,
