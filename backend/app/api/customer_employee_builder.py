@@ -4529,6 +4529,8 @@ def _routine_operational_state(
         state = "waiting_event"
     elif latest_run.status == "waiting_approval":
         state = "waiting_approval"
+    elif latest_run.status == "waiting_retry":
+        state = "recovering"
     elif latest_run.status == "failed":
         state = "needs_attention"
     elif latest_run.status == "success":
@@ -4594,6 +4596,27 @@ def _routine_operational_state(
                 if isinstance(approval, dict)
                 else None
             ),
+        }
+    elif latest_run is not None and latest_run.status == "waiting_retry":
+        retry_meta = (
+            (latest_run.output_data or {}).get("retry")
+            if isinstance(latest_run.output_data, dict)
+            else None
+        )
+        waiting = {
+            "type": "retry",
+            "resume_at": _runtime_datetime(latest_run.resume_at),
+            "attempt": (
+                retry_meta.get("attempt")
+                if isinstance(retry_meta, dict)
+                else None
+            ),
+            "max_attempts": (
+                retry_meta.get("max_attempts")
+                if isinstance(retry_meta, dict)
+                else None
+            ),
+            "last_error": latest_run.error_message,
         }
 
     failure = _run_failure_detail(latest_run)
