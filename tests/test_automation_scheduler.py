@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
