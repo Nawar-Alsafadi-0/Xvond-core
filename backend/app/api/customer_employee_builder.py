@@ -2509,13 +2509,18 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
         ).strip().lower()
         if input_mode not in {"json", "query", "none"}:
             raise HTTPException(400, f"Invalid input mode for operation {name}")
+        path_params = list(dict.fromkeys(
+            re.findall(r"{([A-Za-z_][A-Za-z0-9_]{0,63})}", endpoint)
+        ))
         result[name] = {
             "method": method,
             "endpoint": endpoint,
             "input_mode": input_mode,
             "timeout": max(1, min(timeout, 30)),
+            "path_params": path_params,
+            "description": str(raw.get("description") or "").strip()[:500],
         }
-        if len(result) >= 20:
+        if len(result) >= 50:
             break
     return result
 
@@ -2528,6 +2533,8 @@ def _relative_endpoint(value: str | None, *, required: bool = False) -> str | No
         return None
     if endpoint.startswith("//") or endpoint.lower().startswith(("http://", "https://")):
         raise HTTPException(400, "Integration operation endpoints must be relative paths")
+    if ".." in endpoint.split("/"):
+        raise HTTPException(400, "Integration operation endpoints cannot traverse parent paths")
     return "/" + endpoint.lstrip("/")
 
 
@@ -2759,6 +2766,11 @@ def bind_self_service_integration(
             if isinstance(compiled_operations, dict)
             else {}
         )
+        configured_operations = _bounded_connection_operations(
+            integration_config.get("operations")
+            if isinstance(integration_config, dict)
+            else {}
+        )
         supplied_operations = _bounded_connection_operations(data.operations)
         execute_required = integration_requires_operation_endpoints(
             integration.integration_type
@@ -2769,6 +2781,7 @@ def bind_self_service_integration(
         legacy_execute_required = (
             execute_required
             and not compiled_operations
+            and not configured_operations
             and not supplied_operations
         )
         execute_endpoint = _relative_endpoint(
@@ -2778,21 +2791,10 @@ def bind_self_service_integration(
         availability_endpoint = _relative_endpoint(data.availability_endpoint)
         cancel_endpoint = _relative_endpoint(data.cancel_endpoint)
 
-        if key == "booking" and execute_required:
-            if not availability_endpoint:
-                raise HTTPException(
-                    400,
-                    "Booking systems need an availability endpoint so the employee can check real slots",
-                )
-            if not execute_endpoint:
-                raise HTTPException(
-                    400,
-                    "Booking systems need a booking/create endpoint",
-                )
-
         operations = integration_packaged_operations(
             integration.integration_type
         )
+        operations.update(configured_operations)
         operations.update(compiled_operations)
         operations.update(supplied_operations)
         if execute_endpoint:
@@ -2804,6 +2806,18 @@ def bind_self_service_integration(
             }
         if cancel_endpoint:
             operations["cancel"] = {"method": "POST", "endpoint": cancel_endpoint}
+
+        if key == "booking" and execute_required:
+            if not isinstance(operations.get("availability"), dict):
+                raise HTTPException(
+                    400,
+                    "Booking systems need an availability operation so the employee can check real slots",
+                )
+            if not isinstance(operations.get("execute"), dict):
+                raise HTTPException(
+                    400,
+                    "Booking systems need a booking/create operation",
+                )
 
         requirement["integration_id"] = integration.id
         requirement["integration_type"] = integration.integration_type
