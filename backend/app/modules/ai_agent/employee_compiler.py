@@ -506,6 +506,53 @@ def _grounded_runtime_inputs(value: Any, *, job_brief: str) -> dict:
     return result
 
 
+def _ground_execution_graph(value: Any, *, job_brief: str) -> dict:
+    """Keep durable waits only when the customer's brief explicitly requested them.
+
+    The compiler model may propose execution structure, but time delays change
+    when real work happens. Ground each wait in an exact Job Brief phrase before
+    it can enter the executable employee contract. Nested foreach graphs use the
+    same rule.
+    """
+
+    source = str(job_brief or "").casefold()
+
+    def visit(raw_graph: Any) -> dict:
+        graph = normalize_execution_graph(raw_graph)
+        kept: list[dict] = []
+        for node in graph.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            current = deepcopy(node)
+            params = (
+                deepcopy(current.get("params"))
+                if isinstance(current.get("params"), dict)
+                else {}
+            )
+            if str(current.get("type") or "").strip().lower() == "wait":
+                source_text = _bounded_text(params.get("source_text"), limit=500)
+                if not source_text or source_text.casefold() not in source:
+                    continue
+                params["source_text"] = source_text
+                current["params"] = params
+            elif str(current.get("type") or "").strip().lower() == "foreach":
+                nested = params.get("graph")
+                if isinstance(nested, dict):
+                    params["graph"] = visit(nested)
+                    current["params"] = params
+            kept.append(current)
+
+        return normalize_execution_graph(
+            {
+                "version": graph.get("version") or 1,
+                "trigger": graph.get("trigger") or {"type": "manual"},
+                "nodes": kept,
+            }
+        )
+
+    return visit(value)
+
+
 def _normalize_smart_intake(value: Any, *, job_brief: str) -> dict:
     """Normalize compiler intake into grounded known facts plus only missing fields."""
 
@@ -812,7 +859,7 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         if len(setup_questions) >= 30:
             break
 
-    execution_graph = normalize_execution_graph(payload.get("execution_graph"))
+    execution_graph = _ground_execution_graph(\n        payload.get("execution_graph"),\n        job_brief=job_brief,\n    )
 
     return {
         "version": COMPILER_VERSION,
