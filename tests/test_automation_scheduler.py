@@ -3697,3 +3697,436 @@ def test_foreach_graph_actions_use_stable_per_item_idempotency_keys(monkeypatch)
         for key in first_run_keys
     )
     engine.dispose()
+
+def test_failed_graph_retry_skips_completed_action_and_reuses_same_run(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    action_calls = []
+    fetch_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_capability(*args, **kwargs):
+        action_calls.append(
+            {
+                "details": dict(kwargs.get("details") or {}),
+                "idempotency_key": kwargs["idempotency_key"],
+            }
+        )
+        return {"ok": True}
+
+    def fake_request(**kwargs):
+        fetch_calls["count"] += 1
+        if fetch_calls["count"] == 1:
+            raise ValueError("temporary upstream failure")
+        return {
+            "status_code": 200,
+            "response": '{"value":42}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "execute_generic_capability",
+        fake_capability,
+    )
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Retry Company", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Retry Worker",
+                system_prompt="work",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "send": {
+                            "enabled": True,
+                            "confirmation_required": False,
+                            "_xvond_permission_mode": "automatic",
+                            "destination": {
+                                "type": "xvond_internal",
+                                "adapter": "generic_capability",
+                            },
+                        }
+                    }
+                },
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Retry graph",
+            trigger_type="manual",
+            trigger_config={},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "send",
+                                "type": "action",
+                                "depends_on": [],
+                                "params": {
+                                    "action_type": "send",
+                                    "arguments": {"value": "once"},
+                                },
+                            },
+                            {
+                                "id": "fetch",
+                                "type": "http_get_json",
+                                "depends_on": ["send"],
+                                "params": {"url": "https://example.com/data"},
+                            },
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        with pytest.raises(ValueError, match="temporary upstream failure"):
+            runtime.execute(
+                db=db,
+                company_id=1,
+                workflow=workflow,
+                input_data={"_xvond_execution_key": "safe-retry-test"},
+            )
+
+        failed = db.query(AutomationRun).one()
+        original_run_id = failed.id
+        assert failed.status == "failed"
+        checkpoint = failed.output_data["retry_checkpoint"]
+        assert checkpoint["safe"] is True
+        assert checkpoint["failed_node_id"] == "fetch"
+        assert checkpoint["graph_resume"]["node_id"] == "fetch"
+        assert "send" in checkpoint["graph_resume"]["node_outputs"]
+        assert len(action_calls) == 1
+        assert fetch_calls["count"] == 1
+
+        retried = runtime.retry_failed(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=failed,
+        )
+
+        assert retried.id == original_run_id
+        assert retried.status == "success"
+        assert retried.output_data["retry"]["status"] == "succeeded"
+        assert retried.output_data["retry_attempts"] == 1
+        assert len(action_calls) == 1
+        assert fetch_calls["count"] == 2
+        outputs = retried.output_data["steps"][-1]["result"]["graph_outputs"]
+        assert outputs["send"]["scheduled_action_result"]["ok"] is True
+        assert outputs["fetch"]["result"]["value"] == 42
+
+    engine.dispose()
+
+
+def test_failed_foreach_retry_resumes_failed_item_without_replaying_prior_items(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    action_items = []
+    ai_messages = []
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_capability(*args, **kwargs):
+        details = dict(kwargs.get("details") or {})
+        action_items.append(details.get("id"))
+        return {"ok": True, "id": details.get("id")}
+
+    def fake_chat(**kwargs):
+        message = str(kwargs.get("message") or "")
+        ai_messages.append(message)
+        if message == "2" and ai_messages.count("2") == 1:
+            raise ValueError("temporary AI failure")
+        return {
+            "response": {"content": f"ok-{message}"},
+            "conversation_id": 1,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "execute_generic_capability",
+        fake_capability,
+    )
+    monkeypatch.setattr(
+        automation_runtime_module.agent_runtime,
+        "chat",
+        fake_chat,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Foreach Retry", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Loop Worker",
+                system_prompt="work",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "send_item": {
+                            "enabled": True,
+                            "confirmation_required": False,
+                            "_xvond_permission_mode": "automatic",
+                            "destination": {
+                                "type": "xvond_internal",
+                                "adapter": "generic_capability",
+                            },
+                        }
+                    }
+                },
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Foreach retry graph",
+            trigger_type="manual",
+            trigger_config={},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "each",
+                                "type": "foreach",
+                                "depends_on": [],
+                                "params": {
+                                    "items": [{"id": 1}, {"id": 2}],
+                                    "graph": {
+                                        "version": 1,
+                                        "nodes": [
+                                            {
+                                                "id": "send",
+                                                "type": "action",
+                                                "depends_on": [],
+                                                "params": {
+                                                    "action_type": "send_item",
+                                                    "arguments": {"id": "$item.id"},
+                                                },
+                                            },
+                                            {
+                                                "id": "judge",
+                                                "type": "ai",
+                                                "depends_on": ["send"],
+                                                "params": {"prompt": "$item.id"},
+                                            },
+                                        ],
+                                    },
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        with pytest.raises(ValueError, match="temporary AI failure"):
+            runtime.execute(
+                db=db,
+                company_id=1,
+                workflow=workflow,
+                input_data={"_xvond_execution_key": "foreach-safe-retry"},
+            )
+
+        failed = db.query(AutomationRun).one()
+        checkpoint = failed.output_data["retry_checkpoint"]
+        graph_resume = checkpoint["graph_resume"]
+        assert checkpoint["safe"] is True
+        assert checkpoint["failed_node_id"] == "judge"
+        assert checkpoint["failed_node_scope"] == "each[1]/judge"
+        assert graph_resume["node_id"] == "each"
+        assert graph_resume["foreach"]["loop_index"] == 1
+        assert len(graph_resume["foreach"]["completed_results"]) == 1
+        assert graph_resume["foreach"]["child_resume"]["node_id"] == "judge"
+        assert "send" in graph_resume["foreach"]["child_resume"]["node_outputs"]
+        assert action_items == [1, 2]
+        assert ai_messages == ["1", "2"]
+
+        retried = runtime.retry_failed(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=failed,
+        )
+
+        assert retried.status == "success"
+        assert action_items == [1, 2]
+        assert ai_messages == ["1", "2", "2"]
+        outputs = retried.output_data["steps"][-1]["result"]["graph_outputs"]
+        assert outputs["each"]["count"] == 2
+
+    engine.dispose()
+
+
+def test_failed_external_action_retry_is_blocked_when_outcome_is_uncertain(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    external_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_integration(*args, **kwargs):
+        external_calls["count"] += 1
+        return SimpleNamespace(
+            success=False,
+            error="external outcome is unknown",
+            data={"reconciliation_required": True},
+        )
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "_integration_call",
+        fake_integration,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Unsafe Retry", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="External Worker",
+                system_prompt="work",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "publish": {
+                            "enabled": True,
+                            "confirmation_required": False,
+                            "_xvond_permission_mode": "automatic",
+                            "destination": {
+                                "type": "integration",
+                                "integration_id": 999,
+                            },
+                        }
+                    }
+                },
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Unsafe external action",
+            trigger_type="manual",
+            trigger_config={},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "publish",
+                                "type": "action",
+                                "depends_on": [],
+                                "params": {
+                                    "action_type": "publish",
+                                    "arguments": {"post": "hello"},
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        with pytest.raises(ValueError, match="external outcome is unknown"):
+            runtime.execute(
+                db=db,
+                company_id=1,
+                workflow=workflow,
+                input_data={"_xvond_execution_key": "unsafe-external-retry"},
+            )
+
+        failed = db.query(AutomationRun).one()
+        checkpoint = failed.output_data["retry_checkpoint"]
+        assert checkpoint["safe"] is False
+        assert checkpoint["failed_node_id"] == "publish"
+        assert "external integration" in checkpoint["reason"]
+        assert external_calls["count"] == 1
+
+        with pytest.raises(ValueError, match="external integration"):
+            runtime.retry_failed(
+                db,
+                company_id=1,
+                workflow=workflow,
+                run=failed,
+            )
+
+        assert external_calls["count"] == 1
+
+    engine.dispose()
+
