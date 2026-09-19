@@ -1280,6 +1280,32 @@ class AutomationRuntime:
                         }
                     }
                     continue
+                elif node_type == "wait":
+                    if is_resume_node and node_resume.get("wait_completed") is True:
+                        node_outputs[node_id] = {
+                            "resumed": True,
+                            "resume_at": str(node_resume.get("resume_at") or ""),
+                        }
+                        continue
+                    resume_at = _wait_resume_at(params)
+                    if resume_at <= _utcnow_naive():
+                        node_outputs[node_id] = {
+                            "resumed": True,
+                            "resume_at": _trace_iso(resume_at),
+                        }
+                        continue
+                    raise AutomationWaitRequired(
+                        resume_at=resume_at,
+                        workflow_step_index=step_index,
+                        node_id=node_id,
+                        node_outputs=node_outputs,
+                        graph_resume={
+                            "node_id": node_id,
+                            "node_outputs": deepcopy(node_outputs),
+                            "wait_completed": True,
+                            "resume_at": _trace_iso(resume_at),
+                        },
+                    )
                 elif node_type == "foreach":
                     items = params.get("items")
                     if not isinstance(items, list):
@@ -1384,6 +1410,30 @@ class AutomationRuntime:
                                 run_id=run_id,
                                 step_index=nested_step_index,
                             )
+                        except AutomationWaitRequired as wait:
+                            child_checkpoint = deepcopy(
+                                wait.graph_resume
+                                if isinstance(wait.graph_resume, dict)
+                                else {
+                                    "node_id": wait.node_id,
+                                    "node_outputs": wait.node_outputs,
+                                    "wait_completed": True,
+                                    "resume_at": _trace_iso(wait.resume_at),
+                                }
+                            )
+                            wait.workflow_step_index = int(step_index)
+                            wait.node_outputs = deepcopy(node_outputs)
+                            wait.graph_resume = {
+                                "node_id": node_id,
+                                "node_outputs": deepcopy(node_outputs),
+                                "foreach": {
+                                    "loop_index": loop_index,
+                                    "items_fingerprint": _checkpoint_fingerprint(items),
+                                    "completed_results": deepcopy(results),
+                                    "child_resume": child_checkpoint,
+                                },
+                            }
+                            raise
                         except AutomationApprovalRequired as approval:
                             child_checkpoint = deepcopy(
                                 approval.graph_resume
@@ -1437,6 +1487,17 @@ class AutomationRuntime:
                         run_id=run_id,
                         step_index=(step_index * 1000) + node_index + 1,
                     )
+                except AutomationWaitRequired as wait:
+                    wait.workflow_step_index = int(step_index)
+                    wait.node_id = node_id
+                    wait.node_outputs = deepcopy(node_outputs)
+                    wait.graph_resume = {
+                        "node_id": node_id,
+                        "node_outputs": deepcopy(node_outputs),
+                        "wait_completed": True,
+                        "resume_at": _trace_iso(wait.resume_at),
+                    }
+                    raise
                 except AutomationApprovalRequired as approval:
                     approval.workflow_step_index = int(step_index)
                     approval.node_id = node_id
