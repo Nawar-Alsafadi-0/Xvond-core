@@ -3441,7 +3441,7 @@ def test_graph_action_forwards_named_operation_to_connected_api(database, monkey
     assert captured["arguments"]["details"]["query"] == "abc"
     assert captured["idempotency_key"].startswith("named-op-test:")
     assert ":graph:" in captured["idempotency_key"]
-    assert result["graph"]["nodes"]["lookup_vendor"]["scheduled_action_result"]["result"] == {"ok": True}
+    assert result["graph_outputs"]["lookup_vendor"]["scheduled_action_result"]["result"] == {"ok": True}
 
 
 def test_generic_api_lookup_uses_query_contract_and_fails_closed_for_unknown_operation(database, monkeypatch):
