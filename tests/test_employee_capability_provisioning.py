@@ -27,6 +27,7 @@ from backend.app.modules.ai_agent.employee_compiler import normalize_compiled_sp
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
+from backend.app.modules.automation.runtime import automation_runtime
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.tools.business_models import ActionRequest
 from backend.app.modules.tools.models import AgentToolAssignment
@@ -3310,3 +3311,80 @@ def test_routine_observability_marks_automatic_retry_as_recovering(database):
     assert recovering["failure"]["error"] == "temporary upstream failure"
     assert recovering["retry"] is None
 
+
+
+def test_graph_action_forwards_named_operation_to_connected_api(database, monkeypatch):
+    factory, _ = database
+    captured = {}
+
+    with factory() as db:
+        agent = db.query(AIAgent).filter(AIAgent.company_id == 1).first()
+        assignment = AgentToolAssignment(
+            agent_id=agent.id,
+            tool_name="action_request",
+            enabled=True,
+            config={
+                "actions": {
+                    "vendor_records": {
+                        "enabled": True,
+                        "confirmation_required": False,
+                        "_xvond_permission_mode": "automatic",
+                        "destination": {
+                            "type": "integration",
+                            "integration_id": 77,
+                            "operations": {
+                                "lookup": {"method": "GET", "endpoint": "/v1/records"}
+                            },
+                        },
+                    }
+                }
+            },
+        )
+        db.add(assignment)
+        db.commit()
+        agent_id = agent.id
+
+        def fake_call(db, context, action_type, action, arguments, operation, *, idempotency_key=None):
+            captured.update(
+                action_type=action_type,
+                operation=operation,
+                arguments=arguments,
+                idempotency_key=idempotency_key,
+            )
+            return SimpleNamespace(success=True, data={"ok": True}, error=None)
+
+        monkeypatch.setattr(
+            "backend.app.modules.automation.runtime._integration_call",
+            fake_call,
+        )
+        result = automation_runtime.execute_step(
+            db,
+            1,
+            {
+                "type": "graph",
+                "agent_id": agent_id,
+                "graph": {
+                    "version": 1,
+                    "trigger": {"type": "manual"},
+                    "nodes": [{
+                        "id": "lookup_vendor",
+                        "type": "action",
+                        "params": {
+                            "action_type": "vendor_records",
+                            "operation": "lookup",
+                            "arguments": {"query": "abc"},
+                        },
+                    }],
+                },
+            },
+            {"_xvond_execution_key": "named-op-test"},
+            run_id=1,
+            step_index=0,
+        )
+
+    assert captured["action_type"] == "vendor_records"
+    assert captured["operation"] == "lookup"
+    assert captured["arguments"]["operation"] == "lookup"
+    assert captured["arguments"]["details"]["query"] == "abc"
+    assert captured["idempotency_key"].startswith("named-op-test:0:graph:")
+    assert result["graph"]["nodes"]["lookup_vendor"]["scheduled_action_result"]["result"] == {"ok": True}
