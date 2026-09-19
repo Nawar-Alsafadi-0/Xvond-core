@@ -411,6 +411,15 @@ def _persist_graph_retry_checkpoint(
     )
     output = deepcopy(run.output_data if isinstance(run.output_data, dict) else {})
     workflow_fingerprint = str(output.get("workflow_fingerprint") or "").strip()
+    if not workflow_fingerprint:
+        for checkpoint_key in ("approval", "wait", "event_wait"):
+            prior = output.get(checkpoint_key)
+            if isinstance(prior, dict):
+                workflow_fingerprint = str(
+                    prior.get("workflow_fingerprint") or ""
+                ).strip()
+                if workflow_fingerprint:
+                    break
     output["retry_checkpoint"] = {
         "version": RETRY_CHECKPOINT_VERSION,
         "workflow_fingerprint": workflow_fingerprint,
