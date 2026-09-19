@@ -3,7 +3,7 @@ import os
 import signal
 import time
 
-from backend.app.modules.automation.scheduler import run_due_schedules_once
+from backend.app.modules.automation.scheduler import (\n    run_due_schedules_once,\n    run_due_waits_once,\n)
 from backend.app.modules.automation.event_outbox import (
     dispatch_pending_automation_events_once,
 )
@@ -57,6 +57,18 @@ def main():
                 )
         except Exception:
             logger.exception("Automation event cycle failed")
+
+        try:
+            waits = run_due_waits_once()
+            if waits["resumed"] or waits["failed"]:
+                logger.info(
+                    "Automation wait cycle; checked=%s resumed=%s failed=%s",
+                    waits["checked"],
+                    waits["resumed"],
+                    waits["failed"],
+                )
+        except Exception:
+            logger.exception("Automation wait cycle failed")
 
         try:
             summary = run_due_schedules_once()
