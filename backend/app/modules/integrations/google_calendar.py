@@ -6,6 +6,7 @@ import json
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from backend.app.core.config.settings import settings
 from backend.app.core.execution_claims import execution_claims
 from backend.app.core.http_security import safe_http_request, validate_public_http_url
 
@@ -41,8 +42,16 @@ def _access_token(config: dict) -> str:
 
 def _refresh_credentials(config: dict) -> tuple[str, str, str] | None:
     refresh_token = str(config.get("refresh_token") or "").strip()
-    client_id = str(config.get("client_id") or "").strip()
-    client_secret = str(config.get("client_secret") or "").strip()
+    client_id = str(
+        config.get("client_id")
+        or settings.GOOGLE_CALENDAR_OAUTH_CLIENT_ID
+        or ""
+    ).strip()
+    client_secret = str(
+        config.get("client_secret")
+        or settings.GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET
+        or ""
+    ).strip()
     if refresh_token and client_id and client_secret:
         return refresh_token, client_id, client_secret
     return None
@@ -104,6 +113,20 @@ def _slot_minutes(config: dict) -> int:
             f"Calendar slot minutes must be between {_MIN_SLOT_MINUTES} and {_MAX_SLOT_MINUTES}"
         )
     return value
+
+
+def validate_google_calendar_preferences(config: dict) -> dict:
+    """Validate non-secret Calendar setup before OAuth consent."""
+    _provider(config)
+    calendar_id = _calendar_id(config)
+    zone = _timezone(config)
+    slot_minutes = _slot_minutes(config)
+    return {
+        "provider": "google",
+        "calendar_id": calendar_id,
+        "timezone": zone.key,
+        "slot_minutes": slot_minutes,
+    }
 
 
 def _headers(access_token: str) -> dict:

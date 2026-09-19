@@ -903,7 +903,7 @@
             const selects = Array.from(document.querySelectorAll("[data-integration-select]"));
             if (!selects.length) return;
             try {
-                const result = await api("/manage/integrations");
+                const result = await api("/customer/agents/manage/integrations");
                 const integrations = (result.integrations || []).filter(item => item.enabled && item.configured && item.validated);
                 for (const select of selects) {
                     const requirementKey = decodeURIComponent(String(select.dataset.integrationSelect || ""));
