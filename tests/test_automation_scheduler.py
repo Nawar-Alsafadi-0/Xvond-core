@@ -2030,7 +2030,7 @@ def test_owner_never_permission_skips_scheduled_action_without_side_effect(monke
                 config={
                     "actions": {
                         "send_report": {
-                            "enabled": False,
+                            "enabled": True,
                             "confirmation_required": True,
                             "_xvond_permission_mode": "never",
                             "xvond_generated": True,
