@@ -51,6 +51,10 @@ from backend.app.modules.ai_agent.self_service_policy import (
     self_service_spec_view,
 )
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
+from backend.app.modules.automation.execution_graph import (
+    graph_contract_errors,
+    normalize_execution_graph,
+)
 from backend.app.modules.automation.runtime import automation_runtime
 from backend.app.modules.automation.webhook_auth import automation_webhook_key
 from backend.app.modules.billing.limits import limits_service
@@ -133,6 +137,13 @@ class EmployeeBuilderRoutineStateRequest(BaseModel):
     enabled: bool
 
 
+class EmployeeBuilderRoutinePreviewRequest(BaseModel):
+    routine_id: str = Field(min_length=1, max_length=80)
+    input_data: dict = Field(default_factory=dict)
+    simulated_outputs: dict = Field(default_factory=dict)
+    event_payloads: dict = Field(default_factory=dict)
+
+
 DEFAULT_CUSTOMER_CONTROLS = {
     "can_enable_disable": True,
     "can_view_conversations": True,
@@ -145,6 +156,172 @@ DEFAULT_CUSTOMER_CONTROLS = {
 
 BUILDER_HISTORY_LIMIT = 20
 OWNER_PERMISSION_MODES = {"automatic", "ask_before", "never"}
+
+
+def _compiled_execution_routines(spec: dict | None) -> list[dict]:
+    value = spec if isinstance(spec, dict) else {}
+    result: list[dict] = []
+    used: set[str] = set()
+
+    raw_routines = value.get("execution_routines")
+    if isinstance(raw_routines, list):
+        for index, raw in enumerate(raw_routines):
+            if not isinstance(raw, dict):
+                continue
+            graph = normalize_execution_graph(
+                raw.get("graph")
+                if isinstance(raw.get("graph"), dict)
+                else raw.get("execution_graph")
+            )
+            if not graph.get("nodes"):
+                continue
+            routine_id = (
+                normalize_requirement_key(
+                    raw.get("id")
+                    or raw.get("key")
+                    or raw.get("name")
+                    or f"routine_{index + 1}"
+                )
+                or f"routine_{index + 1}"
+            )
+            if routine_id in used:
+                continue
+            used.add(routine_id)
+            result.append(
+                {
+                    "id": routine_id,
+                    "name": str(
+                        raw.get("name")
+                        or routine_id.replace("_", " ").title()
+                    )[:200],
+                    "requirement_keys": [
+                        key
+                        for key in (
+                            normalize_requirement_key(item)
+                            for item in (raw.get("requirement_keys") or [])
+                        )
+                        if key
+                    ],
+                    "requirement_scope_declared": "requirement_keys" in raw,
+                    "graph": graph,
+                }
+            )
+
+    if result:
+        return result
+
+    graph = normalize_execution_graph(value.get("execution_graph") or {})
+    if graph.get("nodes"):
+        return [
+            {
+                "id": "primary",
+                "name": "Primary routine",
+                "requirement_keys": [],
+                "requirement_scope_declared": False,
+                "graph": graph,
+            }
+        ]
+    return []
+
+
+def _routine_preview_defaults(spec: dict, routine: dict) -> dict:
+    requirements = [
+        item
+        for item in (spec.get("requirements") or [])
+        if isinstance(item, dict)
+    ]
+    requirements_by_key = {
+        normalize_requirement_key(item.get("key")): item
+        for item in requirements
+        if normalize_requirement_key(item.get("key"))
+    }
+    keys = [
+        key
+        for key in (
+            normalize_requirement_key(item)
+            for item in (routine.get("requirement_keys") or [])
+        )
+        if key and key in requirements_by_key
+    ]
+
+    selected = (
+        [requirements_by_key[key] for key in keys]
+        if routine.get("requirement_scope_declared") is True
+        else requirements
+    )
+    defaults: dict = {}
+    conflicts: list[str] = []
+    for requirement in selected:
+        for raw_key, value in (requirement.get("runtime_inputs") or {}).items():
+            key = str(raw_key)
+            if key in defaults and defaults[key] != value:
+                if key not in conflicts:
+                    conflicts.append(key)
+                continue
+            defaults.setdefault(key, deepcopy(value))
+
+    if conflicts:
+        raise HTTPException(
+            409,
+            detail={
+                "message": "Routine runtime inputs are ambiguous",
+                "conflicting_keys": conflicts,
+            },
+        )
+    return defaults
+
+
+def _invalidate_preview_evidence(container: dict) -> None:
+    """Invalidate preview evidence after executable build or setup changes."""
+
+    for key in (
+        "last_tested_at",
+        "last_tested_compiled_at",
+        "chat_tested_at",
+        "chat_tested_compiled_at",
+        "routine_preview_evidence",
+    ):
+        container.pop(key, None)
+
+
+def _routine_preview_evidence(
+    container: dict,
+    *,
+    spec: dict,
+    routine_id: str | None = None,
+    record: bool = False,
+) -> tuple[list[str], list[str], bool]:
+    routines = _compiled_execution_routines(spec)
+    required = [str(item.get("id") or "") for item in routines if item.get("id")]
+    compiled_at = str(container.get("compiled_at") or "").strip()
+    evidence = (
+        deepcopy(container.get("routine_preview_evidence"))
+        if isinstance(container.get("routine_preview_evidence"), dict)
+        else {}
+    )
+
+    now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    if record and routine_id:
+        evidence[str(routine_id)] = {
+            "compiled_at": compiled_at,
+            "tested_at": now_iso,
+        }
+        container["routine_preview_evidence"] = evidence
+        container["routine_test_count"] = int(container.get("routine_test_count") or 0) + 1
+
+    tested = [
+        item
+        for item in required
+        if isinstance(evidence.get(item), dict)
+        and str(evidence[item].get("compiled_at") or "") == compiled_at
+    ]
+    complete = bool(required) and len(tested) == len(required)
+    if record and complete:
+        container["last_tested_at"] = now_iso
+        container["last_tested_compiled_at"] = compiled_at
+        if "status" in container:
+            container["status"] = "tested"
+    return required, tested, complete
 
 
 def _effective_compiled_permissions(spec: dict, builder: dict) -> dict:
@@ -548,8 +725,7 @@ def _store_provisioned_spec(
     if auto_bound:
         # Executable behavior changed, so evidence from a prior preview cannot
         # authorize launch of the newly connected build.
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
     spec = _effective_compiled_permissions(spec, builder)
     compiled_spec, delivery = provision_compiled_capabilities(db, agent_id=agent.id, spec=spec)
     setup_answers = builder.get("setup_answers") or {}
@@ -1344,6 +1520,18 @@ def _self_service_builder_journey(
         compiled_at
         and str(builder.get("last_tested_compiled_at") or "").strip() == compiled_at
     )
+    routine_required, routine_tested, _ = _routine_preview_evidence(
+        builder,
+        spec=compiled_spec or {},
+    )
+    routine_names = {
+        str(item.get("id") or ""): str(item.get("name") or item.get("id") or "")
+        for item in _compiled_execution_routines(compiled_spec or {})
+    }
+    untested_routines = [
+        item for item in routine_required if item not in routine_tested
+    ]
+
     setup_stage = next((item for item in stages if item.get("id") == "setup"), {})
     setup_complete = setup_stage.get("status") == "complete"
     if tested_build and setup_complete:
@@ -1351,16 +1539,43 @@ def _self_service_builder_journey(
             "test",
             "Preview & Test",
             "complete",
-            "The current employee build has been tested safely without live channels or business actions.",
+            (
+                "Every executable routine in the current build passed a side-effect-free preview."
+                if routine_required
+                else "The current conversational employee build has been preview-tested safely."
+            ),
         )
     elif provisioned and has_entitlement and setup_complete:
-        add_stage(
-            "test",
-            "Preview & Test",
-            "action_required",
-            "Chat with this exact draft before launch. Preview testing never sends through live channels or executes business actions.",
-            [_builder_action("test_employee", "Test employee", target="builder")],
-        )
+        if routine_required:
+            preview_actions = [
+                _builder_action(
+                    "preview_routine",
+                    f"Preview {routine_names.get(routine_id) or routine_id}",
+                    target="builder",
+                    key=routine_id,
+                    detail="Run this routine safely without sending, publishing, booking, writing state or other business side effects.",
+                )
+                for routine_id in untested_routines
+            ]
+            add_stage(
+                "test",
+                "Preview & Test",
+                "action_required",
+                (
+                    f"Preview every executable routine before launch "
+                    f"({len(routine_tested)}/{len(routine_required)} tested). "
+                    "Live business side effects are simulated."
+                ),
+                preview_actions,
+            )
+        else:
+            add_stage(
+                "test",
+                "Preview & Test",
+                "action_required",
+                "Chat with this exact draft before launch. Preview testing never sends through live channels or executes business actions.",
+                [_builder_action("test_employee", "Test employee", target="builder")],
+            )
     elif provisioned and not setup_complete:
         add_stage(
             "test",
@@ -1404,7 +1619,11 @@ def _self_service_builder_journey(
             "launch",
             "Launch",
             "blocked",
-            "Test the current employee build once before launch.",
+            (
+                "Preview every current routine before launch."
+                if routine_required
+                else "Test the current employee build once before launch."
+            ),
         )
     else:
         add_stage(
@@ -1429,6 +1648,8 @@ def _self_service_builder_journey(
         "complete_count": complete_count,
         "total_count": len(stages),
         "live": bool(agent.enabled),
+        "required_routines": routine_required,
+        "tested_routines": routine_tested,
     }
 
 
@@ -2343,8 +2564,7 @@ def auto_resolve_self_service_integrations(
             pending["compiled_spec"] = resolved_spec
             pending["status"] = "built"
             pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-            pending.pop("last_tested_at", None)
-            pending.pop("last_tested_compiled_at", None)
+            _invalidate_preview_evidence(pending)
             builder["pending_revision"] = pending
             settings_value["employee_builder"] = builder
             config.settings = settings_value
@@ -2366,8 +2586,7 @@ def auto_resolve_self_service_integrations(
         builder["missing_information"] = list(
             resolved_spec.get("setup_required") or []
         )
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
         settings_value["employee_builder"] = builder
         config.settings = settings_value
         agent.system_prompt = build_compiled_employee_system_prompt(
@@ -2545,8 +2764,7 @@ def bind_self_service_integration(
                 if normalize_requirement_key(item) != key
             ]
             pending["compiled_spec"] = compiled_value
-            pending.pop("last_tested_at", None)
-            pending.pop("last_tested_compiled_at", None)
+            _invalidate_preview_evidence(pending)
             pending["status"] = "built"
             builder["pending_revision"] = pending
             settings_value["employee_builder"] = builder
@@ -2575,8 +2793,7 @@ def bind_self_service_integration(
         builder["missing_information"] = list(compiled_value.get("setup_required") or [])
         # Connection changes alter executable behavior and therefore invalidate
         # preview evidence for the previous build.
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
         settings_value["employee_builder"] = builder
         config.settings = settings_value
         agent.system_prompt = build_compiled_employee_system_prompt(
@@ -2777,8 +2994,7 @@ def save_self_service_setup_answer(
                 if normalize_requirement_key(item) != key
             ]
             pending["compiled_spec"] = compiled_value
-            pending.pop("last_tested_at", None)
-            pending.pop("last_tested_compiled_at", None)
+            _invalidate_preview_evidence(pending)
             pending["status"] = "built"
             builder["pending_revision"] = pending
             settings_value["employee_builder"] = builder
@@ -2802,8 +3018,7 @@ def save_self_service_setup_answer(
         builder["missing_information"] = list(compiled_value.get("setup_required") or [])
         # Setup data changes the employee's executable behavior. A preview from
         # before this change cannot authorize launch of the updated build.
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
         settings_value["employee_builder"] = builder
         config.settings = settings_value
 
@@ -2966,8 +3181,7 @@ def set_self_service_permission(
         # new build identity. Restrictive changes may be applied while live;
         # automatic escalation was blocked above and must be preview-tested.
         builder["compiled_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
 
         compiled_value = _store_provisioned_spec(
             db,
@@ -3283,6 +3497,245 @@ def deactivate_self_service_employee(
         db.close()
 
 
+@router.post("/{agent_id}/preview-routine")
+def preview_employee_routine(
+    agent_id: int,
+    data: EmployeeBuilderRoutinePreviewRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Safely execute one compiled routine without business side effects."""
+
+    if len(data.input_data) > 100:
+        raise HTTPException(400, "Routine preview input has too many fields")
+    if len(data.simulated_outputs) > 100 or len(data.event_payloads) > 100:
+        raise HTTPException(400, "Routine preview simulation has too many node values")
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Routine preview is available only for Self-Service employees",
+            )
+        if not _has_ai_agents_entitlement(db, company.id):
+            raise HTTPException(
+                403,
+                detail={
+                    "message": "Subscribe to preview executable employee routines",
+                    "subscription_required": True,
+                },
+            )
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+
+        settings_value = deepcopy(dict(config.settings or {}))
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        target = pending if isinstance(pending, dict) else builder
+        spec = target.get("compiled_spec")
+        if not isinstance(spec, dict):
+            raise HTTPException(409, "Build the employee before previewing a routine")
+
+        routines = _compiled_execution_routines(spec)
+        if not routines:
+            raise HTTPException(
+                409,
+                "This employee has no executable routine; use the chat preview instead",
+            )
+
+        requested_id = normalize_requirement_key(data.routine_id)
+        routine = next(
+            (item for item in routines if item.get("id") == requested_id),
+            None,
+        )
+        if routine is None:
+            raise HTTPException(
+                404,
+                detail={
+                    "message": "Employee routine not found",
+                    "available_routines": [
+                        {
+                            "routine_id": item.get("id"),
+                            "routine_name": item.get("name"),
+                        }
+                        for item in routines
+                    ],
+                },
+            )
+
+        graph = normalize_execution_graph(routine.get("graph") or {})
+        errors = graph_contract_errors(graph, graph_agent_id=agent.id)
+        if errors:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "Routine execution contract is invalid",
+                    "routine_id": requested_id,
+                    "errors": errors,
+                },
+            )
+
+        defaults = _routine_preview_defaults(spec, routine)
+        preview_input = {
+            **defaults,
+            **deepcopy(data.input_data),
+        }
+        compiled_at = str(target.get("compiled_at") or "").strip()
+        preview_system_prompt = build_compiled_employee_system_prompt(
+            owner_name=company.name,
+            spec=spec,
+        )
+
+        def preview_ai_executor(*, prompt: str, context, node_scope: str) -> dict:
+            import json
+
+            message = str(prompt or "").strip()
+            if context is not None:
+                try:
+                    context_text = json.dumps(
+                        context,
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                except (TypeError, ValueError):
+                    context_text = str(context)
+                if context_text:
+                    message = (message + "\n\nCONTEXT:\n" + context_text)[:12000]
+            if not message:
+                raise HTTPException(409, f"Preview AI node {node_scope} has no prompt")
+
+            limits_service.check_token_limit(db, company.id)
+            selections = runtime_selections(
+                db,
+                company.id,
+                agent.provider,
+                agent.model,
+                message=message,
+            )
+            if not selections:
+                raise HTTPException(503, "No eligible AI provider/model is available")
+
+            response = None
+            selected = None
+            for candidate in selections:
+                try:
+                    response = ai_engine.generate(
+                        provider_name=candidate.provider,
+                        system_prompt=preview_system_prompt,
+                        user_message=message,
+                        model=candidate.model,
+                        tools=None,
+                    )
+                    selected = candidate
+                    break
+                except ProviderExecutionError:
+                    continue
+            if response is None or selected is None:
+                raise HTTPException(503, "AI provider is temporarily unavailable")
+
+            _record_ai_usage(
+                db,
+                company_id=company.id,
+                agent_id=agent.id,
+                selected=selected,
+                response=response,
+            )
+            return {
+                "ai_response": response.text,
+                "node_scope": node_scope,
+                "usage": {
+                    "input_tokens": response.input_tokens,
+                    "output_tokens": response.output_tokens,
+                    "total_tokens": response.total_tokens,
+                },
+            }
+
+        preview_state = {
+            **preview_input,
+            "_xvond_preview": True,
+            "_xvond_execution_key": (
+                f"preview:{company.id}:{agent.id}:{requested_id}:{compiled_at or 'unversioned'}"
+            ),
+            "_xvond_preview_outputs": deepcopy(data.simulated_outputs),
+            "_xvond_preview_event_payloads": deepcopy(data.event_payloads),
+            "_xvond_preview_ai_executor": preview_ai_executor,
+        }
+
+        result = automation_runtime.execute_step(
+            db,
+            company.id,
+            {
+                "type": "graph",
+                "agent_id": agent.id,
+                "graph": graph,
+            },
+            preview_state,
+            run_id=0,
+            step_index=0,
+        )
+
+        required, tested, complete = _routine_preview_evidence(
+            target,
+            spec=spec,
+            routine_id=requested_id,
+            record=True,
+        )
+        if isinstance(pending, dict):
+            builder["pending_revision"] = target
+            test_target = "pending_revision"
+        else:
+            builder = target
+            test_target = "current_build"
+
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.commit()
+
+        return {
+            "status": "previewed",
+            "agent_id": agent.id,
+            "routine_id": requested_id,
+            "routine_name": routine.get("name"),
+            "test_target": test_target,
+            "result": result,
+            "required_routines": required,
+            "tested_routines": tested,
+            "current_build_tested": complete,
+            "safety": {
+                "business_actions_executed": False,
+                "notifications_persisted": False,
+                "state_mutated": False,
+                "interactive_browser_executed": False,
+                "media_generated": False,
+            },
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @router.post("/{agent_id}/test")
 def test_draft_employee(
     agent_id: int,
@@ -3368,10 +3821,22 @@ def test_draft_employee(
                 response=response,
             )
             now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-            pending["last_tested_at"] = now_iso
-            pending["last_tested_compiled_at"] = pending.get("compiled_at")
+            pending["chat_tested_at"] = now_iso
+            pending["chat_tested_compiled_at"] = pending.get("compiled_at")
             pending["test_count"] = int(pending.get("test_count") or 0) + 1
-            pending["status"] = "tested"
+            if _compiled_execution_routines(pending_spec):
+                _, _, routine_complete = _routine_preview_evidence(
+                    pending,
+                    spec=pending_spec,
+                )
+                if not routine_complete:
+                    pending.pop("last_tested_at", None)
+                    pending.pop("last_tested_compiled_at", None)
+                    pending["status"] = "partially_tested"
+            else:
+                pending["last_tested_at"] = now_iso
+                pending["last_tested_compiled_at"] = pending.get("compiled_at")
+                pending["status"] = "tested"
             builder["pending_revision"] = pending
             settings_value["employee_builder"] = builder
             config.settings = settings_value
@@ -3459,9 +3924,25 @@ def test_draft_employee(
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
         now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-        builder["last_tested_at"] = now_iso
-        builder["last_tested_compiled_at"] = builder.get("compiled_at")
+        builder["chat_tested_at"] = now_iso
+        builder["chat_tested_compiled_at"] = builder.get("compiled_at")
         builder["test_count"] = int(builder.get("test_count") or 0) + 1
+        current_spec = (
+            builder.get("compiled_spec")
+            if isinstance(builder.get("compiled_spec"), dict)
+            else None
+        )
+        if _compiled_execution_routines(current_spec):
+            _, _, routine_complete = _routine_preview_evidence(
+                builder,
+                spec=current_spec or {},
+            )
+            if not routine_complete:
+                builder.pop("last_tested_at", None)
+                builder.pop("last_tested_compiled_at", None)
+        else:
+            builder["last_tested_at"] = now_iso
+            builder["last_tested_compiled_at"] = builder.get("compiled_at")
         settings_value["employee_builder"] = builder
         config.settings = settings_value
         db.commit()
@@ -3549,8 +4030,7 @@ def build_pending_live_revision(
         pending.update(staged)
         pending["status"] = "built"
         pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-        pending.pop("last_tested_at", None)
-        pending.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(pending)
         builder["pending_revision"] = pending
         settings_value["employee_builder"] = builder
         config.settings = settings_value

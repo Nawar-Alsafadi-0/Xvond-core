@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
@@ -3258,3 +3259,266 @@ def test_automation_runtime_merges_routine_defaults_for_all_triggers(monkeypatch
         )
 
     engine.dispose()
+
+
+
+def test_graph_preview_simulates_side_effects_without_persisting_or_waiting(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "run_browser_task",
+        lambda **kwargs: pytest.fail("interactive browser must not run in preview"),
+    )
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "generate_image_asset",
+        lambda **kwargs: pytest.fail("media generation must not run in preview"),
+    )
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "write_agent_state",
+        lambda *args, **kwargs: pytest.fail("state write must not run in preview"),
+    )
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "delete_agent_state",
+        lambda *args, **kwargs: pytest.fail("state delete must not run in preview"),
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Preview Co", active=False))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Preview worker",
+                system_prompt="preview",
+                provider="mock",
+                model="mock",
+                enabled=False,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        db.commit()
+
+        graph = {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "think",
+                    "type": "ai",
+                    "depends_on": [],
+                    "params": {"prompt": "Analyze the input."},
+                },
+                {
+                    "id": "act",
+                    "type": "action",
+                    "depends_on": ["think"],
+                    "params": {
+                        "action_type": "send_report",
+                        "arguments": {"text": "$nodes.think.ai_response"},
+                    },
+                },
+                {
+                    "id": "write",
+                    "type": "state_write",
+                    "depends_on": ["act"],
+                    "params": {
+                        "namespace": "preview",
+                        "key": "last",
+                        "value": "$nodes.act.scheduled_action_result.action_type",
+                    },
+                },
+                {
+                    "id": "notify",
+                    "type": "notify",
+                    "depends_on": ["write"],
+                    "params": {"title": "Done", "message": "Preview finished."},
+                },
+                {
+                    "id": "pause",
+                    "type": "wait",
+                    "depends_on": ["notify"],
+                    "params": {"duration": 1, "unit": "hours"},
+                },
+                {
+                    "id": "event",
+                    "type": "await_event",
+                    "depends_on": ["pause"],
+                    "params": {"event": "external.ready", "match": {"id": "$input.id"}},
+                },
+                {
+                    "id": "browser",
+                    "type": "browser",
+                    "depends_on": ["event"],
+                    "params": {
+                        "url": "https://example.com",
+                        "actions": [{"op": "click", "text": "Continue"}],
+                    },
+                },
+                {
+                    "id": "image",
+                    "type": "media",
+                    "depends_on": ["browser"],
+                    "params": {"prompt": "Create a preview image."},
+                },
+                {
+                    "id": "delete",
+                    "type": "state_delete",
+                    "depends_on": ["image"],
+                    "params": {
+                        "namespace": "preview",
+                        "key": "last",
+                    },
+                },
+            ],
+        }
+
+        result = automation_runtime_module.AutomationRuntime().execute_step(
+            db,
+            1,
+            {"type": "graph", "agent_id": 1, "graph": graph},
+            {
+                "id": "abc",
+                "_xvond_preview": True,
+                "_xvond_execution_key": "preview:1",
+                "_xvond_preview_event_payloads": {
+                    "event": {"id": "abc", "status": "ready"}
+                },
+            },
+            run_id=0,
+            step_index=0,
+        )
+
+        outputs = result["graph_outputs"]
+        assert outputs["think"]["simulated"] is True
+        assert outputs["act"]["scheduled_action_result"]["would_execute"] is True
+        assert outputs["write"]["written"] is False
+        assert outputs["notify"]["notification"]["persisted"] is False
+        assert outputs["pause"]["would_wait"] is True
+        assert outputs["event"]["would_wait"] is True
+        assert outputs["event"]["payload"]["status"] == "ready"
+        assert outputs["browser"]["browser"]["would_interact"] is True
+        assert outputs["image"]["media_url"].startswith("preview://media/")
+        assert outputs["delete"]["deleted"] is False
+
+        assert db.query(ActionRequest).count() == 0
+        assert db.query(NotificationEvent).count() == 0
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        assert not (config.settings or {}).get("_xvond_runtime_state")
+
+    engine.dispose()
+
+
+def test_graph_preview_allows_explicit_simulated_node_outputs():
+    runtime = automation_runtime_module.AutomationRuntime()
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 1,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "external",
+                        "type": "http_get_json",
+                        "depends_on": [],
+                        "params": {"url": "https://example.com/data"},
+                    },
+                    {
+                        "id": "check",
+                        "type": "condition",
+                        "depends_on": ["external"],
+                        "params": {
+                            "left": "$nodes.external.result.price",
+                            "operator": "lt",
+                            "right": 10,
+                        },
+                    },
+                ],
+            },
+        },
+        state={
+            "_xvond_preview": True,
+            "_xvond_preview_outputs": {
+                "external": {"result": {"price": 7}}
+            },
+        },
+        run_id=0,
+        step_index=0,
+    )
+
+    assert result["graph_outputs"]["external"]["preview_override"] is True
+    assert result["graph_outputs"]["check"]["matched"] is True
+
+
+
+def test_graph_preview_can_use_stateless_real_ai_executor():
+    runtime = automation_runtime_module.AutomationRuntime()
+    captured = {}
+
+    def preview_ai_executor(*, prompt, context, node_scope):
+        captured.update(
+            {
+                "prompt": prompt,
+                "context": context,
+                "node_scope": node_scope,
+            }
+        )
+        return {
+            "ai_response": "preview answer",
+            "usage": {"total_tokens": 12},
+        }
+
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 1,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "think",
+                        "type": "ai",
+                        "depends_on": [],
+                        "params": {
+                            "prompt": "Analyze this.",
+                            "context": {"value": 42},
+                        },
+                    }
+                ],
+            },
+        },
+        state={
+            "_xvond_preview": True,
+            "_xvond_preview_ai_executor": preview_ai_executor,
+        },
+        run_id=0,
+        step_index=0,
+    )
+
+    output = result["graph_outputs"]["think"]
+    assert output["preview"] is True
+    assert output["simulated"] is False
+    assert output["ai_response"] == "preview answer"
+    assert captured == {
+        "prompt": "Analyze this.",
+        "context": {"value": 42},
+        "node_scope": "think",
+    }

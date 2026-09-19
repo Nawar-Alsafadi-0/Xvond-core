@@ -216,6 +216,7 @@
             "setup_webhook",
             "set_permission",
             "test_employee",
+            "preview_routine",
             "launch_employee",
         ]).has(type);
         if (!runnable) return "";
@@ -291,6 +292,18 @@
                 <div id="subscription-plans" class="employee-builder-section hidden"></div>
                 <div id="subscription-error" class="error"></div>
                 <div id="prepare-employee-error" class="error"></div>
+                <div id="employee-builder-routine-preview-panel" class="employee-builder-section hidden">
+                    <h3 id="employee-builder-routine-preview-title">Preview routine</h3>
+                    <p class="muted">This safe preview may perform read-only checks. Sending, publishing, booking, state writes, notifications, interactive browser steps and other business side effects are simulated.</p>
+                    <input id="employee-builder-routine-preview-id" type="hidden">
+                    <label>
+                        <span>Test input (optional JSON)</span>
+                        <textarea id="employee-builder-routine-preview-input" rows="5" placeholder='{"key":"value"}'></textarea>
+                    </label>
+                    <button type="button" id="employee-builder-routine-preview-run">Run safe preview</button>
+                    <div id="employee-builder-routine-preview-error" class="error"></div>
+                    <pre id="employee-builder-routine-preview-output" class="employee-builder-run-output hidden"></pre>
+                </div>
                 ${controllableRoutines.length ? `
                     <div id="employee-builder-routines-panel" class="employee-builder-section">
                         <div class="employee-builder-current-head">
@@ -764,6 +777,24 @@
                 document.getElementById("employee-builder-test-message")?.focus();
                 return;
             }
+            if (actionType === "preview_routine") {
+                const panel = document.getElementById("employee-builder-routine-preview-panel");
+                const input = document.getElementById("employee-builder-routine-preview-id");
+                const title = document.getElementById("employee-builder-routine-preview-title");
+                const error = document.getElementById("employee-builder-routine-preview-error");
+                const output = document.getElementById("employee-builder-routine-preview-output");
+                if (input) input.value = String(actionKey || "");
+                if (title) title.textContent = `Preview ${String(actionKey || "routine").replaceAll("_", " ")}`;
+                if (error) error.textContent = "";
+                if (output) {
+                    output.textContent = "";
+                    output.classList.add("hidden");
+                }
+                panel?.classList.remove("hidden");
+                panel?.scrollIntoView({behavior: "smooth", block: "center"});
+                document.getElementById("employee-builder-routine-preview-input")?.focus();
+                return;
+            }
             if (actionType === "launch_employee") {
                 await launchEmployee(employee.agent_id);
                 return;
@@ -848,6 +879,73 @@
                     if (document.body.contains(button)) button.disabled = false;
                 }
             });
+        });
+
+        document.getElementById("employee-builder-routine-preview-run")?.addEventListener("click", async event => {
+            const button = event.currentTarget;
+            const routineId = String(
+                document.getElementById("employee-builder-routine-preview-id")?.value || ""
+            ).trim();
+            const raw = String(
+                document.getElementById("employee-builder-routine-preview-input")?.value || ""
+            ).trim();
+            const error = document.getElementById("employee-builder-routine-preview-error");
+            const output = document.getElementById("employee-builder-routine-preview-output");
+            if (error) error.textContent = "";
+            if (!routineId) {
+                if (error) error.textContent = "Choose a routine to preview.";
+                return;
+            }
+
+            let inputData = {};
+            if (raw) {
+                try {
+                    inputData = JSON.parse(raw);
+                    if (!inputData || Array.isArray(inputData) || typeof inputData !== "object") {
+                        throw new Error("Test input must be a JSON object.");
+                    }
+                } catch (err) {
+                    if (error) error.textContent = err?.message || "Test input must be valid JSON.";
+                    return;
+                }
+            }
+
+            button.disabled = true;
+            try {
+                const result = await api(
+                    `/customer/employee-builder/${Number(employee.agent_id)}/preview-routine`,
+                    {
+                        method: "POST",
+                        body: JSON.stringify({
+                            routine_id: routineId,
+                            input_data: inputData,
+                            simulated_outputs: {},
+                            event_payloads: {},
+                        }),
+                    }
+                );
+                if (output) {
+                    output.textContent = JSON.stringify(result.result || {}, null, 2);
+                    output.classList.remove("hidden");
+                }
+
+                const encodedKey = encodeURIComponent(routineId);
+                const journeyButton = document.querySelector(
+                    `[data-builder-action="preview_routine"][data-builder-key="${encodedKey}"]`
+                );
+                if (journeyButton) {
+                    journeyButton.disabled = true;
+                    journeyButton.textContent = "Previewed";
+                }
+
+                if (result.current_build_tested) {
+                    await loadEmployeeBuilder();
+                }
+            } catch (err) {
+                if (error) error.textContent = err?.message || "Routine preview failed.";
+            } finally {
+                if (document.body.contains(button)) button.disabled = false;
+            }
         });
 
         document.querySelectorAll("[data-routine-toggle]").forEach(button => {

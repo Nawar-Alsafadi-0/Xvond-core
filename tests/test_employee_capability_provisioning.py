@@ -2592,3 +2592,154 @@ def test_routine_runtime_input_conflict_blocks_workflow_provisioning(database):
             .count()
             == 0
         )
+
+
+
+def test_routine_preview_records_build_scoped_evidence_without_live_execution(
+    database,
+    monkeypatch,
+):
+    factory, _ = database
+    monkeypatch.setattr(api, "_has_ai_agents_entitlement", lambda *args, **kwargs: True)
+
+    spec = normalize_compiled_spec(
+        {
+            "role": "Background worker",
+            "scope": "personal",
+            "requirements": [],
+            "permissions": [],
+            "execution_routines": [
+                {
+                    "id": "monitor",
+                    "name": "Monitor",
+                    "requirement_keys": [],
+                    "graph": {
+                        "version": 1,
+                        "trigger": {"type": "manual"},
+                        "nodes": [
+                            {
+                                "id": "done",
+                                "type": "notify",
+                                "depends_on": [],
+                                "params": {"message": "Done"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+        job_brief="Run the monitor manually.",
+    )
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings = deepcopy(config.settings)
+        settings["employee_builder"] = {
+            "source_description": "Run the monitor manually.",
+            "job_brief": "Run the monitor manually.",
+            "compiled_spec": spec,
+            "compiled_at": "build-1",
+            "requested_channels": [],
+            "setup_answers": {},
+            "owner_permissions": {},
+        }
+        config.settings = settings
+        db.commit()
+
+    captured = {}
+
+    def fake_preview(db, company_id, step, state, *, run_id, step_index):
+        captured.update(
+            {
+                "company_id": company_id,
+                "step": deepcopy(step),
+                "state": deepcopy(state),
+                "run_id": run_id,
+                "step_index": step_index,
+            }
+        )
+        return {
+            "graph_outputs": {
+                "done": {
+                    "preview": True,
+                    "notification": {"persisted": False},
+                }
+            }
+        }
+
+    monkeypatch.setattr(api.automation_runtime, "execute_step", fake_preview)
+
+    result = api.preview_employee_routine(
+        1,
+        api.EmployeeBuilderRoutinePreviewRequest(
+            routine_id="monitor",
+            input_data={"sample": 123},
+        ),
+        USER,
+    )
+
+    assert result["status"] == "previewed"
+    assert result["routine_id"] == "monitor"
+    assert result["current_build_tested"] is True
+    assert result["safety"]["business_actions_executed"] is False
+    assert captured["run_id"] == 0
+    assert captured["state"]["_xvond_preview"] is True
+    assert captured["state"]["sample"] == 123
+
+    with factory() as db:
+        builder = _builder(db)
+        assert builder["last_tested_compiled_at"] == "build-1"
+        assert builder["routine_preview_evidence"]["monitor"]["compiled_at"] == "build-1"
+        assert db.query(AutomationRun).count() == 0
+        assert db.query(ActionRequest).count() == 0
+
+
+def test_chat_preview_does_not_unlock_build_that_has_execution_routines(database, monkeypatch):
+    factory, calls = database
+    monkeypatch.setattr(api, "_has_ai_agents_entitlement", lambda *args, **kwargs: True)
+
+    spec = normalize_compiled_spec(
+        {
+            "role": "Background worker",
+            "scope": "personal",
+            "requirements": [],
+            "permissions": [],
+            "execution_routines": [
+                {
+                    "id": "background",
+                    "name": "Background",
+                    "requirement_keys": [],
+                    "graph": {
+                        "version": 1,
+                        "trigger": {"type": "manual"},
+                        "nodes": [
+                            {
+                                "id": "done",
+                                "type": "notify",
+                                "depends_on": [],
+                                "params": {"message": "Done"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+        job_brief="Run background work manually.",
+    )
+    _cache(factory, spec)
+
+    result = api.test_draft_employee(
+        1,
+        api.EmployeeBuilderTestRequest(message="What do you do?"),
+        USER,
+    )
+
+    assert result["tools_used"] is False
+    with factory() as db:
+        builder = _builder(db)
+        assert builder["chat_tested_compiled_at"] == builder["compiled_at"]
+        assert builder.get("last_tested_compiled_at") is None
+        assert builder.get("routine_preview_evidence") in (None, {})
+    assert len(calls) == 1

@@ -1639,6 +1639,12 @@ class AutomationRuntime:
             waiting_for_resume_node = bool(resume_node_id)
             graph_agent_id = step.get("agent_id")
             graph_path = str(state.get("_xvond_graph_path") or "").strip()
+            preview_mode = bool(state.get("_xvond_preview"))
+            preview_outputs = (
+                state.get("_xvond_preview_outputs")
+                if isinstance(state.get("_xvond_preview_outputs"), dict)
+                else {}
+            )
             for node_index, node in enumerate(nodes):
                 node_id = str(node.get("id") or "").strip()
                 is_resume_node = bool(
@@ -1689,8 +1695,43 @@ class AutomationRuntime:
                 if not isinstance(params, dict):
                     params = {}
 
+                if preview_mode and node_scope in preview_outputs:
+                    override = deepcopy(preview_outputs[node_scope])
+                    node_outputs[node_id] = (
+                        {"preview_override": True, **override}
+                        if isinstance(override, dict)
+                        else {"preview_override": True, "result": override}
+                    )
+                    continue
+
                 nested_step: dict = {"type": node_type}
                 if node_type == "ai":
+                    if preview_mode:
+                        preview_ai = state.get("_xvond_preview_ai_executor")
+                        if callable(preview_ai):
+                            preview_result = preview_ai(
+                                prompt=str(params.get("prompt") or node.get("label") or ""),
+                                context=deepcopy(params.get("context")),
+                                node_scope=node_scope,
+                            )
+                            if not isinstance(preview_result, dict):
+                                raise ValueError(
+                                    f"Execution graph preview AI node {node_id} returned an invalid result"
+                                )
+                            node_outputs[node_id] = {
+                                "preview": True,
+                                "simulated": False,
+                                **preview_result,
+                            }
+                        else:
+                            node_outputs[node_id] = {
+                                "preview": True,
+                                "simulated": True,
+                                "ai_response": f"[simulated AI output for {node_scope}]",
+                                "prompt": params.get("prompt") or node.get("label"),
+                                "context": deepcopy(params.get("context")),
+                            }
+                        continue
                     nested_step = {
                         "type": "ai",
                         "agent_id": params.get("agent_id") or graph_agent_id,
@@ -1698,6 +1739,18 @@ class AutomationRuntime:
                         "context": params.get("context"),
                     }
                 elif node_type == "media":
+                    if preview_mode:
+                        node_outputs[node_id] = {
+                            "preview": True,
+                            "simulated": True,
+                            "media_url": f"preview://media/{node_scope}",
+                            "generated_media": {
+                                "model": params.get("model"),
+                                "size": params.get("size") or "1024x1024",
+                                "prompt": params.get("prompt") or node.get("label"),
+                            },
+                        }
+                        continue
                     nested_step = {
                         "type": "media_generation",
                         "prompt": params.get("prompt") or node.get("label"),
@@ -1712,6 +1765,19 @@ class AutomationRuntime:
                         raise ValueError(
                             f"Execution graph action node {node_id} requires agent_id and action_type"
                         )
+                    if preview_mode:
+                        node_outputs[node_id] = {
+                            "preview": True,
+                            "simulated": True,
+                            "scheduled_action_result": {
+                                "would_execute": True,
+                                "agent_id": action_agent_id,
+                                "action_type": action_type,
+                                "arguments": deepcopy(params.get("arguments") or {}),
+                                "approval_required_at_runtime": True,
+                            },
+                        }
+                        continue
                     nested_step = {
                         "type": "scheduled_action",
                         "agent_id": action_agent_id,
@@ -1789,6 +1855,18 @@ class AutomationRuntime:
                         for item in actions
                     )
                     allow_interactions = False
+                    if preview_mode and requires_approval:
+                        node_outputs[node_id] = {
+                            "preview": True,
+                            "simulated": True,
+                            "browser": {
+                                "url": start_url,
+                                "actions": deepcopy(actions),
+                                "would_interact": True,
+                                "approval_required_at_runtime": True,
+                            },
+                        }
+                        continue
                     if requires_approval:
                         browser_agent_id = int(
                             params.get("agent_id") or graph_agent_id or 0
@@ -1890,6 +1968,17 @@ class AutomationRuntime:
                         raise ValueError(
                             f"Execution graph state_write node {node_id} requires key"
                         )
+                    if preview_mode:
+                        node_outputs[node_id] = {
+                            "preview": True,
+                            "simulated": True,
+                            "value": deepcopy(params.get("value")),
+                            "namespace": namespace,
+                            "key": key,
+                            "written": False,
+                            "would_write": True,
+                        }
+                        continue
                     value = write_agent_state(
                         db,
                         company_id=company_id,
@@ -1917,6 +2006,16 @@ class AutomationRuntime:
                         raise ValueError(
                             f"Execution graph state_delete node {node_id} requires key"
                         )
+                    if preview_mode:
+                        node_outputs[node_id] = {
+                            "preview": True,
+                            "simulated": True,
+                            "namespace": namespace,
+                            "key": key,
+                            "deleted": False,
+                            "would_delete": True,
+                        }
+                        continue
                     deleted = delete_agent_state(
                         db,
                         company_id=company_id,
@@ -2043,6 +2142,18 @@ class AutomationRuntime:
                             f"Execution graph notify node {node_id} requires message"
                         )
                     title = str(params.get("title") or "Employee update").strip()[:255]
+                    if preview_mode:
+                        node_outputs[node_id] = {
+                            "preview": True,
+                            "simulated": True,
+                            "notification": {
+                                "title": title,
+                                "message": message[:4000],
+                                "severity": str(params.get("severity") or "info"),
+                                "persisted": False,
+                            },
+                        }
+                        continue
                     event, duplicate = _employee_notification_event(
                         db,
                         company_id=company_id,
@@ -2083,6 +2194,27 @@ class AutomationRuntime:
                         )
                     raw_match = params.get("match")
                     match = raw_match if isinstance(raw_match, dict) else {}
+                    if preview_mode:
+                        payloads = (
+                            state.get("_xvond_preview_event_payloads")
+                            if isinstance(state.get("_xvond_preview_event_payloads"), dict)
+                            else {}
+                        )
+                        simulated_payload = deepcopy(
+                            payloads.get(node_scope)
+                            if node_scope in payloads
+                            else payloads.get(node_id, {})
+                        )
+                        node_outputs[node_id] = {
+                            "preview": True,
+                            "simulated": True,
+                            "event_name": event_name,
+                            "match": deepcopy(match),
+                            "payload": simulated_payload,
+                            "received": False,
+                            "would_wait": True,
+                        }
+                        continue
                     raise AutomationEventRequired(
                         event_name=event_name,
                         match=match,
@@ -2104,6 +2236,14 @@ class AutomationRuntime:
                         }
                         continue
                     resume_at = _wait_resume_at(params)
+                    if preview_mode:
+                        node_outputs[node_id] = {
+                            "preview": True,
+                            "simulated": True,
+                            "would_wait": True,
+                            "resume_at": _trace_iso(resume_at),
+                        }
+                        continue
                     if resume_at <= _utcnow_naive():
                         node_outputs[node_id] = {
                             "resumed": True,
@@ -2410,6 +2550,12 @@ class AutomationRuntime:
                 message=message,
                 commit=False,
                 allow_tools=False,
+                system_prompt_override=(
+                    str(state.get("_xvond_preview_system_prompt"))
+                    if state.get("_xvond_preview")
+                    and state.get("_xvond_preview_system_prompt")
+                    else None
+                ),
             )
             return {
                 "ai_response": response.get("response", {}).get("content", ""),
