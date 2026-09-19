@@ -681,7 +681,7 @@ def test_self_service_graph_schedule_owns_the_full_pipeline(database):
 
 
 
-def test_novel_graph_backed_capability_is_ready_without_legacy_execution_plan(database):
+def test_novel_unbacked_graph_action_stays_setup_required(database):
     factory, _ = database
     brief = (
         "Every 60 minutes inspect a public specialist source, reason about the result, "
@@ -745,9 +745,9 @@ def test_novel_graph_backed_capability_is_ready_without_legacy_execution_plan(da
     result = api.compile_employee(1, USER)
 
     requirement = result["spec"]["requirements"][0]
-    assert requirement["execution_status"] == "ready"
+    assert requirement["execution_status"] == "setup_required"
     trigger = result["spec"]["delivery"]["graph_trigger"]
-    assert trigger["status"] == "ready"
+    assert trigger["status"] == "setup_required"
 
     with factory() as db:
         action = reveal_config(_assignment(db).config)["actions"]["never_seen_before_capability"]
@@ -755,9 +755,60 @@ def test_novel_graph_backed_capability_is_ready_without_legacy_execution_plan(da
         assert destination["graph_backed"] is True
         assert destination["delivery_mode"] == "graph"
         assert destination["execution_plan"] == []
-        workflow = db.query(AutomationWorkflow).one()
-        assert [node["type"] for node in workflow.steps[0]["graph"]["nodes"]] == ["ai", "action"]
 
+
+def test_novel_graph_native_capability_runs_without_profession_specific_code(database):
+    factory, _ = database
+    brief = "Every 60 minutes inspect data, reason about it, and remember the latest finding."
+    payload = {
+        "role": "Novel specialist worker",
+        "scope": "personal",
+        "requirements": [],
+        "permissions": [],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {
+                "type": "schedule",
+                "schedule": {
+                    "kind": "interval",
+                    "every_minutes": 60,
+                    "source_text": "Every 60 minutes",
+                },
+            },
+            "nodes": [
+                {
+                    "id": "inspect",
+                    "type": "ai",
+                    "depends_on": [],
+                    "params": {"prompt": "Inspect and reason about the supplied data."},
+                },
+                {
+                    "id": "remember",
+                    "type": "state_write",
+                    "depends_on": ["inspect"],
+                    "params": {
+                        "key": "latest_finding",
+                        "value": "$nodes.inspect.ai_response",
+                    },
+                },
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "ready"
+
+    with factory() as db:
+        workflow = db.query(AutomationWorkflow).one()
+        assert [node["type"] for node in workflow.steps[0]["graph"]["nodes"]] == ["ai", "state_write"]
 
 def test_self_service_media_generation_schedule_builds_ai_media_then_action(database):
     factory, _ = database
