@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 
 from backend.app.core.http_security import safe_http_request, validate_public_http_url
 from backend.app.modules.integrations.openapi_contract import fetch_openapi_contract
+from backend.app.modules.integrations.http_api_auth import apply_http_api_auth
 
 
 MAX_SEARCH_RESULTS = 8
@@ -197,11 +198,10 @@ def discover_openapi_contract(discovery: dict) -> dict:
     }
 
 
-def public_api_probe(contract: dict) -> dict | None:
-    """Return validation evidence for a discovered unauthenticated API.
+def api_connection_probe(contract: dict, *, auth_config: dict | None = None) -> dict | None:
+    """Validate a discovered API using only a safe GET operation.
 
-    Only a GET operation with no path variables and no required query
-    parameters may be used. Discovery never probes write endpoints.
+    Authentication may be applied, but discovery never probes write endpoints.
     """
     if not isinstance(contract, dict):
         return None
@@ -223,14 +223,21 @@ def public_api_probe(contract: dict) -> dict | None:
         if not endpoint or endpoint.startswith("//") or endpoint.lower().startswith(("http://", "https://")):
             continue
         url = base_url + "/" + endpoint.lstrip("/")
+        headers = {
+            "Accept": "application/json,text/plain,*/*;q=0.1",
+            "User-Agent": "Xvond-Capability-Discovery/1.0",
+        }
         try:
+            if auth_config is not None:
+                url, headers = apply_http_api_auth(
+                    url=url,
+                    headers=headers,
+                    config=auth_config,
+                )
             result = safe_http_request(
                 url=url,
                 method="GET",
-                headers={
-                    "Accept": "application/json,text/plain,*/*;q=0.1",
-                    "User-Agent": "Xvond-Capability-Discovery/1.0",
-                },
+                headers=headers,
                 timeout=10,
                 max_response_bytes=64_000,
             )
@@ -241,9 +248,14 @@ def public_api_probe(contract: dict) -> dict | None:
             return {
                 "validated": True,
                 "validated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                "mode": "discovered_public_api_safe_get",
+                "mode": "discovered_api_safe_get",
                 "operation": str(name),
                 "endpoint": "/" + endpoint.lstrip("/"),
                 "status_code": status,
             }
     return None
+
+
+def public_api_probe(contract: dict) -> dict | None:
+    return api_connection_probe(contract, auth_config=None)
+
