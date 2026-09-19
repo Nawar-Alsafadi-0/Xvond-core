@@ -630,6 +630,32 @@ def _record_ai_usage(db, *, company_id: int, agent_id: int, selected, response):
     )
 
 
+def _compiled_discovery_summary(spec: dict | None) -> dict:
+    pending: list[dict] = []
+    for item in ((spec or {}).get("requirements") or []):
+        if not isinstance(item, dict):
+            continue
+        discovery = item.get("discovery")
+        if not isinstance(discovery, dict) or discovery.get("needed") is not True:
+            continue
+        pending.append(
+            {
+                "requirement_key": normalize_requirement_key(item.get("key")),
+                "capability": str(discovery.get("capability") or "")[:500],
+                "service_hint": str(discovery.get("service_hint") or "")[:160],
+                "docs_url": str(discovery.get("docs_url") or "")[:1200],
+                "search_queries": list(discovery.get("search_queries") or [])[:5],
+                "customer_access": str(discovery.get("customer_access") or "unknown"),
+                "status": str(discovery.get("status") or "pending_discovery"),
+            }
+        )
+    return {
+        "needed": bool(pending),
+        "pending_count": len(pending),
+        "requirements": pending,
+    }
+
+
 def _compiler_connection_context(db, *, company_id: int) -> list[dict]:
     """Expose validated connection capabilities to the compiler without secrets or IDs."""
     rows = (
@@ -3435,6 +3461,7 @@ def compile_employee(
             "agent_id": agent.id,
             "compiled": True,
             "spec": compiled_spec,
+            "discovery": _compiled_discovery_summary(compiled_spec),
         }
     except HTTPException:
         db.rollback()

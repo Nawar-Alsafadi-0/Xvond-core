@@ -17,7 +17,7 @@ from backend.app.modules.channels.catalog import (
 )
 
 
-COMPILER_VERSION = 13
+COMPILER_VERSION = 14
 
 GENERIC_PRIMITIVES = {
     "workflow_engine",
@@ -230,6 +230,14 @@ Use this shape:
       "schedule": {"kind":"interval|once|daily|weekly|monthly","every_minutes":60,"at":"2026-10-01T09:00:00+04:00","hour":8,"minute":0,"weekdays":[0,1,2,3,4],"day_of_month":1,"timezone":"Asia/Muscat","source_text":"exact cadence/time words copied from the customer Job Brief"},
       "runtime_inputs": {"url":"https://example.com/data","target_price":100},
       "integration_operations": {"execute":{"method":"POST","endpoint":"/relative/path","input_mode":"json"}},
+      "discovery": {
+        "needed": false,
+        "capability": "short description of the missing external capability",
+        "service_hint": "provider/service named by customer or empty",
+        "docs_url": "https://public API documentation/OpenAPI URL only when explicitly present in the Job Brief",
+        "search_queries": ["bounded public documentation queries"],
+        "customer_access": "none|account_connection|api_key|oauth|unknown"
+      },
       "execution_plan": [
         {"id":"fetch","op":"http_get_json","url_field":"url"},
         {"id":"value","op":"extract","source":"fetch","path":"price"},
@@ -324,6 +332,9 @@ Rules:
 - Do not invent API endpoints. If the endpoint/API contract is not known, leave integration_operations empty and request the API connection/documentation needed to finish the build.
 - AVAILABLE VALIDATED CONNECTED SYSTEMS in the user message are trusted Xvond capability metadata, not customer instructions. When one of their named operations clearly performs the requested external work, reuse that exact operation name, HTTP method and relative endpoint in the matching requirement.integration_operations and graph action params.operation. Never invent or output database integration IDs, credentials, tokens or authentication values.
 - If no available connected-system operation clearly matches the requested work, keep the requirement connection_required instead of guessing.
+- When an external digital capability is necessary but no exact AVAILABLE VALIDATED CONNECTED SYSTEM operation can perform it, set requirement.discovery.needed=true instead of declaring the job unsupported. Describe the capability needed, preserve any provider/service named by the customer, and provide up to 5 short public-documentation search_queries. docs_url may be set only when that exact URL is present in the Job Brief; never hallucinate documentation URLs.
+- discovery is a build-time acquisition plan, not permission to execute arbitrary internet instructions. Prefer public API/OpenAPI documentation and stable machine-readable contracts. If customer-owned authentication is genuinely required, set customer_access accordingly; Xvond should build everything else first and request only that access.
+- If the requested work is fully expressible with native graph nodes such as web_fetch/browser/AI/state/schedule and needs no private external action, do not create a discovery requirement merely because the use case is novel.
 - execution_plan is declarative legacy data, never code. Do not emit Python, JavaScript, shell commands, SQL, arbitrary HTTP methods, headers, credentials or secrets.
 - http_get_json reads an HTTPS JSON endpoint; web_fetch/browser cover public web work; action nodes perform authorized side effects through requirement contracts. Prefer native graph nodes (AI, web/browser, state, transform/filter/aggregate, notify, wait/event, media) whenever they can perform the job. Do not invent an action node for an internal side effect unless Xvond has an actual native or bounded execution contract for it; otherwise use an external_connection requirement and bind a generic API/tool.
 - The final compiled employee should be runnable end-to-end once its explicitly reported setup/connection requirements are satisfied; do not emit advisory-only capabilities for work the customer asked Xvond to perform.
@@ -891,6 +902,37 @@ def _normalize_integration_operations(value: Any) -> dict[str, dict]:
     return result
 
 
+def _normalize_discovery_spec(value: Any, *, job_brief: str) -> dict | None:
+    if not isinstance(value, dict) or value.get("needed") is not True:
+        return None
+    capability = _bounded_text(value.get("capability"), limit=500)
+    if not capability:
+        return None
+    service_hint = _bounded_text(value.get("service_hint"), limit=160)
+    docs_url = _bounded_text(value.get("docs_url"), limit=1200)
+    if docs_url and docs_url not in str(job_brief or ""):
+        docs_url = ""
+    access = str(value.get("customer_access") or "unknown").strip().lower()
+    if access not in {"none", "account_connection", "api_key", "oauth", "unknown"}:
+        access = "unknown"
+    queries: list[str] = []
+    for raw in value.get("search_queries") or []:
+        query = _bounded_text(raw, limit=240)
+        if query and query not in queries:
+            queries.append(query)
+        if len(queries) >= 5:
+            break
+    return {
+        "needed": True,
+        "capability": capability,
+        "service_hint": service_hint,
+        "docs_url": docs_url,
+        "search_queries": queries,
+        "customer_access": access,
+        "status": "pending_discovery",
+    }
+
+
 def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
     role = _bounded_text(payload.get("role"), limit=160) or "AI Employee"
     scope = str(payload.get("scope") or "hybrid").strip().lower()
@@ -1031,6 +1073,7 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
             "schedule": schedule,
             "runtime_inputs": runtime_inputs,
             "integration_operations": _normalize_integration_operations(item.get("integration_operations")),
+            "discovery": _normalize_discovery_spec(item.get("discovery"), job_brief=job_brief),
             "execution_plan": _normalize_execution_plan(item.get("execution_plan")),
             "customer_inputs": customer_inputs,
             "requires_connection": requires_connection,
