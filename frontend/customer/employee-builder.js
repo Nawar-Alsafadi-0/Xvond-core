@@ -1360,10 +1360,36 @@
         }
     }
 
+    function hasResolvableConnectionRequirement(employee) {
+        const spec = employee?.enabled && employee?.pending_revision?.compiled_spec
+            ? employee.pending_revision.compiled_spec
+            : employee?.compiled_spec;
+        return (spec?.requirements || []).some(item =>
+            item
+            && String(item.status || "").toLowerCase() === "connection_required"
+            && String(item.kind || "").toLowerCase() !== "channel"
+        );
+    }
+
     async function loadEmployeeBuilder() {
         renderLoading();
         try {
-            const result = await api("/customer/employee-builder/current");
+            let result = await api("/customer/employee-builder/current");
+            if (result.employee && hasResolvableConnectionRequirement(result.employee)) {
+                try {
+                    const resolved = await api(
+                        `/customer/employee-builder/${Number(result.employee.agent_id)}/connections/auto-resolve`,
+                        {method: "POST", body: "{}"}
+                    );
+                    if ((resolved.bound_requirements || []).length) {
+                        result = await api("/customer/employee-builder/current");
+                    }
+                } catch (resolveError) {
+                    // Automatic reuse is a convenience. Keep the normal manual
+                    // connection journey available when no safe match exists.
+                    console.debug("Automatic connection reuse skipped", resolveError);
+                }
+            }
             if (result.employee) renderCurrent(result.employee);
             else renderNoEmployee();
         } catch (err) {
