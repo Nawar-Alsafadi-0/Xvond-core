@@ -13,7 +13,7 @@ from backend.app.modules.channels.catalog import (
 )
 
 
-COMPILER_VERSION = 7
+COMPILER_VERSION = 8
 
 GENERIC_PRIMITIVES = {
     "workflow_engine",
@@ -242,7 +242,7 @@ Use this shape:
     "nodes": [
       {
         "id": "stable_node_id",
-        "type": "ai|media|action|http_get_json|web_fetch|browser|transform|condition|notify|wait|foreach|select|filter|aggregate|state_read|state_write|state_delete",
+        "type": "ai|media|action|http_get_json|web_fetch|browser|transform|condition|notify|wait|await_event|foreach|select|filter|aggregate|state_read|state_write|state_delete",
         "depends_on": [],
         "params": {}
       }
@@ -264,6 +264,7 @@ Rules:
 - execution_graph.trigger describes what starts the graph. Use manual when the user starts it explicitly, schedule for recurring/time-based work, webhook for an incoming external JSON event, and event for an internal Xvond event. Never invent a webhook/event trigger when the user did not request event-driven behavior.
 - For type=event, set trigger.event to the stable internal event name the graph should consume. Event names are capabilities of the Xvond runtime, not provider-specific webhook URLs.
 - Use a wait node only when the Job Brief explicitly requests a pause inside the same job before later steps continue. A wait is not an initial schedule trigger. Put either params.duration plus params.unit (seconds|minutes|hours|days|weeks), or params.until as an ISO-8601 timestamp with timezone. Include params.source_text copied verbatim from the Job Brief words that authorize the wait. Never invent a wait, delay, follow-up period or deadline.
+- Use await_event when later steps in the same job must wait for a future Xvond/internal/provider event instead of starting a separate unrelated workflow. Put the stable event name in params.event. Use params.match for correlation when the workflow is waiting for an event belonging to a specific order, lead, payment, booking or other entity; match values may reference $input.* or previous node outputs. Do not use await_event when the event merely starts the job; use execution_graph.trigger type=event for that case.
 - Use generic node types, not use-case names. Examples: ai for reasoning/generation, media for generated visual media, action for a side effect through a requirement/connector, http_get_json for read-only JSON fetches, transform for data shaping, condition for branching gates, notify for an internal owner update.
 - ai and media nodes may use params.context to consume structured output from $input.* or $nodes.<id>.* while keeping the instruction itself in params.prompt. Prefer this over embedding raw upstream data inside prompt strings. Xvond bounds context before sending it to providers.
 - action nodes must reference a requirement key in params.action_type. Do not encode provider-specific logic in the graph.
