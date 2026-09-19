@@ -1,4 +1,5 @@
 from copy import deepcopy
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -4380,21 +4381,35 @@ def _run_failure_detail(run: AutomationRun | None) -> dict | None:
         None,
     )
     if isinstance(failed_span, dict):
+        error = str(failed_span.get("error") or run.error_message or "")
+        node_id = failed_span.get("node_id")
+        if not node_id and error:
+            match = re.search(
+                r"Execution graph (?:foreach )?node ([A-Za-z0-9_.:-]+)",
+                error,
+            )
+            if match:
+                node_id = match.group(1)
         return {
             "step_index": failed_span.get("step_index"),
             "step_type": failed_span.get("step_type"),
-            "node_id": failed_span.get("node_id"),
+            "node_id": node_id,
             "phase": failed_span.get("phase"),
-            "error": failed_span.get("error") or run.error_message,
+            "error": error or None,
             "duration_ms": failed_span.get("duration_ms"),
         }
 
+    error = str(run.error_message or "")
+    match = re.search(
+        r"Execution graph (?:foreach )?node ([A-Za-z0-9_.:-]+)",
+        error,
+    )
     return {
         "step_index": None,
         "step_type": None,
-        "node_id": None,
+        "node_id": match.group(1) if match else None,
         "phase": None,
-        "error": run.error_message,
+        "error": error or None,
         "duration_ms": None,
     }
 
