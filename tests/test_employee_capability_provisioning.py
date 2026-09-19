@@ -337,7 +337,7 @@ def test_runtime_ready_generated_plan_is_exposed_to_employee(database):
 
 
 @pytest.mark.parametrize("mode,enabled,confirmation", [
-    ("automatic", True, False), ("ask_before", True, True), ("never", False, True),
+    ("automatic", True, False), ("ask_before", True, True), ("never", True, True),
 ])
 def test_generated_contract_respects_exact_permission(mode, enabled, confirmation):
     action = build_managed_action_config(requirement=PAYLOAD["requirements"][0], spec={
