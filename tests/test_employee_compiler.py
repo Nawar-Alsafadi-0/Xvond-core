@@ -927,7 +927,7 @@ def test_compiler_preserves_generic_durable_wait_node():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 11
+    assert spec["version"] == 12
     assert [node["type"] for node in nodes] == ["transform", "wait", "ai"]
     assert nodes[1]["params"]["duration"] == 2
     assert nodes[1]["params"]["unit"] == "days"
@@ -980,7 +980,7 @@ def test_compiler_preserves_generic_correlated_event_wait():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 11
+    assert spec["version"] == 12
     assert [node["type"] for node in nodes] == [
         "transform",
         "await_event",
@@ -1148,7 +1148,7 @@ def test_compiler_normalizes_multiple_independent_execution_routines():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 11
+    assert spec["version"] == 12
     assert [item["id"] for item in spec["execution_routines"]] == [
         "morning_summary",
         "lead_review",
@@ -1187,7 +1187,7 @@ def test_compiler_maps_legacy_execution_graph_to_primary_routine():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 11
+    assert spec["version"] == 12
     assert len(spec["execution_routines"]) == 1
     assert spec["execution_routines"][0]["id"] == "primary"
     assert spec["execution_routines"][0]["graph"] == spec["execution_graph"]
@@ -1476,7 +1476,7 @@ def test_compiler_scopes_each_routine_to_only_its_requirements():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 11
+    assert spec["version"] == 12
     assert spec["execution_routines"][0]["requirement_keys"] == [
         "source_a",
         "source_b",
@@ -1525,3 +1525,39 @@ def test_compiler_adds_action_requirement_to_routine_scope():
     spec = parse_compiler_response(response, job_brief=job_brief)
 
     assert spec["execution_routines"][0]["requirement_keys"] == ["save_result"]
+
+
+def test_compiler_preserves_safe_dynamic_api_operations_and_drops_secrets():
+    payload = {
+        "role": "Novel API worker",
+        "scope": "business",
+        "summary": "Use a customer API.",
+        "requirements": [{
+            "key": "never_seen_vendor_action",
+            "kind": "integration",
+            "purpose": "Create a vendor object",
+            "requires_connection": True,
+            "fulfillment_mode": "external_connection",
+            "integration_operations": {
+                "create_object": {
+                    "method": "POST",
+                    "endpoint": "/v7/objects",
+                    "timeout": 12,
+                    "headers": {"Authorization": "Bearer must-not-survive"},
+                },
+                "bad_absolute": {"method": "POST", "endpoint": "https://evil.example/x"},
+                "bad_method": {"method": "TRACE", "endpoint": "/trace"},
+            },
+        }],
+    }
+    spec = normalize_compiled_spec(payload, job_brief="Connect my vendor API and create objects.")
+    requirement = spec["requirements"][0]
+    assert requirement["status"] == "connection_required"
+    assert requirement["integration_operations"] == {
+        "create_object": {
+            "method": "POST",
+            "endpoint": "/v7/objects",
+            "input_mode": "json",
+            "timeout": 12.0,
+        }
+    }

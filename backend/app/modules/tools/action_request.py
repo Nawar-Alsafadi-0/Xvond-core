@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 import json
+from urllib.parse import urlencode
 
 from sqlalchemy import text
 
@@ -573,12 +574,11 @@ def _integration_call(
     if not operations and isinstance(config.get("operations"), dict):
         operations = config.get("operations") or {}
     op_config = operations.get(operation) if isinstance(operations, dict) else None
-    if not isinstance(op_config, dict):
-        op_config = destination
-    method = str(op_config.get("method") or "POST").upper()
+    effective_op_config = op_config if isinstance(op_config, dict) else destination
+    method = str(effective_op_config.get("method") or "POST").upper()
     headers = {
         "Content-Type": "application/json",
-        **(op_config.get("headers") or {}),
+        **(effective_op_config.get("headers") or {}),
     }
     if idempotency_key:
         headers.setdefault("Idempotency-Key", idempotency_key)
@@ -634,6 +634,12 @@ def _integration_call(
         if secret:
             headers.setdefault("X-Xvond-Webhook-Secret", str(secret))
     elif integration_type in {"custom_api", "pos", "crm", "erp"}:
+        if isinstance(operations, dict) and operations and not isinstance(op_config, dict):
+            return ToolResult(
+                success=False,
+                error=f"API operation '{operation}' is not configured for this connection",
+            )
+        op_config = op_config if isinstance(op_config, dict) else destination
         base_url = str(config.get("base_url") or "").strip().rstrip("/")
         endpoint = str(op_config.get("endpoint") or "").strip()
         if not base_url or not endpoint:
@@ -661,14 +667,40 @@ def _integration_call(
             ),
         )
 
+    request_payload = payload.get("details") if isinstance(payload, dict) else payload
+    input_mode = str(
+        (op_config or {}).get("input_mode") or ("query" if method == "GET" else "json")
+    ).strip().lower()
+    if input_mode not in {"json", "query", "none"}:
+        return ToolResult(success=False, error="Integration operation input mode is invalid")
+    if input_mode == "query":
+        query_items = []
+        source = request_payload if isinstance(request_payload, dict) else {}
+        for key, value in source.items():
+            if value is None:
+                continue
+            if isinstance(value, (str, int, float, bool)):
+                query_items.append((str(key), str(value)))
+            elif isinstance(value, list) and all(
+                isinstance(item, (str, int, float, bool)) for item in value
+            ):
+                query_items.extend((str(key), str(item)) for item in value)
+            else:
+                return ToolResult(
+                    success=False,
+                    error=f"Query parameter '{key}' must be scalar or a scalar list",
+                )
+        if query_items:
+            separator = "&" if "?" in url else "?"
+            url = url + separator + urlencode(query_items)
     try:
         validate_public_http_url(url)
         result = safe_http_request(
             url=url,
             method=method,
             headers=headers,
-            json_data=payload,
-            timeout=float(op_config.get("timeout") or 15),
+            json_data=request_payload if input_mode == "json" else None,
+            timeout=float((op_config or {}).get("timeout") or 15),
         )
     except Exception as exc:
         return ToolResult(success=False, error=str(exc))

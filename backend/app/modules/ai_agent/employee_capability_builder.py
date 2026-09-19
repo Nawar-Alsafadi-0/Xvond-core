@@ -370,7 +370,7 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
             # New universal employees execute their real work through the
             # compiled execution graph and use this action as a bounded side-effect
             # contract only when the graph explicitly references it.
-            "execution_plan": [] if graph_backed else legacy_plan,
+            "execution_plan": legacy_plan,
             "allowed_hosts": _grounded_https_hosts(spec),
             "job_summary": str(spec.get("summary") or "")[:1000],
             "job_brief": str(spec.get("job_brief") or "")[:2000],
@@ -988,18 +988,16 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "business_record":
             execution_status = "ready"
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "generic_capability":
-            # Graph-backed capabilities are executed by the universal graph
-            # runtime. Requiring the old four-op execution_plan here would make
-            # novel employees look unready even though their compiled graph is
-            # complete and runnable.
-            if destination.get("graph_backed") is True:
-                execution_status = "ready"
-            else:
-                execution_status = (
-                    "ready"
-                    if generic_capability_readiness(action).get("ready") is True
-                    else "setup_required"
-                )
+            # A graph action is still a real side effect. Merely referencing a
+            # capability from the graph does not create an executor for it.
+            # Only mark the action ready when its bounded internal execution
+            # contract is actually runnable. Novel graph-native work should use
+            # native graph nodes; external side effects should bind a connection.
+            execution_status = (
+                "ready"
+                if generic_capability_readiness(action).get("ready") is True
+                else "setup_required"
+            )
         elif destination.get("type") == "workflow_engine":
             execution_status = "adapter_required"
         else:

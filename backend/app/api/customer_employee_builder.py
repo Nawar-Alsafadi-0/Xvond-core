@@ -123,6 +123,7 @@ class EmployeeBuilderIntegrationBindRequest(BaseModel):
     execute_endpoint: str | None = Field(default=None, max_length=500)
     availability_endpoint: str | None = Field(default=None, max_length=500)
     cancel_endpoint: str | None = Field(default=None, max_length=500)
+    operations: dict[str, dict] = Field(default_factory=dict)
 
 
 class EmployeeBuilderSetupAnswerRequest(BaseModel):
@@ -2486,6 +2487,39 @@ def rollback_self_service_employee(
         db.close()
 
 
+def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
+    """Validate owner/API-doc supplied operations for a generic connection."""
+    result: dict[str, dict] = {}
+    if not isinstance(value, dict):
+        return result
+    for raw_name, raw in value.items():
+        name = normalize_requirement_key(raw_name)
+        if not name or not isinstance(raw, dict):
+            continue
+        method = str(raw.get("method") or "POST").strip().upper()
+        if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            raise HTTPException(400, f"Unsupported HTTP method for operation {name}")
+        endpoint = _relative_endpoint(raw.get("endpoint"), required=True)
+        try:
+            timeout = float(raw.get("timeout") or 15)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"Invalid timeout for operation {name}")
+        input_mode = str(
+            raw.get("input_mode") or ("query" if method == "GET" else "json")
+        ).strip().lower()
+        if input_mode not in {"json", "query", "none"}:
+            raise HTTPException(400, f"Invalid input mode for operation {name}")
+        result[name] = {
+            "method": method,
+            "endpoint": endpoint,
+            "input_mode": input_mode,
+            "timeout": max(1, min(timeout, 30)),
+        }
+        if len(result) >= 20:
+            break
+    return result
+
+
 def _relative_endpoint(value: str | None, *, required: bool = False) -> str | None:
     endpoint = str(value or "").strip()
     if not endpoint:
@@ -2719,12 +2753,27 @@ def bind_self_service_integration(
                 "Booking needs a two-way API so Xvond can verify availability before creating the booking",
             )
 
+        compiled_operations = requirement.get("integration_operations")
+        compiled_operations = (
+            _bounded_connection_operations(compiled_operations)
+            if isinstance(compiled_operations, dict)
+            else {}
+        )
+        supplied_operations = _bounded_connection_operations(data.operations)
         execute_required = integration_requires_operation_endpoints(
             integration.integration_type
         )
+        # A generic connector is complete when the compiler/API docs already
+        # supplied one or more concrete operations; do not force a redundant
+        # legacy /execute endpoint.
+        legacy_execute_required = (
+            execute_required
+            and not compiled_operations
+            and not supplied_operations
+        )
         execute_endpoint = _relative_endpoint(
             data.execute_endpoint,
-            required=execute_required,
+            required=legacy_execute_required,
         )
         availability_endpoint = _relative_endpoint(data.availability_endpoint)
         cancel_endpoint = _relative_endpoint(data.cancel_endpoint)
@@ -2744,6 +2793,8 @@ def bind_self_service_integration(
         operations = integration_packaged_operations(
             integration.integration_type
         )
+        operations.update(compiled_operations)
+        operations.update(supplied_operations)
         if execute_endpoint:
             operations["execute"] = {"method": "POST", "endpoint": execute_endpoint}
         if availability_endpoint:

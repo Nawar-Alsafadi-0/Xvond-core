@@ -27,8 +27,11 @@ from backend.app.modules.ai_agent.employee_compiler import normalize_compiled_sp
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
+from backend.app.modules.automation.runtime import automation_runtime
 from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.tools.business_models import ActionRequest
+from backend.app.modules.tools.action_request import _integration_call
 from backend.app.modules.tools.models import AgentToolAssignment
 from backend.app.modules.tools.executor import ToolExecutor
 from backend.app.modules.tools.workflow_action_request import WorkflowActionRequestTool
@@ -678,7 +681,7 @@ def test_self_service_graph_schedule_owns_the_full_pipeline(database):
 
 
 
-def test_novel_graph_backed_capability_is_ready_without_legacy_execution_plan(database):
+def test_novel_unbacked_graph_action_stays_setup_required(database):
     factory, _ = database
     brief = (
         "Every 60 minutes inspect a public specialist source, reason about the result, "
@@ -742,9 +745,9 @@ def test_novel_graph_backed_capability_is_ready_without_legacy_execution_plan(da
     result = api.compile_employee(1, USER)
 
     requirement = result["spec"]["requirements"][0]
-    assert requirement["execution_status"] == "ready"
+    assert requirement["execution_status"] == "setup_required"
     trigger = result["spec"]["delivery"]["graph_trigger"]
-    assert trigger["status"] == "ready"
+    assert trigger["status"] == "setup_required"
 
     with factory() as db:
         action = reveal_config(_assignment(db).config)["actions"]["never_seen_before_capability"]
@@ -752,9 +755,60 @@ def test_novel_graph_backed_capability_is_ready_without_legacy_execution_plan(da
         assert destination["graph_backed"] is True
         assert destination["delivery_mode"] == "graph"
         assert destination["execution_plan"] == []
-        workflow = db.query(AutomationWorkflow).one()
-        assert [node["type"] for node in workflow.steps[0]["graph"]["nodes"]] == ["ai", "action"]
 
+
+def test_novel_graph_native_capability_runs_without_profession_specific_code(database):
+    factory, _ = database
+    brief = "Every 60 minutes inspect data, reason about it, and remember the latest finding."
+    payload = {
+        "role": "Novel specialist worker",
+        "scope": "personal",
+        "requirements": [],
+        "permissions": [],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {
+                "type": "schedule",
+                "schedule": {
+                    "kind": "interval",
+                    "every_minutes": 60,
+                    "source_text": "Every 60 minutes",
+                },
+            },
+            "nodes": [
+                {
+                    "id": "inspect",
+                    "type": "ai",
+                    "depends_on": [],
+                    "params": {"prompt": "Inspect and reason about the supplied data."},
+                },
+                {
+                    "id": "remember",
+                    "type": "state_write",
+                    "depends_on": ["inspect"],
+                    "params": {
+                        "key": "latest_finding",
+                        "value": "$nodes.inspect.ai_response",
+                    },
+                },
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "ready"
+
+    with factory() as db:
+        workflow = db.query(AutomationWorkflow).one()
+        assert [node["type"] for node in workflow.steps[0]["graph"]["nodes"]] == ["ai", "state_write"]
 
 def test_self_service_media_generation_schedule_builds_ai_media_then_action(database):
     factory, _ = database
@@ -3310,3 +3364,157 @@ def test_routine_observability_marks_automatic_retry_as_recovering(database):
     assert recovering["failure"]["error"] == "temporary upstream failure"
     assert recovering["retry"] is None
 
+
+
+def test_graph_action_forwards_named_operation_to_connected_api(database, monkeypatch):
+    factory, _ = database
+    captured = {}
+
+    with factory() as db:
+        agent = db.query(AIAgent).filter(AIAgent.company_id == 1).first()
+        assignment = AgentToolAssignment(
+            agent_id=agent.id,
+            tool_name="action_request",
+            enabled=True,
+            config={
+                "actions": {
+                    "vendor_records": {
+                        "enabled": True,
+                        "confirmation_required": False,
+                        "_xvond_permission_mode": "automatic",
+                        "destination": {
+                            "type": "integration",
+                            "integration_id": 77,
+                            "operations": {
+                                "lookup": {"method": "GET", "endpoint": "/v1/records"}
+                            },
+                        },
+                    }
+                }
+            },
+        )
+        db.add(assignment)
+        db.commit()
+        agent_id = agent.id
+
+        def fake_call(db, context, action_type, action, arguments, operation, *, idempotency_key=None):
+            captured.update(
+                action_type=action_type,
+                operation=operation,
+                arguments=arguments,
+                idempotency_key=idempotency_key,
+            )
+            return SimpleNamespace(success=True, data={"ok": True}, error=None)
+
+        monkeypatch.setattr(
+            "backend.app.modules.automation.runtime._integration_call",
+            fake_call,
+        )
+        result = automation_runtime.execute_step(
+            db,
+            1,
+            {
+                "type": "graph",
+                "agent_id": agent_id,
+                "graph": {
+                    "version": 1,
+                    "trigger": {"type": "manual"},
+                    "nodes": [{
+                        "id": "lookup_vendor",
+                        "type": "action",
+                        "params": {
+                            "action_type": "vendor_records",
+                            "operation": "lookup",
+                            "arguments": {"query": "abc"},
+                        },
+                    }],
+                },
+            },
+            {"_xvond_execution_key": "named-op-test"},
+            run_id=1,
+            step_index=0,
+        )
+
+    assert captured["action_type"] == "vendor_records"
+    assert captured["operation"] == "lookup"
+    assert captured["arguments"]["operation"] == "lookup"
+    assert captured["arguments"]["details"]["query"] == "abc"
+    assert captured["idempotency_key"].startswith("named-op-test:")
+    assert ":graph:" in captured["idempotency_key"]
+    assert result["graph_outputs"]["lookup_vendor"]["scheduled_action_result"]["result"] == {"ok": True}
+
+
+def test_generic_api_lookup_uses_query_contract_and_fails_closed_for_unknown_operation(database, monkeypatch):
+    factory, _ = database
+    captured = {}
+
+    def fake_http(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 200, "response": "{\"ok\": true}", "truncated": False}
+
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.safe_http_request",
+        fake_http,
+    )
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.validate_public_http_url",
+        lambda url: url,
+    )
+
+    with factory() as db:
+        integration = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Novel Vendor API",
+            config={
+                "base_url": "https://api.vendor.example",
+                "validation_endpoint": "/health",
+            },
+            enabled=True,
+        )
+        db.add(integration)
+        db.commit()
+        db.refresh(integration)
+
+        action = {
+            "destination": {
+                "type": "integration",
+                "integration_id": integration.id,
+                "operations": {
+                    "lookup": {
+                        "method": "GET",
+                        "endpoint": "/v1/items",
+                        "input_mode": "query",
+                        "timeout": 8,
+                    }
+                },
+            }
+        }
+        result = _integration_call(
+            db,
+            {"company_id": 1, "agent_id": 1},
+            "vendor_items",
+            action,
+            {"details": {"q": "red shoes", "limit": 3}},
+            "lookup",
+            idempotency_key="test-key",
+        )
+        assert result.success is True
+        assert captured["method"] == "GET"
+        assert captured["json_data"] is None
+        assert "q=red+shoes" in captured["url"]
+        assert "limit=3" in captured["url"]
+
+        captured.clear()
+        missing = _integration_call(
+            db,
+            {"company_id": 1, "agent_id": 1},
+            "vendor_items",
+            action,
+            {"details": {}},
+            "delete_everything",
+            idempotency_key="test-key-2",
+        )
+        assert missing.success is False
+        assert "not configured" in str(missing.error).lower()
+        assert captured == {}

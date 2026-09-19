@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from datetime import datetime
 from typing import Any
 
@@ -178,6 +179,9 @@ def graph_contract_errors(
                 errors.append(f"{node_id}: action node requires action_type")
             if not graph_agent_id and not params.get("agent_id"):
                 errors.append(f"{node_id}: action node requires agent_id")
+            operation = str(params.get("operation") or "execute").strip().lower()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,79}", operation):
+                errors.append(f"{node_id}: action node operation is invalid")
 
         elif node_type in {"http_get_json", "web_fetch"}:
             if not str(params.get("url") or "").strip():
