@@ -2060,11 +2060,11 @@ def test_webhook_config_selects_requested_routine(database, monkeypatch):
     )
 
     with pytest.raises(HTTPException) as exc:
-        api.customer_employee_webhook(1, None, USER)
+        api.customer_employee_webhook(1, USER)
     assert exc.value.status_code == 409
     assert "multiple webhook routines" in str(exc.value.detail)
 
-    result = api.customer_employee_webhook(1, "beta", USER)
+    result = api.customer_employee_webhook(1, USER, "beta")
 
     assert result["workflow_id"] == 202
     assert result["routine_id"] == "beta"
