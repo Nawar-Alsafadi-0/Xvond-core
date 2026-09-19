@@ -4821,6 +4821,7 @@ def customer_employee_automation_runs(
         workflow_ids = []
         workflow_names = {}
         workflow_routines = {}
+        workflow_retryable = {}
         for workflow in workflows:
             config = workflow.trigger_config if isinstance(workflow.trigger_config, dict) else {}
             if (
@@ -4835,6 +4836,11 @@ def customer_employee_automation_runs(
                     ),
                     "routine_name": config.get("_xvond_routine_name"),
                 }
+                workflow_retryable[workflow.id] = bool(
+                    agent.enabled
+                    and workflow.enabled
+                    and config.get("_xvond_graph_trigger") is True
+                )
 
         if not workflow_ids:
             return {"agent_id": agent.id, "runs": []}
@@ -4866,11 +4872,143 @@ def customer_employee_automation_runs(
                     "input_data": run.input_data,
                     "output_data": run.output_data,
                     "error_message": run.error_message,
+                    "retry_of_run_id": (
+                        (run.input_data or {}).get("_xvond_retry_of_run_id")
+                        if isinstance(run.input_data, dict)
+                        else None
+                    ),
+                    "can_retry": bool(
+                        run.status == "failed"
+                        and workflow_retryable.get(run.workflow_id)
+                        and isinstance(run.input_data, dict)
+                        and str(
+                            (run.input_data or {}).get("_xvond_execution_key") or ""
+                        ).strip()
+                    ),
                     "created_at": run.created_at,
                     "finished_at": run.finished_at,
                 }
                 for run in runs
             ],
+        }
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/automation-runs/{run_id}/retry")
+def customer_employee_retry_failed_run(
+    agent_id: int,
+    run_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Replay a failed current routine with the original stable execution identity."""
+
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        company = _company_or_404(db, company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Automation retry is available only for Self-Service employees",
+            )
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+        if not agent.enabled:
+            raise HTTPException(409, "Launch this employee before retrying live work")
+
+        run = (
+            db.query(AutomationRun)
+            .filter(
+                AutomationRun.id == int(run_id),
+                AutomationRun.company_id == company_id,
+            )
+            .first()
+        )
+        if run is None:
+            raise HTTPException(404, "Automation run not found")
+        if run.status != "failed":
+            raise HTTPException(409, "Only failed automation runs can be retried")
+
+        workflow = (
+            db.query(AutomationWorkflow)
+            .filter(
+                AutomationWorkflow.id == run.workflow_id,
+                AutomationWorkflow.company_id == company_id,
+                AutomationWorkflow.enabled.is_(True),
+            )
+            .first()
+        )
+        if workflow is None:
+            raise HTTPException(
+                409,
+                "The workflow for this run is no longer active",
+            )
+        trigger_config = (
+            workflow.trigger_config
+            if isinstance(workflow.trigger_config, dict)
+            else {}
+        )
+        if (
+            trigger_config.get("_xvond_source") != "self_service_employee"
+            or int(trigger_config.get("_xvond_agent_id") or 0) != int(agent.id)
+            or trigger_config.get("_xvond_graph_trigger") is not True
+        ):
+            raise HTTPException(
+                409,
+                "This run does not belong to the current employee routine",
+            )
+
+        retry_input = (
+            deepcopy(run.input_data)
+            if isinstance(run.input_data, dict)
+            else {}
+        )
+        execution_key = str(
+            retry_input.get("_xvond_execution_key") or ""
+        ).strip()
+        if not execution_key:
+            raise HTTPException(
+                409,
+                "This historical run has no stable execution key and cannot be retried safely",
+            )
+
+        retry_input["_xvond_execution_key"] = execution_key
+        retry_input["_xvond_retry_of_run_id"] = int(run.id)
+
+        try:
+            retried = automation_runtime.execute(
+                db=db,
+                company_id=company_id,
+                workflow=workflow,
+                input_data=retry_input,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+        return {
+            "status": retried.status,
+            "retry_of_run_id": run.id,
+            "run_id": retried.id,
+            "workflow_id": retried.workflow_id,
+            "routine_id": trigger_config.get("_xvond_routine_id") or "primary",
+            "routine_name": trigger_config.get("_xvond_routine_name") or workflow.name,
+            "execution_key_reused": True,
+            "output_data": retried.output_data,
+            "error_message": retried.error_message,
+            "created_at": retried.created_at,
+            "finished_at": retried.finished_at,
         }
     finally:
         db.close()
