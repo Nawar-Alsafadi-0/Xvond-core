@@ -229,7 +229,7 @@ Use this shape:
       "primitives": ["workflow_engine"],
       "schedule": {"kind":"interval|once|daily|weekly|monthly","every_minutes":60,"at":"2026-10-01T09:00:00+04:00","hour":8,"minute":0,"weekdays":[0,1,2,3,4],"day_of_month":1,"timezone":"Asia/Muscat","source_text":"exact cadence/time words copied from the customer Job Brief"},
       "runtime_inputs": {"url":"https://example.com/data","target_price":100},
-      "integration_operations": {"execute":{"method":"POST","endpoint":"/relative/path"}},
+      "integration_operations": {"execute":{"method":"POST","endpoint":"/relative/path","input_mode":"json"}},
       "execution_plan": [
         {"id":"fetch","op":"http_get_json","url_field":"url"},
         {"id":"value","op":"extract","source":"fetch","path":"price"},
@@ -320,7 +320,7 @@ Rules:
 - requirement.execution_plan exists only for backward compatibility with older compiled employees. For newly compiled work, leave it empty unless the requested job is genuinely a tiny read-only fetch/extract/compare/internal-notify task and no richer graph behavior is required.
 - A novel capability must become executable graph composition, not merely a named requirement. If it needs reasoning, browsing, transformation, iteration, state, waiting, media, an external action, or multiple steps, represent those steps explicitly in execution_graph/execution_routines.
 - When the requested job needs a capability that cannot execute with native graph nodes alone, represent the missing side effect as an action requirement and make the graph depend on that action. Ask for a customer connection only when external account access/credentials are genuinely required.
-- For an external API/account requirement, use fulfillment_mode=external_connection and emit integration_operations when the operation paths/methods are explicitly known from the customer's brief or supplied API documentation. Operation names are stable snake_case identifiers such as execute, lookup, create_order, publish, cancel. Endpoints MUST be relative paths and methods may be GET, POST, PUT, PATCH or DELETE. Never put credentials, Authorization headers, API keys, cookies or secrets in integration_operations. Graph action nodes for that requirement may set params.operation to the matching operation name; omit it only for the conventional execute operation.
+- For an external API/account requirement, use fulfillment_mode=external_connection and emit integration_operations when the operation paths/methods are explicitly known from the customer's brief or supplied API documentation. Operation names are stable snake_case identifiers such as execute, lookup, create_order, publish, cancel. Endpoints MUST be relative paths and methods may be GET, POST, PUT, PATCH or DELETE. Set input_mode to query for URL query parameters, json for a JSON request body, or none when the operation takes no request data; GET defaults to query and other methods default to json. Never put credentials, Authorization headers, API keys, cookies or secrets in integration_operations. Graph action nodes for that requirement may set params.operation to the matching operation name; omit it only for the conventional execute operation.
 - Do not invent API endpoints. If the endpoint/API contract is not known, leave integration_operations empty and request the API connection/documentation needed to finish the build.
 - execution_plan is declarative legacy data, never code. Do not emit Python, JavaScript, shell commands, SQL, arbitrary HTTP methods, headers, credentials or secrets.
 - http_get_json reads an HTTPS JSON endpoint; web_fetch/browser cover public web work; action nodes perform authorized side effects through requirement contracts.
@@ -858,9 +858,15 @@ def _normalize_integration_operations(value: Any) -> dict[str, dict]:
             or ".." in endpoint.split("/")
         ):
             continue
+        input_mode = str(
+            raw.get("input_mode") or ("query" if method == "GET" else "json")
+        ).strip().lower()
+        if input_mode not in {"json", "query", "none"}:
+            continue
         operation = {
             "method": method,
             "endpoint": "/" + endpoint.lstrip("/"),
+            "input_mode": input_mode,
         }
         try:
             timeout = float(raw.get("timeout") or 15)
