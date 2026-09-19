@@ -927,7 +927,7 @@ def test_compiler_preserves_generic_durable_wait_node():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 7
+    assert spec["version"] == 8
     assert [node["type"] for node in nodes] == ["transform", "wait", "ai"]
     assert nodes[1]["params"]["duration"] == 2
     assert nodes[1]["params"]["unit"] == "days"
