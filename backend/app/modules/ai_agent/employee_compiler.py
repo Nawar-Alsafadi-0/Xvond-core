@@ -433,7 +433,7 @@ def _normalize_schedule_spec(value: Any, *, job_brief: str) -> dict | None:
         if not at:
             return None
         try:
-            parsed = __import__("datetime").datetime.fromisoformat(at.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(at.replace("Z", "+00:00"))
         except ValueError:
             return None
         if parsed.tzinfo is None and not _bounded_text(value.get("timezone"), limit=100):
