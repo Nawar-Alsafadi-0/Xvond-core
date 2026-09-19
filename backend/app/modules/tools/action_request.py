@@ -574,10 +574,11 @@ def _integration_call(
     if not operations and isinstance(config.get("operations"), dict):
         operations = config.get("operations") or {}
     op_config = operations.get(operation) if isinstance(operations, dict) else None
-    method = str((op_config or destination).get("method") or "POST").upper()
+    effective_op_config = op_config if isinstance(op_config, dict) else destination
+    method = str(effective_op_config.get("method") or "POST").upper()
     headers = {
         "Content-Type": "application/json",
-        **(op_config.get("headers") or {}),
+        **(effective_op_config.get("headers") or {}),
     }
     if idempotency_key:
         headers.setdefault("Idempotency-Key", idempotency_key)
