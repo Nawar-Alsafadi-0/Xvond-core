@@ -3153,3 +3153,81 @@ def test_customer_retry_requires_latest_failed_safe_run(database, monkeypatch):
     assert exc.value.status_code == 409
     assert exc.value.detail["message"] == "A newer routine run exists. Refresh before retrying."
 
+def test_routine_observability_marks_automatic_retry_as_recovering(database):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live"
+        company.active = True
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+
+        workflow = AutomationWorkflow(
+            id=801,
+            company_id=1,
+            name="Recovering routine",
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "recovering",
+                "_xvond_routine_name": "Recovering",
+                "schedule": {"kind": "interval", "every_minutes": 5},
+            },
+            steps=[],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.flush()
+        run = AutomationRun(
+            company_id=1,
+            workflow_id=workflow.id,
+            status="waiting_retry",
+            input_data={"_xvond_execution_key": "recovering-run"},
+            output_data={
+                "trace": {
+                    "spans": [
+                        {
+                            "step_index": 0,
+                            "step_type": "graph",
+                            "phase": "execute",
+                            "status": "failed",
+                            "node_id": "fetch_price",
+                            "duration_ms": 45.0,
+                            "error": "temporary upstream failure",
+                        }
+                    ]
+                },
+                "retry": {
+                    "status": "scheduled",
+                    "attempt": 1,
+                    "max_attempts": 2,
+                },
+            },
+            error_message="temporary upstream failure",
+            resume_at=datetime(2026, 9, 19, 13, 0),
+        )
+        db.add(run)
+        db.commit()
+
+    result = api.customer_employee_routines(1, USER)
+    recovering = next(
+        item for item in result["routines"]
+        if item["routine_id"] == "recovering"
+    )
+
+    assert recovering["operational_state"] == "recovering"
+    assert recovering["last_run"]["status"] == "waiting_retry"
+    assert recovering["waiting"] == {
+        "type": "retry",
+        "resume_at": "2026-09-19T13:00:00Z",
+        "attempt": 1,
+        "max_attempts": 2,
+        "last_error": "temporary upstream failure",
+    }
+    assert recovering["failure"]["node_id"] == "fetch_price"
+    assert recovering["failure"]["error"] == "temporary upstream failure"
+    assert recovering["retry"] is None
+

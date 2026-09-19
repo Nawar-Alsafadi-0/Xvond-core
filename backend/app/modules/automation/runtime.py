@@ -260,6 +260,9 @@ def _approval_checkpoint_matches(
 
 
 RETRY_CHECKPOINT_VERSION = 1
+AUTO_SAFE_RETRY_MAX_ATTEMPTS = 2
+AUTO_SAFE_RETRY_BASE_SECONDS = 30
+AUTO_SAFE_RETRY_MAX_DELAY_SECONDS = 300
 _RETRY_TRANSIENT_STATE_KEYS = {
     "_xvond_graph_resume",
     "_xvond_retry_root_step_index",
@@ -449,6 +452,73 @@ def _persist_graph_retry_checkpoint(
     db.commit()
 
 
+def _automatic_retry_plan(
+    db,
+    *,
+    run: AutomationRun,
+    output: dict,
+    now: datetime,
+) -> dict | None:
+    checkpoint = (
+        output.get("retry_checkpoint")
+        if isinstance(output.get("retry_checkpoint"), dict)
+        else None
+    )
+    if not checkpoint or not bool(checkpoint.get("safe")):
+        return None
+
+    workflow = db.get(AutomationWorkflow, int(run.workflow_id))
+    if workflow is None or not workflow.enabled:
+        return None
+    trigger_config = (
+        workflow.trigger_config
+        if isinstance(workflow.trigger_config, dict)
+        else {}
+    )
+    if (
+        trigger_config.get("_xvond_source") != "self_service_employee"
+        or trigger_config.get("_xvond_graph_trigger") is not True
+        or str(workflow.trigger_type or "").strip().lower() == "manual"
+    ):
+        return None
+
+    try:
+        configured_max = int(
+            trigger_config.get(
+                "_xvond_auto_retry_max_attempts",
+                AUTO_SAFE_RETRY_MAX_ATTEMPTS,
+            )
+        )
+    except (TypeError, ValueError):
+        configured_max = AUTO_SAFE_RETRY_MAX_ATTEMPTS
+    max_attempts = max(0, min(configured_max, 5))
+
+    attempts = int(output.get("retry_attempts") or 0)
+    if max_attempts <= 0 or attempts >= max_attempts:
+        return None
+
+    try:
+        configured_base = int(
+            trigger_config.get(
+                "_xvond_auto_retry_base_seconds",
+                AUTO_SAFE_RETRY_BASE_SECONDS,
+            )
+        )
+    except (TypeError, ValueError):
+        configured_base = AUTO_SAFE_RETRY_BASE_SECONDS
+    base_seconds = max(10, min(configured_base, 300))
+    delay_seconds = min(
+        base_seconds * (2 ** attempts),
+        AUTO_SAFE_RETRY_MAX_DELAY_SECONDS,
+    )
+    return {
+        "attempt": attempts + 1,
+        "max_attempts": max_attempts,
+        "delay_seconds": delay_seconds,
+        "resume_at": now + timedelta(seconds=delay_seconds),
+    }
+
+
 def _store_failed_run(
     db,
     *,
@@ -482,13 +552,14 @@ def _store_failed_run(
         ):
             last["node_id"] = checkpoint.get("failed_node_id") or None
 
+    failed_at = _utcnow_naive()
     run.status = "failed"
     run.resume_at = None
     run.resume_event_name = None
     run.error_message = error_message
-    run.finished_at = _utcnow_naive()
+    run.finished_at = failed_at
     trace["status"] = "failed"
-    trace["finished_at"] = _trace_iso(run.finished_at)
+    trace["finished_at"] = _trace_iso(failed_at)
 
     output = {
         **persisted,
@@ -499,6 +570,35 @@ def _store_failed_run(
     }
     if isinstance(extra_output, dict):
         output.update(deepcopy(extra_output))
+
+    retry_plan = _automatic_retry_plan(
+        db,
+        run=run,
+        output=output,
+        now=failed_at,
+    )
+    if retry_plan is not None:
+        run.status = "waiting_retry"
+        run.resume_at = retry_plan["resume_at"]
+        run.finished_at = None
+        trace["status"] = "waiting_retry"
+        trace["finished_at"] = None
+        existing_retry = (
+            output.get("retry")
+            if isinstance(output.get("retry"), dict)
+            else {}
+        )
+        output["retry"] = {
+            **existing_retry,
+            "status": "scheduled",
+            "attempt": retry_plan["attempt"],
+            "max_attempts": retry_plan["max_attempts"],
+            "delay_seconds": retry_plan["delay_seconds"],
+            "resume_at": _trace_iso(retry_plan["resume_at"]),
+            "last_error": error_message,
+        }
+        output["trace"] = deepcopy(trace)
+
     run.output_data = output
     db.commit()
     db.refresh(run)
@@ -1089,8 +1189,8 @@ class AutomationRuntime:
             raise ValueError("Failed run does not belong to company")
         if run.workflow_id != workflow.id:
             raise ValueError("Failed run does not belong to workflow")
-        if run.status != "failed":
-            raise ValueError("Automation run is not failed")
+        if run.status not in {"failed", "waiting_retry"}:
+            raise ValueError("Automation run is not in a retryable failed state")
         if not workflow.enabled:
             raise ValueError("Automation workflow is disabled")
 

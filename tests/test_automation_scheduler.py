@@ -4130,3 +4130,232 @@ def test_failed_external_action_retry_is_blocked_when_outcome_is_uncertain(monke
 
     engine.dispose()
 
+def test_safe_background_failure_is_retried_automatically_on_same_run(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = lambda: Session(engine, autoflush=False)
+    calls = {"fetch": 0}
+
+    monkeypatch.setattr(scheduler, "SessionLocal", factory)
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_request(**kwargs):
+        calls["fetch"] += 1
+        if calls["fetch"] == 1:
+            raise ValueError("temporary upstream failure")
+        return {
+            "status_code": 200,
+            "response": '{"value":42}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+
+    with factory() as db:
+        db.add(
+            Company(
+                id=1,
+                name="Automatic Recovery",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Background Worker",
+                system_prompt="work",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Safe background routine",
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "monitor",
+                "schedule": {"kind": "interval", "every_minutes": 5},
+            },
+            steps=[
+                {
+                    "type": "graph",
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "fetch",
+                                "type": "http_get_json",
+                                "depends_on": [],
+                                "params": {"url": "https://example.com/data"},
+                            }
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        with pytest.raises(ValueError, match="temporary upstream failure"):
+            automation_runtime_module.AutomationRuntime().execute(
+                db=db,
+                company_id=1,
+                workflow=workflow,
+                input_data={"_xvond_execution_key": "automatic-retry"},
+            )
+
+        run = db.query(AutomationRun).one()
+        original_run_id = run.id
+        assert run.status == "waiting_retry"
+        assert run.resume_at is not None
+        assert run.finished_at is None
+        assert run.output_data["retry"]["status"] == "scheduled"
+        assert run.output_data["retry"]["attempt"] == 1
+        assert run.output_data["retry"]["max_attempts"] == 2
+        due_at = run.resume_at
+
+    result = scheduler.run_due_retry_run(original_run_id, now=due_at)
+
+    assert result["run_id"] == original_run_id
+    assert result["status"] == "success"
+    assert calls["fetch"] == 2
+    with factory() as db:
+        run = db.get(AutomationRun, original_run_id)
+        assert run.status == "success"
+        assert run.resume_at is None
+        assert run.output_data["retry_attempts"] == 1
+        assert run.output_data["retry"]["status"] == "succeeded"
+
+    engine.dispose()
+
+
+def test_automatic_safe_retry_stops_after_bounded_attempts(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = lambda: Session(engine, autoflush=False)
+    calls = {"fetch": 0}
+
+    monkeypatch.setattr(scheduler, "SessionLocal", factory)
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def always_fail(**kwargs):
+        calls["fetch"] += 1
+        raise ValueError("upstream remains unavailable")
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        always_fail,
+    )
+
+    with factory() as db:
+        db.add(
+            Company(
+                id=1,
+                name="Bounded Recovery",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Background Worker",
+                system_prompt="work",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Bounded background routine",
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "monitor",
+                "schedule": {"kind": "interval", "every_minutes": 5},
+            },
+            steps=[
+                {
+                    "type": "graph",
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "fetch",
+                                "type": "http_get_json",
+                                "depends_on": [],
+                                "params": {"url": "https://example.com/data"},
+                            }
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        with pytest.raises(ValueError, match="upstream remains unavailable"):
+            automation_runtime_module.AutomationRuntime().execute(
+                db=db,
+                company_id=1,
+                workflow=workflow,
+                input_data={"_xvond_execution_key": "bounded-auto-retry"},
+            )
+        run = db.query(AutomationRun).one()
+        run_id = run.id
+        first_due = run.resume_at
+        assert run.status == "waiting_retry"
+        assert run.output_data["retry"]["attempt"] == 1
+
+    first_retry = scheduler.run_due_retry_run(run_id, now=first_due)
+    assert first_retry["status"] == "waiting_retry"
+    with factory() as db:
+        run = db.get(AutomationRun, run_id)
+        second_due = run.resume_at
+        assert run.output_data["retry_attempts"] == 1
+        assert run.output_data["retry"]["attempt"] == 2
+        assert second_due is not None
+        assert second_due > first_due
+
+    second_retry = scheduler.run_due_retry_run(run_id, now=second_due)
+    assert second_retry["status"] == "failed"
+    assert calls["fetch"] == 3
+    with factory() as db:
+        run = db.get(AutomationRun, run_id)
+        assert run.status == "failed"
+        assert run.resume_at is None
+        assert run.finished_at is not None
+        assert run.output_data["retry_attempts"] == 2
+        assert run.output_data["retry"]["status"] == "failed"
+
+    engine.dispose()
+
