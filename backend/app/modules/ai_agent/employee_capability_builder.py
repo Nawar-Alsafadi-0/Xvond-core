@@ -987,11 +987,18 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "business_record":
             execution_status = "ready"
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "generic_capability":
-            execution_status = (
-                "ready"
-                if generic_capability_readiness(action).get("ready") is True
-                else "setup_required"
-            )
+            # Graph-backed capabilities are executed by the universal graph
+            # runtime. Requiring the old four-op execution_plan here would make
+            # novel employees look unready even though their compiled graph is
+            # complete and runnable.
+            if destination.get("graph_backed") is True:
+                execution_status = "ready"
+            else:
+                execution_status = (
+                    "ready"
+                    if generic_capability_readiness(action).get("ready") is True
+                    else "setup_required"
+                )
         elif destination.get("type") == "workflow_engine":
             execution_status = "adapter_required"
         else:
