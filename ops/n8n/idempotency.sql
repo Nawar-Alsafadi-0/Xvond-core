@@ -18,6 +18,30 @@ CREATE INDEX IF NOT EXISTS ix_xvond_workflow_idempotency_request_id
 CREATE INDEX IF NOT EXISTS ix_xvond_workflow_idempotency_company_action
     ON xvond_workflow_idempotency (company_id, action);
 
+-- Workflow-plane managed channel registry. Provider credentials never enter the
+-- Xvond Core database; Core sends them once to the private provisioning API and
+-- provider workflows resolve them inside the isolated workflow database.
+CREATE TABLE IF NOT EXISTS xvond_managed_channel_routes (
+    company_id BIGINT NOT NULL,
+    connection_key TEXT NOT NULL,
+    channel_id BIGINT NOT NULL,
+    agent_id BIGINT NOT NULL,
+    channel_type TEXT NOT NULL,
+    provider_type TEXT NOT NULL,
+    provider_url TEXT NOT NULL,
+    provider_secret TEXT NOT NULL,
+    provider_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    provider_account_label TEXT,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (company_id, connection_key),
+    UNIQUE (channel_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_xvond_managed_channel_routes_company_type
+    ON xvond_managed_channel_routes (company_id, channel_type);
+
 -- Atomic claim pattern:
 -- INSERT ... ON CONFLICT DO NOTHING. If no row is inserted, read the existing row.
 -- completed => return the stored prior result without calling the provider again.

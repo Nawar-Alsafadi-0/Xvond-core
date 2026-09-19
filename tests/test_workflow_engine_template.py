@@ -103,8 +103,14 @@ def test_universal_channel_send_is_routed_by_xvond_connection_key():
     assert channel["side_effect"] is True
     assert "connection_key" in channel["required_data"]
     assert "external_contact_id" in channel["required_data"]
-    assert "XVOND_CHANNEL_ROUTES_JSON" in code
-    assert "channel_provider" in code
+    assert "channel_registry_lookup" in code
+    assert "channel_provision" in code
+    payload = json.loads(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    nodes = {node["name"]: node for node in payload["nodes"]}
+    assert "xvond_managed_channel_routes" in nodes["Lookup Channel Route"]["parameters"]["query"]
+    assert nodes["Execute Channel Provider"]["parameters"]["url"] == "={{ $json.provider_url }}"
+    lookup_code = nodes["Normalize Channel Route Lookup"]["parameters"]["jsCode"]
+    assert "_dispatch:'channel_provider'" in lookup_code
     assert "channel.send" in code
     assert contracts["policy"]["channel_credentials_live_in_workflow_engine"] is True
     assert contracts["policy"]["channel_routes_are_tenant_scoped"] is True
