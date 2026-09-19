@@ -166,6 +166,28 @@
             `;
         }
 
+        if (type === "provide_discovery_access") {
+            const encodedKey = encodeURIComponent(String(action?.key || ""));
+            const fields = Array.isArray(action?.fields) ? action.fields : [];
+            return `
+                <div class="employee-builder-setup-answer" data-discovery-access="${encodedKey}">
+                    <strong>${escapeHtml(action?.label || "Authorize discovered API")}</strong>
+                    ${action?.detail ? `<p class="muted">${escapeHtml(action.detail)}</p>` : ""}
+                    ${fields.map(field => {
+                        const fieldKey = encodeURIComponent(String(field?.key || ""));
+                        return `
+                            <label>
+                                <span>${escapeHtml(field?.label || field?.key || "Credential")}</span>
+                                <input type="${escapeHtml(field?.type || "password")}" data-discovery-access-field="${fieldKey}" autocomplete="off">
+                            </label>
+                        `;
+                    }).join("")}
+                    <button type="button" data-save-discovery-access="${encodedKey}">Authorize and continue</button>
+                    <div class="error" data-discovery-access-error="${encodedKey}"></div>
+                </div>
+            `;
+        }
+
         if (type === "provide_input") {
             const encodedKey = encodeURIComponent(String(action?.key || ""));
             const fields = Array.isArray(action?.fields) ? action.fields : [];
@@ -1434,6 +1456,38 @@
                     await loadEmployeeBuilder();
                 } catch (err) {
                     if (error) error.textContent = err?.message || "Could not connect this system.";
+                } finally {
+                    if (document.body.contains(button)) button.disabled = false;
+                }
+            });
+        });
+
+        document.querySelectorAll("[data-save-discovery-access]").forEach(button => {
+            button.addEventListener("click", async () => {
+                if (button.disabled) return;
+                const encodedKey = String(button.dataset.saveDiscoveryAccess || "");
+                const key = decodeURIComponent(encodedKey);
+                const wrapper = button.closest("[data-discovery-access]");
+                const error = wrapper?.querySelector(`[data-discovery-access-error="${encodedKey}"]`);
+                const payload = {};
+                for (const input of Array.from(wrapper?.querySelectorAll("[data-discovery-access-field]") || [])) {
+                    const fieldKey = decodeURIComponent(String(input.dataset.discoveryAccessField || ""));
+                    payload[fieldKey] = String(input.value || "").trim();
+                }
+                if (Object.values(payload).some(value => !value)) {
+                    if (error) error.textContent = "Enter the required credential.";
+                    return;
+                }
+                button.disabled = true;
+                if (error) error.textContent = "";
+                try {
+                    await api(
+                        `/customer/employee-builder/${Number(employee.agent_id)}/discover/${encodeURIComponent(key)}/access`,
+                        {method: "POST", body: JSON.stringify(payload)}
+                    );
+                    await loadEmployeeBuilder();
+                } catch (err) {
+                    if (error) error.textContent = err?.message || "Could not validate this credential.";
                 } finally {
                     if (document.body.contains(button)) button.disabled = false;
                 }

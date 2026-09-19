@@ -152,3 +152,37 @@ def test_public_api_probe_refuses_write_only_contract(monkeypatch):
             },
         }
     ) is None
+
+
+def test_authenticated_api_probe_applies_bearer_without_writes(monkeypatch):
+    captured = []
+
+    def fake_http(**kwargs):
+        captured.append(kwargs)
+        return {"status_code": 200, "response": "{}", "truncated": False}
+
+    monkeypatch.setattr(discovery, "safe_http_request", fake_http)
+    evidence = discovery.api_connection_probe(
+        {
+            "base_url": "https://api.example.com",
+            "operations": {
+                "create": {
+                    "method": "POST",
+                    "endpoint": "/orders",
+                    "path_params": [],
+                    "required_query_params": [],
+                },
+                "me": {
+                    "method": "GET",
+                    "endpoint": "/me",
+                    "path_params": [],
+                    "required_query_params": [],
+                },
+            },
+        },
+        auth_config={"auth_type": "bearer", "api_key": "secret-token"},
+    )
+    assert evidence["validated"] is True
+    assert captured[0]["method"] == "GET"
+    assert captured[0]["url"] == "https://api.example.com/me"
+    assert captured[0]["headers"]["Authorization"] == "Bearer secret-token"

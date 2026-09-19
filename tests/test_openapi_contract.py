@@ -207,3 +207,34 @@ def test_openapi_discovery_rejects_cross_port_execution_base(monkeypatch):
     )
     contract = discover_openapi_contract("https://api.vendor.example/v1")
     assert contract["base_url"] is None
+
+
+def test_openapi_extracts_generic_auth_schemes():
+    document = {
+        "openapi": "3.0.3",
+        "info": {"title": "Protected API"},
+        "servers": [{"url": "https://api.example.com"}],
+        "components": {
+            "securitySchemes": {
+                "BearerAuth": {"type": "http", "scheme": "bearer"},
+                "PartnerKey": {"type": "apiKey", "in": "header", "name": "X-Partner-Key"},
+                "BasicAuth": {"type": "http", "scheme": "basic"},
+            }
+        },
+        "paths": {
+            "/me": {
+                "get": {
+                    "operationId": "getMe",
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
+    contract = normalize_openapi_document(document)
+    assert {"name": "BearerAuth", "auth_type": "bearer"} in contract["auth_schemes"]
+    assert {
+        "name": "PartnerKey",
+        "auth_type": "api_key_header",
+        "api_key_name": "X-Partner-Key",
+    } in contract["auth_schemes"]
+    assert {"name": "BasicAuth", "auth_type": "basic"} in contract["auth_schemes"]
