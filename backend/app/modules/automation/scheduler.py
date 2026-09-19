@@ -456,6 +456,24 @@ def run_due_workflow(workflow_id: int, *, now: datetime | None = None) -> dict:
                 db.rollback()
                 return {"workflow_id": workflow.id, "status": "employee_not_live"}
 
+        recovering_run = (
+            db.query(AutomationRun)
+            .filter(
+                AutomationRun.workflow_id == workflow.id,
+                AutomationRun.status == "waiting_retry",
+            )
+            .order_by(AutomationRun.id.desc())
+            .first()
+        )
+        if recovering_run is not None:
+            db.rollback()
+            return {
+                "workflow_id": workflow.id,
+                "status": "recovery_pending",
+                "run_id": recovering_run.id,
+                "resume_at": recovering_run.resume_at,
+            }
+
         raw_schedule = _schedule_payload(workflow)
         try:
             schedule = normalize_schedule_config(raw_schedule)
