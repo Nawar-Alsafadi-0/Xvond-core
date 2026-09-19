@@ -3447,6 +3447,175 @@ def deactivate_self_service_employee(
         db.close()
 
 
+@router.post("/{agent_id}/preview-routine")
+def preview_employee_routine(
+    agent_id: int,
+    data: EmployeeBuilderRoutinePreviewRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Safely execute one compiled routine without business side effects."""
+
+    if len(data.input_data) > 100:
+        raise HTTPException(400, "Routine preview input has too many fields")
+    if len(data.simulated_outputs) > 100 or len(data.event_payloads) > 100:
+        raise HTTPException(400, "Routine preview simulation has too many node values")
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Routine preview is available only for Self-Service employees",
+            )
+        if not _has_ai_agents_entitlement(db, company.id):
+            raise HTTPException(
+                403,
+                detail={
+                    "message": "Subscribe to preview executable employee routines",
+                    "subscription_required": True,
+                },
+            )
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+
+        settings_value = deepcopy(dict(config.settings or {}))
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        target = pending if isinstance(pending, dict) else builder
+        spec = target.get("compiled_spec")
+        if not isinstance(spec, dict):
+            raise HTTPException(409, "Build the employee before previewing a routine")
+
+        routines = _compiled_execution_routines(spec)
+        if not routines:
+            raise HTTPException(
+                409,
+                "This employee has no executable routine; use the chat preview instead",
+            )
+
+        requested_id = normalize_requirement_key(data.routine_id)
+        routine = next(
+            (item for item in routines if item.get("id") == requested_id),
+            None,
+        )
+        if routine is None:
+            raise HTTPException(
+                404,
+                detail={
+                    "message": "Employee routine not found",
+                    "available_routines": [
+                        {
+                            "routine_id": item.get("id"),
+                            "routine_name": item.get("name"),
+                        }
+                        for item in routines
+                    ],
+                },
+            )
+
+        graph = normalize_execution_graph(routine.get("graph") or {})
+        errors = graph_contract_errors(graph, graph_agent_id=agent.id)
+        if errors:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "Routine execution contract is invalid",
+                    "routine_id": requested_id,
+                    "errors": errors,
+                },
+            )
+
+        defaults = _routine_preview_defaults(spec, routine)
+        preview_input = {
+            **defaults,
+            **deepcopy(data.input_data),
+        }
+        compiled_at = str(target.get("compiled_at") or "").strip()
+        preview_state = {
+            **preview_input,
+            "_xvond_preview": True,
+            "_xvond_execution_key": (
+                f"preview:{company.id}:{agent.id}:{requested_id}:{compiled_at or 'unversioned'}"
+            ),
+            "_xvond_preview_outputs": deepcopy(data.simulated_outputs),
+            "_xvond_preview_event_payloads": deepcopy(data.event_payloads),
+        }
+
+        result = automation_runtime.execute_step(
+            db,
+            company.id,
+            {
+                "type": "graph",
+                "agent_id": agent.id,
+                "graph": graph,
+            },
+            preview_state,
+            run_id=0,
+            step_index=0,
+        )
+
+        required, tested, complete = _routine_preview_evidence(
+            target,
+            spec=spec,
+            routine_id=requested_id,
+            record=True,
+        )
+        if isinstance(pending, dict):
+            builder["pending_revision"] = target
+            test_target = "pending_revision"
+        else:
+            builder = target
+            test_target = "current_build"
+
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.commit()
+
+        return {
+            "status": "previewed",
+            "agent_id": agent.id,
+            "routine_id": requested_id,
+            "routine_name": routine.get("name"),
+            "test_target": test_target,
+            "result": result,
+            "required_routines": required,
+            "tested_routines": tested,
+            "current_build_tested": complete,
+            "safety": {
+                "business_actions_executed": False,
+                "notifications_persisted": False,
+                "state_mutated": False,
+                "interactive_browser_executed": False,
+                "media_generated": False,
+            },
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @router.post("/{agent_id}/test")
 def test_draft_employee(
     agent_id: int,
@@ -3532,10 +3701,17 @@ def test_draft_employee(
                 response=response,
             )
             now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-            pending["last_tested_at"] = now_iso
-            pending["last_tested_compiled_at"] = pending.get("compiled_at")
+            pending["chat_tested_at"] = now_iso
+            pending["chat_tested_compiled_at"] = pending.get("compiled_at")
             pending["test_count"] = int(pending.get("test_count") or 0) + 1
-            pending["status"] = "tested"
+            if _compiled_execution_routines(pending_spec):
+                pending.pop("last_tested_at", None)
+                pending.pop("last_tested_compiled_at", None)
+                pending["status"] = "partially_tested"
+            else:
+                pending["last_tested_at"] = now_iso
+                pending["last_tested_compiled_at"] = pending.get("compiled_at")
+                pending["status"] = "tested"
             builder["pending_revision"] = pending
             settings_value["employee_builder"] = builder
             config.settings = settings_value
@@ -3623,9 +3799,20 @@ def test_draft_employee(
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
         now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-        builder["last_tested_at"] = now_iso
-        builder["last_tested_compiled_at"] = builder.get("compiled_at")
+        builder["chat_tested_at"] = now_iso
+        builder["chat_tested_compiled_at"] = builder.get("compiled_at")
         builder["test_count"] = int(builder.get("test_count") or 0) + 1
+        current_spec = (
+            builder.get("compiled_spec")
+            if isinstance(builder.get("compiled_spec"), dict)
+            else None
+        )
+        if _compiled_execution_routines(current_spec):
+            builder.pop("last_tested_at", None)
+            builder.pop("last_tested_compiled_at", None)
+        else:
+            builder["last_tested_at"] = now_iso
+            builder["last_tested_compiled_at"] = builder.get("compiled_at")
         settings_value["employee_builder"] = builder
         config.settings = settings_value
         db.commit()
