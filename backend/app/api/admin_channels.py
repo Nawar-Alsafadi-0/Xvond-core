@@ -545,6 +545,11 @@ def connect_managed_channel(
         )
         if channel is None:
             raise HTTPException(404, "Channel not found")
+        if channel.enabled:
+            raise HTTPException(
+                409,
+                "Live managed channel routing cannot be changed in place; deactivate it before changing the provider route",
+            )
 
         _managed_gateway_capability(channel)
         connection_key = str(data.connection_key or "").strip()
