@@ -2249,3 +2249,201 @@ def test_customer_routine_list_is_scoped_to_current_employee(database):
     assert len(result["routines"]) == 1
     assert result["routines"][0]["routine_id"] == "primary"
     assert result["routines"][0]["enabled"] is False
+
+
+
+def test_multi_routine_runtime_inputs_are_isolated_by_requirement_scope(database):
+    factory, _ = database
+    spec = {
+        "version": 10,
+        "role": "Scoped monitor",
+        "scope": "personal",
+        "requirements": [
+            {
+                "key": "morning_source",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {
+                    "target": "morning-only",
+                    "morning_secret_name": "morning",
+                },
+            },
+            {
+                "key": "evening_source",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {
+                    "target": "evening-only",
+                    "evening_secret_name": "evening",
+                },
+            },
+        ],
+        "permissions": [],
+        "execution_routines": [
+            {
+                "id": "morning",
+                "name": "Morning routine",
+                "requirement_keys": ["morning_source"],
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 8,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Morning complete"},
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "evening",
+                "name": "Evening routine",
+                "requirement_keys": ["evening_source"],
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 18,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Evening complete"},
+                        }
+                    ],
+                },
+            },
+        ],
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        prepared, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=1,
+            spec=spec,
+        )
+        db.commit()
+
+        rows = (
+            db.query(AutomationWorkflow)
+            .filter(
+                AutomationWorkflow.company_id == 1,
+                AutomationWorkflow.trigger_type == "schedule",
+            )
+            .order_by(AutomationWorkflow.id.asc())
+            .all()
+        )
+
+        assert len(rows) == 2
+        by_routine = {
+            row.trigger_config["_xvond_routine_id"]: row
+            for row in rows
+        }
+        assert by_routine["morning"].trigger_config["_xvond_requirement_keys"] == [
+            "morning_source"
+        ]
+        assert by_routine["evening"].trigger_config["_xvond_requirement_keys"] == [
+            "evening_source"
+        ]
+        assert by_routine["morning"].trigger_config["input_data"] == {
+            "target": "morning-only",
+            "morning_secret_name": "morning",
+        }
+        assert by_routine["evening"].trigger_config["input_data"] == {
+            "target": "evening-only",
+            "evening_secret_name": "evening",
+        }
+        assert delivery["graph_triggers"][0]["requirement_keys"] == [
+            "morning_source"
+        ]
+        assert delivery["graph_triggers"][1]["requirement_keys"] == [
+            "evening_source"
+        ]
+        assert prepared["execution_routines"][0]["requirement_keys"] == [
+            "morning_source"
+        ]
+
+
+def test_pre_v10_routine_without_scope_keeps_shared_runtime_inputs(database):
+    factory, _ = database
+    spec = {
+        "version": 9,
+        "role": "Legacy scoped employee",
+        "scope": "personal",
+        "requirements": [
+            {
+                "key": "legacy_one",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {"one": 1},
+            },
+            {
+                "key": "legacy_two",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {"two": 2},
+            },
+        ],
+        "permissions": [],
+        "execution_routines": [
+            {
+                "id": "legacy",
+                "name": "Legacy",
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 9,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Done"},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        _, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=1,
+            spec=spec,
+        )
+        db.commit()
+
+        workflow = db.get(
+            AutomationWorkflow,
+            delivery["graph_triggers"][0]["workflow_id"],
+        )
+        assert workflow.trigger_config["input_data"] == {"one": 1, "two": 2}
