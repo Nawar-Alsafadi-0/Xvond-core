@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from calendar import monthrange
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -29,13 +30,29 @@ def _timezone(name: str | None) -> ZoneInfo:
         raise ScheduleConfigError("Schedule timezone is invalid") from exc
 
 
+def _parse_once_at(value, *, default_timezone: str | None = None) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ScheduleConfigError("One-time schedule requires at")
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ScheduleConfigError("One-time schedule at must be ISO-8601") from exc
+    if parsed.tzinfo is None:
+        zone = _timezone(default_timezone)
+        parsed = parsed.replace(tzinfo=zone)
+    return _utc(parsed)
+
+
 def normalize_schedule_config(value: dict | None, *, default_timezone: str | None = None) -> dict:
     if not isinstance(value, dict):
         raise ScheduleConfigError("Schedule configuration must be an object")
 
     kind = str(value.get("kind") or "").strip().lower()
-    if kind not in {"interval", "daily", "weekly"}:
-        raise ScheduleConfigError("Schedule kind must be interval, daily, or weekly")
+    if kind not in {"interval", "once", "daily", "weekly", "monthly"}:
+        raise ScheduleConfigError(
+            "Schedule kind must be interval, once, daily, weekly, or monthly"
+        )
 
     if kind == "interval":
         try:
@@ -55,6 +72,13 @@ def normalize_schedule_config(value: dict | None, *, default_timezone: str | Non
                 raise ScheduleConfigError("Schedule anchor_at must be ISO-8601") from exc
             result["anchor_at"] = _utc(parsed).isoformat().replace("+00:00", "Z")
         return result
+
+    if kind == "once":
+        at = _parse_once_at(value.get("at"), default_timezone=default_timezone)
+        return {
+            "kind": "once",
+            "at": at.isoformat().replace("+00:00", "Z"),
+        }
 
     try:
         hour = int(value.get("hour"))
@@ -89,7 +113,38 @@ def normalize_schedule_config(value: dict | None, *, default_timezone: str | Non
             raise ScheduleConfigError("Weekly schedule requires at least one weekday")
         result["weekdays"] = sorted(weekdays)
 
+    if kind == "monthly":
+        try:
+            day_of_month = int(value.get("day_of_month"))
+        except (TypeError, ValueError) as exc:
+            raise ScheduleConfigError("Monthly schedule requires day_of_month") from exc
+        if not 1 <= day_of_month <= 31:
+            raise ScheduleConfigError("Monthly day_of_month must be between 1 and 31")
+        result["day_of_month"] = day_of_month
+
     return result
+
+
+def _monthly_candidate(
+    *,
+    year: int,
+    month: int,
+    day_of_month: int,
+    hour: int,
+    minute: int,
+    zone: ZoneInfo,
+) -> datetime:
+    # Clamp 29-31 to the last valid day for shorter months. This keeps a generic
+    # "run monthly on day N" schedule reliable without silently skipping months.
+    valid_day = min(day_of_month, monthrange(year, month)[1])
+    return datetime(
+        year,
+        month,
+        valid_day,
+        hour,
+        minute,
+        tzinfo=zone,
+    )
 
 
 def latest_due_slot(
@@ -114,6 +169,14 @@ def latest_due_slot(
         steps = int((now_utc - anchor).total_seconds() // period.total_seconds())
         return anchor + (period * steps)
 
+    if normalized["kind"] == "once":
+        target = _utc(
+            datetime.fromisoformat(str(normalized["at"]).replace("Z", "+00:00"))
+        )
+        if target < created_utc or now_utc < target:
+            return None
+        return target
+
     zone = _timezone(normalized["timezone"])
     local_now = now_utc.astimezone(zone)
 
@@ -129,6 +192,33 @@ def latest_due_slot(
         if candidate.astimezone(UTC) < created_utc:
             return None
         return candidate.astimezone(UTC)
+
+    if normalized["kind"] == "monthly":
+        candidate = _monthly_candidate(
+            year=local_now.year,
+            month=local_now.month,
+            day_of_month=normalized["day_of_month"],
+            hour=normalized["hour"],
+            minute=normalized["minute"],
+            zone=zone,
+        )
+        if candidate > local_now:
+            if local_now.month == 1:
+                year, month = local_now.year - 1, 12
+            else:
+                year, month = local_now.year, local_now.month - 1
+            candidate = _monthly_candidate(
+                year=year,
+                month=month,
+                day_of_month=normalized["day_of_month"],
+                hour=normalized["hour"],
+                minute=normalized["minute"],
+                zone=zone,
+            )
+        candidate_utc = candidate.astimezone(UTC)
+        if candidate_utc < created_utc:
+            return None
+        return candidate_utc
 
     weekdays = set(normalized["weekdays"])
     for offset in range(0, 8):
