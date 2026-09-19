@@ -3483,8 +3483,9 @@ def test_generic_api_lookup_uses_query_contract_and_fails_closed_for_unknown_ope
                 "operations": {
                     "lookup": {
                         "method": "GET",
-                        "endpoint": "/v1/items",
+                        "endpoint": "/v1/items/{item_id}",
                         "input_mode": "query",
+                        "path_params": ["item_id"],
                         "timeout": 8,
                     }
                 },
@@ -3495,15 +3496,17 @@ def test_generic_api_lookup_uses_query_contract_and_fails_closed_for_unknown_ope
             {"company_id": 1, "agent_id": 1},
             "vendor_items",
             action,
-            {"details": {"q": "red shoes", "limit": 3}},
+            {"details": {"item_id": "A/B", "q": "red shoes", "limit": 3}},
             "lookup",
             idempotency_key="test-key",
         )
         assert result.success is True
         assert captured["method"] == "GET"
         assert captured["json_data"] is None
+        assert "/v1/items/A%2FB?" in captured["url"]
         assert "q=red+shoes" in captured["url"]
         assert "limit=3" in captured["url"]
+        assert "item_id=" not in captured["url"]
 
         captured.clear()
         missing = _integration_call(
