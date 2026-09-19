@@ -29,7 +29,9 @@ from backend.app.modules.ai_agent.models import AIAgent, AIUsage
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.automation.runtime import automation_runtime
 from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.tools.business_models import ActionRequest
+from backend.app.modules.tools.action_request import _integration_call
 from backend.app.modules.tools.models import AgentToolAssignment
 from backend.app.modules.tools.executor import ToolExecutor
 from backend.app.modules.tools.workflow_action_request import WorkflowActionRequestTool
@@ -3388,3 +3390,75 @@ def test_graph_action_forwards_named_operation_to_connected_api(database, monkey
     assert captured["arguments"]["details"]["query"] == "abc"
     assert captured["idempotency_key"].startswith("named-op-test:0:graph:")
     assert result["graph"]["nodes"]["lookup_vendor"]["scheduled_action_result"]["result"] == {"ok": True}
+
+
+def test_generic_api_lookup_uses_query_contract_and_fails_closed_for_unknown_operation(database, monkeypatch):
+    factory, _ = database
+    captured = {}
+
+    def fake_http(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 200, "response": "{\"ok\": true}", "truncated": False}
+
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.safe_http_request",
+        fake_http,
+    )
+
+    with factory() as db:
+        integration = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Novel Vendor API",
+            config={
+                "base_url": "https://api.vendor.example",
+                "validation_endpoint": "/health",
+            },
+            enabled=True,
+        )
+        db.add(integration)
+        db.commit()
+        db.refresh(integration)
+
+        action = {
+            "destination": {
+                "type": "integration",
+                "integration_id": integration.id,
+                "operations": {
+                    "lookup": {
+                        "method": "GET",
+                        "endpoint": "/v1/items",
+                        "input_mode": "query",
+                        "timeout": 8,
+                    }
+                },
+            }
+        }
+        result = _integration_call(
+            db,
+            {"company_id": 1, "agent_id": 1},
+            "vendor_items",
+            action,
+            {"details": {"q": "red shoes", "limit": 3}},
+            "lookup",
+            idempotency_key="test-key",
+        )
+        assert result.success is True
+        assert captured["method"] == "GET"
+        assert captured["json_data"] is None
+        assert "q=red+shoes" in captured["url"]
+        assert "limit=3" in captured["url"]
+
+        captured.clear()
+        missing = _integration_call(
+            db,
+            {"company_id": 1, "agent_id": 1},
+            "vendor_items",
+            action,
+            {"details": {}},
+            "delete_everything",
+            idempotency_key="test-key-2",
+        )
+        assert missing.success is False
+        assert "not configured" in str(missing.error).lower()
+        assert captured == {}
