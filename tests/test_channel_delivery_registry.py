@@ -83,6 +83,8 @@ def test_public_channel_catalog_exposes_delivery_truth_without_configs_or_secret
     assert items["slack"]["packaged_provider"] is True
     assert items["custom"]["availability"] == "xvond_managed_live"
     assert items["custom"]["packaged_provider"] is True
+    assert items["sms"]["availability"] == "xvond_managed_live"
+    assert items["sms"]["packaged_provider"] is True
     assert items["xvond"]["availability"] == "built_in"
 
     for item in payload["channels"]:
@@ -215,9 +217,9 @@ def test_managed_channels_share_one_xvond_runtime_adapter_but_provider_packaging
         assert capability["runtime_state"] == CHANNEL_RUNTIME_LIVE
         assert capability["setup_mode"] == CHANNEL_SETUP_MANAGED
 
-    for key in ("telegram", "instagram", "messenger", "slack", "custom"):
+    for key in ("telegram", "instagram", "messenger", "slack", "sms", "custom"):
         assert get_channel_capability(key)["packaged_provider"] is True
-    for key in ("email", "sms", "teams"):
+    for key in ("email", "teams"):
         assert get_channel_capability(key)["packaged_provider"] is False
 
 
