@@ -18,8 +18,9 @@ _OPERATION_NAME_RE = re.compile(r"[^a-z0-9]+")
 
 
 def _operation_name(operation_id: Any, method: str, path: str, used: set[str]) -> str:
-    raw = str(operation_id or "").strip().lower()
+    raw = str(operation_id or "").strip()
     if raw:
+        raw = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", raw).lower()
         base = _OPERATION_NAME_RE.sub("_", raw).strip("_")[:80]
     else:
         base = _OPERATION_NAME_RE.sub("_", f"{method}_{path}").strip("_")[:80]
