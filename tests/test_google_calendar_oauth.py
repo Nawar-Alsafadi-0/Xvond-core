@@ -26,9 +26,9 @@ def _configure_oauth(monkeypatch):
     monkeypatch.setattr(settings, "CONFIG_ENCRYPTION_KEY", "test-calendar-oauth-state-key")
 
 
-def test_oauth_state_is_encrypted_expiring_and_pkce_bound(monkeypatch):
+def test_oauth_state_is_encrypted_signed_and_expiring(monkeypatch):
     _configure_oauth(monkeypatch)
-    state, challenge = oauth.issue_google_calendar_oauth_state(
+    state = oauth.issue_google_calendar_oauth_state(
         user_id=10,
         company_id=20,
         integration_id=None,
@@ -43,13 +43,10 @@ def test_oauth_state_is_encrypted_expiring_and_pkce_bound(monkeypatch):
 
     assert "Clinic calendar" not in state
     assert "Asia/Muscat" not in state
-    assert len(challenge) == 43
-
     payload = oauth.verify_google_calendar_oauth_state(state, now=1_100)
     assert payload["user_id"] == 10
     assert payload["company_id"] == 20
     assert payload["config"]["timezone"] == "Asia/Muscat"
-    assert oauth._pkce_challenge(payload["code_verifier"]) == challenge
 
     with pytest.raises(oauth.GoogleCalendarOAuthError):
         oauth.verify_google_calendar_oauth_state(state + "x", now=1_100)
@@ -58,7 +55,7 @@ def test_oauth_state_is_encrypted_expiring_and_pkce_bound(monkeypatch):
         oauth.verify_google_calendar_oauth_state(state, now=2_000)
 
 
-def test_authorization_url_requests_offline_calendar_scopes_and_pkce(monkeypatch):
+def test_authorization_url_requests_offline_calendar_scopes(monkeypatch):
     _configure_oauth(monkeypatch)
     state, challenge = oauth.issue_google_calendar_oauth_state(
         user_id=1,
@@ -73,10 +70,7 @@ def test_authorization_url_requests_offline_calendar_scopes_and_pkce(monkeypatch
         now=1_000,
     )
 
-    url = oauth.build_google_calendar_authorization_url(
-        state=state,
-        code_challenge=challenge,
-    )
+    url = oauth.build_google_calendar_authorization_url(state=state)
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
 
@@ -85,8 +79,6 @@ def test_authorization_url_requests_offline_calendar_scopes_and_pkce(monkeypatch
     assert query["response_type"] == ["code"]
     assert query["access_type"] == ["offline"]
     assert query["prompt"] == ["consent"]
-    assert query["code_challenge_method"] == ["S256"]
-    assert query["code_challenge"] == [challenge]
     assert query["state"] == [state]
     assert set(query["scope"][0].split()) == set(oauth.GOOGLE_CALENDAR_SCOPES)
 
@@ -105,17 +97,13 @@ def test_token_exchange_keeps_client_secret_out_of_url(monkeypatch):
 
     monkeypatch.setattr(oauth, "safe_http_request", fake_request)
 
-    result = oauth.exchange_google_calendar_code(
-        code="authorization-code",
-        code_verifier="v" * 64,
-    )
+    result = oauth.exchange_google_calendar_code(code="authorization-code")
 
     assert result["access_token"] == "access"
     assert result["refresh_token"] == "refresh"
     assert captured["url"] == oauth.GOOGLE_TOKEN_URL
     assert "client-secret" not in captured["url"]
     assert captured["form_data"]["client_secret"] == "client-secret"
-    assert captured["form_data"]["code_verifier"] == "v" * 64
 
 
 def test_calendar_refresh_uses_platform_credentials_without_customer_client_secret(monkeypatch):
