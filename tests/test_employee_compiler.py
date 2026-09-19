@@ -812,3 +812,72 @@ def test_owner_never_blocks_generated_action_without_overwriting_operator_enable
     assert action["enabled"] is True
     assert action["_xvond_permission_mode"] == "never"
     assert action["confirmation_required"] is True
+
+
+
+def test_compiler_normalizes_generic_monthly_schedule():
+    job_brief = "اعمل تقرير شهري يوم 1 الساعة 9"
+    response = """{
+      "role":"Reporting employee",
+      "scope":"business",
+      "summary":"Prepare a monthly report.",
+      "tasks":[{"name":"Report","description":"Prepare report","trigger":"monthly"}],
+      "requirements":[{
+        "key":"monthly_report",
+        "kind":"custom",
+        "purpose":"Prepare the monthly report",
+        "primitives":["scheduler","workflow_engine"],
+        "schedule":{
+          "kind":"monthly",
+          "day_of_month":1,
+          "hour":9,
+          "minute":0,
+          "source_text":"يوم 1 الساعة 9"
+        }
+      }],
+      "permissions":[{"action":"Prepare the monthly report","mode":"automatic"}],
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+    requirement = spec["requirements"][0]
+
+    assert requirement["schedule"] == {
+        "kind": "monthly",
+        "day_of_month": 1,
+        "hour": 9,
+        "minute": 0,
+        "source_text": "يوم 1 الساعة 9",
+    }
+
+
+def test_compiler_normalizes_generic_one_time_schedule():
+    job_brief = "نفذ المهمة مرة واحدة بتاريخ 2026-10-01T09:00:00+04:00"
+    response = """{
+      "role":"One-time task employee",
+      "scope":"personal",
+      "summary":"Run a one-time task.",
+      "tasks":[{"name":"Task","description":"Run once","trigger":"once"}],
+      "requirements":[{
+        "key":"one_time_task",
+        "kind":"custom",
+        "purpose":"Run the requested task",
+        "primitives":["scheduler","workflow_engine"],
+        "schedule":{
+          "kind":"once",
+          "at":"2026-10-01T09:00:00+04:00",
+          "source_text":"2026-10-01T09:00:00+04:00"
+        }
+      }],
+      "permissions":[{"action":"Run the requested task","mode":"automatic"}],
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+    requirement = spec["requirements"][0]
+
+    assert requirement["schedule"] == {
+        "kind": "once",
+        "at": "2026-10-01T09:00:00+04:00",
+        "source_text": "2026-10-01T09:00:00+04:00",
+    }

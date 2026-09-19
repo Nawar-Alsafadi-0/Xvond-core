@@ -34,7 +34,7 @@ def _schedule_payload(workflow: AutomationWorkflow) -> dict:
     return {
         key: value
         for key, value in config.items()
-        if key in {"kind", "every_minutes", "anchor_at", "hour", "minute", "timezone", "weekdays"}
+        if key in {"kind", "every_minutes", "anchor_at", "at", "hour", "minute", "timezone", "weekdays", "day_of_month"}
     }
 
 

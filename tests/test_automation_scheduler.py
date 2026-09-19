@@ -2346,3 +2346,49 @@ def test_owner_never_permission_skips_scheduled_action_without_side_effect(monke
         }
 
     engine.dispose()
+
+
+
+def test_monthly_schedule_uses_generic_day_of_month_and_clamps_short_months():
+    schedule = normalize_schedule_config(
+        {
+            "kind": "monthly",
+            "day_of_month": 31,
+            "hour": 9,
+            "minute": 0,
+            "timezone": "UTC",
+        }
+    )
+    slot = latest_due_slot(
+        schedule,
+        now=datetime(2026, 2, 28, 10, 0, tzinfo=UTC),
+        created_at=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+    )
+
+    assert schedule["day_of_month"] == 31
+    assert slot == datetime(2026, 2, 28, 9, 0, tzinfo=UTC)
+
+
+def test_one_time_schedule_is_due_only_after_target_time():
+    schedule = normalize_schedule_config(
+        {
+            "kind": "once",
+            "at": "2026-10-01T09:00:00",
+            "timezone": "Asia/Muscat",
+        }
+    )
+
+    before = latest_due_slot(
+        schedule,
+        now=datetime(2026, 10, 1, 4, 59, tzinfo=UTC),
+        created_at=datetime(2026, 9, 20, 0, 0, tzinfo=UTC),
+    )
+    due = latest_due_slot(
+        schedule,
+        now=datetime(2026, 10, 1, 5, 1, tzinfo=UTC),
+        created_at=datetime(2026, 9, 20, 0, 0, tzinfo=UTC),
+    )
+
+    assert schedule["at"] == "2026-10-01T05:00:00Z"
+    assert before is None
+    assert due == datetime(2026, 10, 1, 5, 0, tzinfo=UTC)
