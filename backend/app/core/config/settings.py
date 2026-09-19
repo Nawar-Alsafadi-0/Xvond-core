@@ -164,7 +164,7 @@ class Settings:
             if not self.GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET:
                 errors.append("GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET is required when Google Calendar OAuth is configured")
             google_redirect = self.GOOGLE_CALENDAR_OAUTH_REDIRECT_URI or (
-                f"{self.PUBLIC_BASE_URL}/manage/integrations/google-calendar/oauth/callback"
+                f"{self.PUBLIC_BASE_URL}/customer/agents/manage/integrations/google-calendar/oauth/callback"
                 if self.PUBLIC_BASE_URL
                 else ""
             )
