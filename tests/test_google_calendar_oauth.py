@@ -123,7 +123,7 @@ def test_calendar_refresh_uses_platform_credentials_without_customer_client_secr
 
 
 def test_calendar_oauth_routes_are_registered_under_canonical_customer_prefix():
-    paths = {route.path for route in app.routes if hasattr(route, "path")}
+    paths = app.openapi().get("paths", {})
     assert "/customer/agents/manage/integrations/google-calendar/oauth/status" in paths
     assert "/customer/agents/manage/integrations/google-calendar/oauth/start" in paths
     assert "/customer/agents/manage/integrations/google-calendar/oauth/callback" in paths
