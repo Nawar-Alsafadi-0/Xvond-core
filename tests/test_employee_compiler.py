@@ -1561,3 +1561,28 @@ def test_compiler_preserves_safe_dynamic_api_operations_and_drops_secrets():
             "timeout": 12.0,
         }
     }
+
+
+def test_compiler_message_exposes_bounded_connection_capabilities_without_runtime_ids():
+    message = build_compiler_user_message(
+        job_brief="Create orders in my connected vendor system.",
+        requested_channels=[],
+        available_connections=[{
+            "name": "Vendor API",
+            "type": "custom_api",
+            "capabilities": [],
+            "operations": {
+                "create_order": {
+                    "method": "POST",
+                    "endpoint": "/orders",
+                    "input_mode": "json",
+                    "description": "Create an order",
+                }
+            },
+        }],
+    )
+    assert "AVAILABLE VALIDATED CONNECTED SYSTEMS" in message
+    assert "create_order" in message
+    assert "/orders" in message
+    assert "integration_id" not in message
+    assert "api_key" not in message
