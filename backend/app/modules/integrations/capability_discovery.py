@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import re
+from datetime import datetime
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -239,7 +240,7 @@ def public_api_probe(contract: dict) -> dict | None:
         if 200 <= status < 300:
             return {
                 "validated": True,
-                "validated_at": __import__("datetime").datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "validated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
                 "mode": "discovered_public_api_safe_get",
                 "operation": str(name),
                 "endpoint": "/" + endpoint.lstrip("/"),
