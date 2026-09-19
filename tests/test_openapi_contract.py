@@ -45,15 +45,15 @@ def test_openapi_document_becomes_bounded_executable_operations():
     contract = normalize_openapi_document(_document())
 
     assert contract["base_url"] == "https://api.vendor.example/v1"
-    assert set(contract["operations"]) == {"getorder", "cancelorder", "createorder"}
+    assert set(contract["operations"]) == {"get_order", "cancel_order", "create_order"}
 
-    lookup = contract["operations"]["getorder"]
+    lookup = contract["operations"]["get_order"]
     assert lookup["method"] == "GET"
     assert lookup["endpoint"] == "/orders/{order_id}"
     assert lookup["input_mode"] == "query"
     assert lookup["path_params"] == ["order_id"]
 
-    create = contract["operations"]["createorder"]
+    create = contract["operations"]["create_order"]
     assert create["method"] == "POST"
     assert create["input_mode"] == "json"
 
@@ -73,7 +73,7 @@ paths:
           in: query
 """
     )
-    assert contract["operations"]["searchitems"]["method"] == "GET"
+    assert contract["operations"]["search_items"]["method"] == "GET"
     assert contract["operations"]["searchitems"]["input_mode"] == "query"
 
 
