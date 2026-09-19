@@ -690,3 +690,125 @@ def test_web_research_is_native_browser_ability_without_fake_action_setup():
     assert requirement.get("execution_plan") == []
     assert "web_research" in spec["ready_requirements"]
     assert "web_research" not in spec["build_required"]
+
+
+def test_compiler_cannot_self_grant_automatic_execution():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Lead worker",
+            "scope": "business",
+            "summary": "Capture leads.",
+            "requirements": [
+                {
+                    "key": "lead_management",
+                    "kind": "module",
+                    "purpose": "Capture and follow up sales leads",
+                }
+            ],
+            "permissions": [
+                {
+                    "action": "lead_management",
+                    "mode": "automatic",
+                }
+            ],
+        },
+        job_brief="Capture and follow up sales leads.",
+    )
+
+    permission = spec["permissions"][0]
+    assert permission["action"] == "lead_management"
+    assert permission["mode"] == "ask_before"
+    assert permission["suggested_mode"] == "automatic"
+    assert permission["source"] == "compiler_suggestion"
+
+
+def test_owner_grant_can_promote_compiler_suggestion_to_automatic():
+    from backend.app.api.customer_employee_builder import (
+        _effective_compiled_permissions,
+    )
+
+    compiled = normalize_compiled_spec(
+        {
+            "role": "Lead worker",
+            "scope": "business",
+            "summary": "Capture leads.",
+            "requirements": [
+                {
+                    "key": "lead_management",
+                    "kind": "module",
+                    "purpose": "Capture and follow up sales leads",
+                }
+            ],
+            "permissions": [
+                {
+                    "action": "lead_management",
+                    "mode": "automatic",
+                }
+            ],
+        },
+        job_brief="Capture and follow up sales leads.",
+    )
+
+    effective = _effective_compiled_permissions(
+        compiled,
+        {"owner_permissions": {"lead_management": "automatic"}},
+    )
+    permission = effective["permissions"][0]
+    assert permission["action"] == "lead_management"
+    assert permission["mode"] == "automatic"
+    assert permission["suggested_mode"] == "automatic"
+    assert permission["source"] == "owner"
+
+    action = build_internal_record_action_config(
+        requirement={
+            "key": "lead_management",
+            "purpose": "Capture and follow up sales leads",
+            "fulfillment_mode": "xvond_internal",
+        },
+        spec=effective,
+    )
+    assert action["enabled"] is True
+    assert action["confirmation_required"] is False
+
+
+def test_owner_never_blocks_generated_action_without_overwriting_operator_enablement():
+    from backend.app.api.customer_employee_builder import (
+        _effective_compiled_permissions,
+    )
+
+    compiled = normalize_compiled_spec(
+        {
+            "role": "Lead worker",
+            "scope": "business",
+            "summary": "Capture leads.",
+            "requirements": [
+                {
+                    "key": "lead_management",
+                    "kind": "module",
+                    "purpose": "Capture and follow up sales leads",
+                }
+            ],
+            "permissions": [
+                {
+                    "action": "lead_management",
+                    "mode": "ask_before",
+                }
+            ],
+        },
+        job_brief="Capture and follow up sales leads.",
+    )
+    effective = _effective_compiled_permissions(
+        compiled,
+        {"owner_permissions": {"lead_management": "never"}},
+    )
+    action = build_internal_record_action_config(
+        requirement={
+            "key": "lead_management",
+            "purpose": "Capture and follow up sales leads",
+            "fulfillment_mode": "xvond_internal",
+        },
+        spec=effective,
+    )
+    assert action["enabled"] is True
+    assert action["_xvond_permission_mode"] == "never"
+    assert action["confirmation_required"] is True
