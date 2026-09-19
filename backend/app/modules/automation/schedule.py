@@ -74,7 +74,7 @@ def normalize_schedule_config(value: dict | None, *, default_timezone: str | Non
         return result
 
     if kind == "once":
-        at = _parse_once_at(value.get("at"), default_timezone=default_timezone)
+        at = _parse_once_at(\n            value.get("at"),\n            default_timezone=str(value.get("timezone") or default_timezone or "").strip() or None,\n        )
         return {
             "kind": "once",
             "at": at.isoformat().replace("+00:00", "Z"),
