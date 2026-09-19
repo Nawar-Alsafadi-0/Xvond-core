@@ -3585,3 +3585,168 @@ def test_openapi_path_parameter_is_encoded_and_removed_from_payload(database, mo
     assert "expand=items" in captured["url"]
     assert "order_id=" not in captured["url"]
     assert captured["json_data"] is None
+
+
+def test_compiler_connection_context_is_validated_tenant_safe_and_secret_free(database):
+    factory, _ = database
+    with factory() as db:
+        integration = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Vendor API",
+            config={
+                "base_url": "https://api.vendor.example",
+                "validation_endpoint": "/health",
+                "auth_type": "bearer",
+                "api_key": "super-secret",
+                "operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                        "description": "Create order",
+                    }
+                },
+                "_xvond_validation": {
+                    "validated": True,
+                    "validated_at": "2026-09-19T16:00:00Z",
+                },
+            },
+            enabled=True,
+        )
+        unvalidated = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Unvalidated API",
+            config={
+                "base_url": "https://unvalidated.example",
+                "validation_endpoint": "/health",
+                "operations": {
+                    "unsafe": {"method": "POST", "endpoint": "/unsafe"}
+                },
+            },
+            enabled=True,
+        )
+        foreign = CompanyIntegration(
+            company_id=2,
+            integration_type="custom_api",
+            name="Other Tenant API",
+            config={
+                "base_url": "https://other.example",
+                "validation_endpoint": "/health",
+                "operations": {
+                    "foreign": {"method": "POST", "endpoint": "/foreign"}
+                },
+                "_xvond_validation": {
+                    "validated": True,
+                    "validated_at": "2026-09-19T16:00:00Z",
+                },
+            },
+            enabled=True,
+        )
+        db.add_all([integration, unvalidated, foreign])
+        db.commit()
+
+        context = api._compiler_connection_context(db, company_id=1)
+
+    assert len(context) == 1
+    assert context[0]["name"] == "Vendor API"
+    assert context[0]["type"] == "custom_api"
+    assert context[0]["operations"]["create_order"]["endpoint"] == "/orders"
+    rendered = json.dumps(context)
+    assert "super-secret" not in rendered
+    assert "api_key" not in rendered
+    assert "integration_id" not in rendered
+    assert "Unvalidated API" not in rendered
+    assert "Other Tenant API" not in rendered
+
+
+def test_exact_generic_api_contract_auto_binds_only_one_validated_match(database):
+    factory, _ = database
+    with factory() as db:
+        integration = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Vendor API",
+            config={
+                "base_url": "https://api.vendor.example",
+                "validation_endpoint": "/health",
+                "operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                    }
+                },
+                "_xvond_validation": {
+                    "validated": True,
+                    "validated_at": "2026-09-19T16:00:00Z",
+                },
+            },
+            enabled=True,
+        )
+        db.add(integration)
+        db.commit()
+        db.refresh(integration)
+
+        spec = {
+            "requirements": [{
+                "key": "vendor_order_creation",
+                "kind": "integration",
+                "status": "connection_required",
+                "requires_connection": True,
+                "fulfillment_mode": "external_connection",
+                "integration_operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                    }
+                },
+            }],
+            "setup_required": ["vendor_order_creation"],
+        }
+        resolved, bound = api._auto_bind_single_packaged_integrations(
+            db,
+            company_id=1,
+            spec=spec,
+        )
+
+        requirement = resolved["requirements"][0]
+        assert bound == ["vendor_order_creation"]
+        assert requirement["integration_id"] == integration.id
+        assert requirement["status"] == "xvond_build"
+        assert requirement["integration_operations"]["create_order"]["endpoint"] == "/orders"
+        assert resolved["setup_required"] == []
+
+        db.add(CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Second Vendor API",
+            config={
+                "base_url": "https://api2.vendor.example",
+                "validation_endpoint": "/health",
+                "operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                    }
+                },
+                "_xvond_validation": {
+                    "validated": True,
+                    "validated_at": "2026-09-19T16:00:00Z",
+                },
+            },
+            enabled=True,
+        ))
+        db.commit()
+
+        ambiguous, ambiguous_bound = api._auto_bind_single_packaged_integrations(
+            db,
+            company_id=1,
+            spec=spec,
+        )
+
+    assert ambiguous_bound == []
+    assert "integration_id" not in ambiguous["requirements"][0]
