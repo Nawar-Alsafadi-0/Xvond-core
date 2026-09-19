@@ -16,6 +16,7 @@ from backend.app.modules.automation.models import AutomationRun, AutomationWorkf
 from backend.app.modules.customer_ops.models import NotificationEvent
 from backend.app.modules.automation.schedule import (
     latest_due_slot,
+    next_schedule_slot,
     normalize_schedule_config,
     schedule_slot_key,
 )
@@ -3522,3 +3523,67 @@ def test_graph_preview_can_use_stateless_real_ai_executor():
         "context": {"value": 42},
         "node_scope": "think",
     }
+
+
+
+def test_next_interval_schedule_slot_is_strictly_future():
+    slot = next_schedule_slot(
+        {"kind": "interval", "every_minutes": 15},
+        after=datetime(2026, 9, 18, 12, 30, tzinfo=UTC),
+        created_at=datetime(2026, 9, 18, 12, 0, tzinfo=UTC),
+    )
+    assert slot == datetime(2026, 9, 18, 12, 45, tzinfo=UTC)
+
+
+def test_next_daily_schedule_slot_uses_local_timezone():
+    slot = next_schedule_slot(
+        {"kind": "daily", "hour": 8, "minute": 0, "timezone": "Asia/Muscat"},
+        after=datetime(2026, 9, 18, 4, 0, tzinfo=UTC),
+        created_at=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+    )
+    assert slot == datetime(2026, 9, 19, 4, 0, tzinfo=UTC)
+
+
+def test_next_weekly_schedule_slot_selects_nearest_requested_day():
+    slot = next_schedule_slot(
+        {
+            "kind": "weekly",
+            "weekdays": [0, 4],
+            "hour": 9,
+            "minute": 30,
+            "timezone": "UTC",
+        },
+        after=datetime(2026, 9, 18, 10, 0, tzinfo=UTC),
+        created_at=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+    )
+    assert slot == datetime(2026, 9, 21, 9, 30, tzinfo=UTC)
+
+
+def test_next_monthly_schedule_clamps_short_month_and_moves_forward():
+    slot = next_schedule_slot(
+        {
+            "kind": "monthly",
+            "day_of_month": 31,
+            "hour": 9,
+            "minute": 0,
+            "timezone": "UTC",
+        },
+        after=datetime(2026, 1, 31, 10, 0, tzinfo=UTC),
+        created_at=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+    )
+    assert slot == datetime(2026, 2, 28, 9, 0, tzinfo=UTC)
+
+
+def test_next_one_time_schedule_disappears_after_execution_time():
+    before = next_schedule_slot(
+        {"kind": "once", "at": "2026-10-01T05:00:00Z"},
+        after=datetime(2026, 10, 1, 4, 59, tzinfo=UTC),
+        created_at=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+    )
+    after = next_schedule_slot(
+        {"kind": "once", "at": "2026-10-01T05:00:00Z"},
+        after=datetime(2026, 10, 1, 5, 0, tzinfo=UTC),
+        created_at=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+    )
+    assert before == datetime(2026, 10, 1, 5, 0, tzinfo=UTC)
+    assert after is None

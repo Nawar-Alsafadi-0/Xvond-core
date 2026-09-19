@@ -1,5 +1,6 @@
 """Compile/provision regressions against real persisted employee/action records."""
 from copy import deepcopy
+from datetime import datetime
 import json
 from pathlib import Path
 import subprocess
@@ -2743,3 +2744,130 @@ def test_chat_preview_does_not_unlock_build_that_has_execution_routines(database
         assert builder.get("last_tested_compiled_at") is None
         assert builder.get("routine_preview_evidence") in (None, {})
     assert len(calls) == 1
+
+
+
+def test_routine_inventory_exposes_live_operational_state(database):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live"
+        company.active = True
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+
+        scheduled = AutomationWorkflow(
+            id=501,
+            company_id=1,
+            name="Scheduled monitor",
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "monitor",
+                "_xvond_routine_name": "Monitor",
+                "schedule": {"kind": "interval", "every_minutes": 60},
+            },
+            steps=[],
+            enabled=True,
+        )
+        event = AutomationWorkflow(
+            id=502,
+            company_id=1,
+            name="Event follow-up",
+            trigger_type="event",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "follow_up",
+                "_xvond_routine_name": "Follow up",
+                "event_name": "lead.created",
+            },
+            steps=[],
+            enabled=True,
+        )
+        failed = AutomationWorkflow(
+            id=503,
+            company_id=1,
+            name="Manual report",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "report",
+                "_xvond_routine_name": "Report",
+            },
+            steps=[],
+            enabled=True,
+        )
+        paused = AutomationWorkflow(
+            id=504,
+            company_id=1,
+            name="Paused routine",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "paused",
+                "_xvond_routine_name": "Paused",
+                "_xvond_paused_at": "2026-09-19T10:00:00Z",
+            },
+            steps=[],
+            enabled=False,
+        )
+        db.add_all([scheduled, event, failed, paused])
+        db.flush()
+        db.add_all(
+            [
+                AutomationRun(
+                    company_id=1,
+                    workflow_id=501,
+                    status="success",
+                    input_data={},
+                    output_data={},
+                    finished_at=datetime(2026, 9, 19, 10, 0),
+                ),
+                AutomationRun(
+                    company_id=1,
+                    workflow_id=502,
+                    status="waiting_event",
+                    input_data={},
+                    output_data={},
+                    resume_event_name="payment.confirmed",
+                ),
+                AutomationRun(
+                    company_id=1,
+                    workflow_id=503,
+                    status="failed",
+                    input_data={},
+                    output_data={},
+                    error_message="provider timeout",
+                    finished_at=datetime(2026, 9, 19, 10, 5),
+                ),
+            ]
+        )
+        db.commit()
+
+    result = api.customer_employee_routines(1, USER)
+    routines = {item["routine_id"]: item for item in result["routines"]}
+
+    assert routines["monitor"]["operational_state"] == "healthy"
+    assert routines["monitor"]["last_run"]["status"] == "success"
+    assert routines["monitor"]["next_scheduled_at"] is not None
+
+    assert routines["follow_up"]["operational_state"] == "waiting_event"
+    assert routines["follow_up"]["waiting"] == {
+        "type": "event",
+        "event_name": "payment.confirmed",
+    }
+
+    assert routines["report"]["operational_state"] == "needs_attention"
+    assert routines["report"]["last_run"]["error_message"] == "provider timeout"
+
+    assert routines["paused"]["operational_state"] == "paused"
+    assert routines["paused"]["next_scheduled_at"] is None
