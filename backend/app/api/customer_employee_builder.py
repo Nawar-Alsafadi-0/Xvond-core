@@ -2509,9 +2509,18 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
         ).strip().lower()
         if input_mode not in {"json", "query", "none"}:
             raise HTTPException(400, f"Invalid input mode for operation {name}")
-        path_params = list(dict.fromkeys(
-            re.findall(r"{([A-Za-z_][A-Za-z0-9_]{0,63})}", endpoint)
-        ))
+        raw_path_params = raw.get("path_params")
+        if isinstance(raw_path_params, list):
+            path_params = [
+                str(item).strip()
+                for item in raw_path_params
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", str(item).strip())
+            ][:20]
+            path_params = list(dict.fromkeys(path_params))
+        else:
+            path_params = list(dict.fromkeys(
+                re.findall(r"{([A-Za-z_][A-Za-z0-9_]{0,63})}", endpoint)
+            ))
         result[name] = {
             "method": method,
             "endpoint": endpoint,
