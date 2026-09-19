@@ -12,6 +12,7 @@ from backend.app.models.company import Company
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
+from backend.app.modules.customer_ops.models import NotificationEvent
 from backend.app.modules.automation.schedule import (
     latest_due_slot,
     normalize_schedule_config,
@@ -2819,5 +2820,132 @@ def test_nested_foreach_wait_resumes_without_replaying_completed_work(monkeypatc
         assert calls["fetch"] == 2
         each = finished.output_data["steps"][-1]["result"]["graph_outputs"]["each"]
         assert each["count"] == 2
+
+    engine.dispose()
+
+
+
+def test_graph_notify_persists_owner_visible_event_idempotently(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Notify Co", active=True, lifecycle_status="live"))
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        step = {
+            "type": "graph",
+            "agent_id": 77,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "owner_update",
+                        "type": "notify",
+                        "depends_on": [],
+                        "params": {
+                            "title": "Employee finished",
+                            "message": "The requested work is ready.",
+                            "severity": "info",
+                        },
+                    }
+                ],
+            },
+        }
+        state = {"_xvond_execution_key": "notify-idempotency-key"}
+
+        first = runtime.execute_step(
+            db,
+            1,
+            step,
+            dict(state),
+            run_id=10,
+            step_index=0,
+        )
+        second = runtime.execute_step(
+            db,
+            1,
+            step,
+            dict(state),
+            run_id=10,
+            step_index=0,
+        )
+        db.commit()
+
+        rows = db.query(NotificationEvent).filter_by(company_id=1).all()
+        assert len(rows) == 1
+        assert rows[0].event_type == "employee_update"
+        assert rows[0].title == "Employee finished"
+        assert rows[0].message == "The requested work is ready."
+        assert rows[0].payload["agent_id"] == 77
+        assert rows[0].payload["automation_run_id"] == 10
+        assert first["graph_outputs"]["owner_update"]["notification"]["duplicate"] is False
+        assert second["graph_outputs"]["owner_update"]["notification"]["duplicate"] is True
+        assert (
+            first["graph_outputs"]["owner_update"]["notification"]["event_id"]
+            == second["graph_outputs"]["owner_update"]["notification"]["event_id"]
+        )
+
+    engine.dispose()
+
+
+def test_nested_foreach_notifications_are_scoped_per_item():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Batch Notify", active=True, lifecycle_status="live"))
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        result = runtime.execute_step(
+            db,
+            1,
+            {
+                "type": "graph",
+                "agent_id": 9,
+                "graph": {
+                    "version": 1,
+                    "nodes": [
+                        {
+                            "id": "each",
+                            "type": "foreach",
+                            "depends_on": [],
+                            "params": {
+                                "items": [{"id": 1}, {"id": 2}],
+                                "graph": {
+                                    "version": 1,
+                                    "nodes": [
+                                        {
+                                            "id": "done",
+                                            "type": "notify",
+                                            "depends_on": [],
+                                            "params": {"message": "Item processed"},
+                                        }
+                                    ],
+                                },
+                            },
+                        }
+                    ],
+                },
+            },
+            {"_xvond_execution_key": "batch-notify"},
+            run_id=11,
+            step_index=0,
+        )
+        db.commit()
+
+        rows = (
+            db.query(NotificationEvent)
+            .filter_by(company_id=1, event_type="employee_update")
+            .order_by(NotificationEvent.id.asc())
+            .all()
+        )
+        assert len(rows) == 2
+        assert rows[0].event_key != rows[1].event_key
+        assert rows[0].payload["node_scope"] == "each[0]/done"
+        assert rows[1].payload["node_scope"] == "each[1]/done"
+        assert result["graph_outputs"]["each"]["count"] == 2
 
     engine.dispose()
