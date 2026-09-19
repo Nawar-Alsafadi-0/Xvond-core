@@ -265,6 +265,7 @@ def _store_wait_checkpoint(
 ) -> AutomationRun:
     run.status = "waiting_time"
     run.resume_at = wait.resume_at
+    run.resume_event_name = None
     run.error_message = None
     run.finished_at = None
     trace["status"] = "waiting_time"
@@ -322,6 +323,7 @@ def _store_approval_checkpoint(
     db.flush()
     run.status = "waiting_approval"
     run.resume_at = None
+    run.resume_event_name = None
     run.error_message = None
     run.finished_at = None
     trace["status"] = "waiting_approval"
@@ -342,6 +344,86 @@ def _store_approval_checkpoint(
             "node_outputs": approval.node_outputs,
             "graph_resume": approval.graph_resume,
             "status": "awaiting_confirmation",
+        },
+    }
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+class AutomationEventRequired(RuntimeError):
+    def __init__(
+        self,
+        *,
+        event_name: str,
+        match: dict,
+        workflow_step_index: int,
+        node_id: str,
+        node_outputs: dict,
+        graph_resume: dict | None = None,
+    ):
+        clean_event = str(event_name or "").strip().lower()
+        if not clean_event or len(clean_event) > 120:
+            raise ValueError("Awaited event name is invalid")
+        clean_match: dict[str, str | int | float | bool | None] = {}
+        for raw_path, expected in (match or {}).items():
+            path = str(raw_path or "").strip()
+            if not path or len(path) > 200:
+                raise ValueError("Awaited event match field is invalid")
+            if not isinstance(expected, (str, int, float, bool)) and expected is not None:
+                raise ValueError("Awaited event match values must be scalar")
+            clean_match[path] = expected
+            if len(clean_match) >= 20:
+                break
+
+        super().__init__(f"Event required: {clean_event}")
+        self.event_name = clean_event
+        self.match = clean_match
+        self.workflow_step_index = int(workflow_step_index)
+        self.node_id = str(node_id)
+        self.node_outputs = deepcopy(dict(node_outputs or {}))
+        self.graph_resume = deepcopy(
+            graph_resume
+            if isinstance(graph_resume, dict)
+            else {
+                "node_id": self.node_id,
+                "node_outputs": self.node_outputs,
+                "event_received": True,
+                "event_name": self.event_name,
+            }
+        )
+
+
+def _store_event_checkpoint(
+    db,
+    *,
+    run: AutomationRun,
+    workflow: AutomationWorkflow,
+    event_wait: AutomationEventRequired,
+    state: dict,
+    step_results: list,
+    trace: dict,
+) -> AutomationRun:
+    run.status = "waiting_event"
+    run.resume_at = None
+    run.resume_event_name = event_wait.event_name
+    run.error_message = None
+    run.finished_at = None
+    trace["status"] = "waiting_event"
+    trace["finished_at"] = None
+    run.output_data = {
+        "state": state,
+        "steps": step_results,
+        "trace": trace,
+        "event_wait": {
+            "event_name": event_wait.event_name,
+            "match": event_wait.match,
+            "workflow_step_index": event_wait.workflow_step_index,
+            "node_id": event_wait.node_id,
+            "workflow_fingerprint": _checkpoint_fingerprint(workflow.steps or []),
+            "node_outputs": event_wait.node_outputs,
+            "graph_resume": event_wait.graph_resume,
+            "status": "waiting_event",
         },
     }
     db.commit()
