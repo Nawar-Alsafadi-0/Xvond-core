@@ -2698,6 +2698,18 @@ class AutomationRuntime:
             }
             details.update(step.get("arguments") or {})
             stable_key = f"{execution_key}:{step_index}"
+            if step.get("_xvond_graph_action"):
+                node_scope = str(
+                    step.get("approval_scope")
+                    or step.get("approval_node_id")
+                    or ""
+                ).strip()
+                if not node_scope:
+                    raise ValueError(
+                        "Graph action requires a stable node scope for idempotency"
+                    )
+                scope_digest = sha256(node_scope.encode("utf-8")).hexdigest()[:24]
+                stable_key = f"{stable_key}:graph:{scope_digest}"
 
             if (
                 destination.get("type") == "xvond_internal"
