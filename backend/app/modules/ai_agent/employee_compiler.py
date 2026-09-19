@@ -305,10 +305,16 @@ Rules:
 def build_compiler_user_message(*, job_brief: str, requested_channels: list[str] | tuple[str, ...]) -> str:
     channels = ", ".join(requested_channels) if requested_channels else "none selected yet"
     return (
-        "CUSTOMER JOB BRIEF:\n"
-        f"{job_brief.strip()}\n\n"
-        "CUSTOMER-SELECTED CHANNELS:\n"
-        f"{channels}\n\n"
+        "CUSTOMER JOB BRIEF:
+"
+        f"{job_brief.strip()}
+
+"
+        "CUSTOMER-SELECTED CHANNELS:
+"
+        f"{channels}
+
+"
         "Compile this exact request into the JSON employee specification and delivery plan."
     )
 
@@ -336,7 +342,8 @@ def _extract_json(text: str) -> dict:
             lines = lines[1:]
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
-        raw = "\n".join(lines).strip()
+        raw = "
+".join(lines).strip()
     value = json.loads(raw)
     if not isinstance(value, dict):
         raise ValueError("Employee compiler must return a JSON object")
@@ -860,7 +867,10 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         if len(setup_questions) >= 30:
             break
 
-    execution_graph = _ground_execution_graph(\n        payload.get("execution_graph"),\n        job_brief=job_brief,\n    )
+    execution_graph = _ground_execution_graph(
+        payload.get("execution_graph"),
+        job_brief=job_brief,
+    )
 
     return {
         "version": COMPILER_VERSION,
@@ -891,25 +901,29 @@ def parse_compiler_response(text: str, *, job_brief: str) -> dict:
 
 def build_compiled_employee_system_prompt(*, owner_name: str, spec: dict) -> str:
     tasks = spec.get("tasks") or []
-    task_lines = "\n".join(
+    task_lines = "
+".join(
         f"- {item.get('name', 'Task')}: {item.get('description', '')} (trigger: {item.get('trigger', 'as requested')})"
         for item in tasks
     ) or "- Follow the customer's job brief exactly."
 
     permissions = spec.get("permissions") or []
-    permission_lines = "\n".join(
+    permission_lines = "
+".join(
         f"- {item.get('action', 'action')}: {item.get('mode', 'ask_before')}"
         for item in permissions
     ) or "- Ask before consequential external actions unless the owner explicitly authorized automatic execution."
 
     requirements = spec.get("requirements") or []
-    requirement_lines = "\n".join(
+    requirement_lines = "
+".join(
         f"- {item.get('key', 'requirement')}: {item.get('status', 'xvond_build')} — {item.get('purpose', '')}"
         for item in requirements
     ) or "- No additional requirements were identified."
 
     intake = spec.get("intake") if isinstance(spec.get("intake"), dict) else {}
-    known_context_lines = "\n".join(
+    known_context_lines = "
+".join(
         f"- {item.get('label') or item.get('key')}: {item.get('value')}"
         for item in (intake.get("known") or [])
         if isinstance(item, dict) and str(item.get("value") or "").strip()
@@ -932,7 +946,8 @@ def build_compiled_employee_system_prompt(*, owner_name: str, spec: dict) -> str
             rendered_customer_inputs.append(
                 f"- {str(key).replace('_', ' ')}: {value}"
             )
-    customer_input_lines = "\n".join(rendered_customer_inputs) or "- No additional owner-provided setup data."
+    customer_input_lines = "
+".join(rendered_customer_inputs) or "- No additional owner-provided setup data."
 
     return f"""You are one persistent Xvond AI employee for {owner_name}.
 
