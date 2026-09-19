@@ -1263,6 +1263,258 @@ class AutomationRuntime:
             db.commit()
             raise
 
+    def resume_event(
+        self,
+        db,
+        *,
+        company_id: int,
+        workflow: AutomationWorkflow,
+        run: AutomationRun,
+        event_name: str,
+        event_id: str,
+        payload: dict | None = None,
+    ) -> AutomationRun:
+        clean_event = str(event_name or "").strip().lower()
+        clean_event_id = str(event_id or "").strip()
+        event_payload = dict(payload or {})
+
+        if run.company_id != company_id or workflow.company_id != company_id:
+            raise ValueError("Event-wait run does not belong to company")
+        if run.workflow_id != workflow.id:
+            raise ValueError("Event-wait run does not belong to workflow")
+        if run.status != "waiting_event":
+            raise ValueError("Automation run is not waiting for an event")
+        if str(run.resume_event_name or "").strip().lower() != clean_event:
+            raise ValueError("Automation run is waiting for a different event")
+        if not clean_event_id or len(clean_event_id) > 200:
+            raise ValueError("Automation event id is invalid")
+
+        output = dict(run.output_data or {})
+        event_wait = output.get("event_wait")
+        if not isinstance(event_wait, dict):
+            raise ValueError("Automation event checkpoint is missing")
+        match = event_wait.get("match")
+        if not event_payload_matches(event_payload, match if isinstance(match, dict) else {}):
+            raise ValueError("Automation event does not match the run checkpoint")
+
+        saved_workflow_fingerprint = str(
+            event_wait.get("workflow_fingerprint") or ""
+        ).strip()
+        if (
+            saved_workflow_fingerprint
+            and saved_workflow_fingerprint
+            != _checkpoint_fingerprint(workflow.steps or [])
+        ):
+            raise ValueError("Automation workflow changed after the event checkpoint")
+
+        step_index = int(event_wait.get("workflow_step_index") or 0)
+        if not 0 <= step_index < len(workflow.steps or []):
+            raise ValueError("Automation event wait step is invalid")
+
+        state = dict(run.input_data or {})
+        saved_state = output.get("state")
+        if isinstance(saved_state, dict):
+            state.update(saved_state)
+        state.pop("_xvond_approved_request_id", None)
+        state.pop("_xvond_graph_resume", None)
+
+        saved_graph_resume = event_wait.get("graph_resume")
+        if isinstance(saved_graph_resume, dict):
+            state["_xvond_graph_resume"] = {
+                "workflow_step_index": step_index,
+                **_mark_event_received(
+                    saved_graph_resume,
+                    event_name=clean_event,
+                    event_id=clean_event_id,
+                    payload=event_payload,
+                ),
+            }
+        else:
+            state["_xvond_graph_resume"] = {
+                "workflow_step_index": step_index,
+                "node_id": str(event_wait.get("node_id") or ""),
+                "node_outputs": deepcopy(event_wait.get("node_outputs") or {}),
+                "event_received": True,
+                "event_name": clean_event,
+                "event_id": clean_event_id,
+                "event_payload": deepcopy(event_payload),
+            }
+
+        step_results = list(output.get("steps") or [])
+        execution_key = str(state.get("_xvond_execution_key") or "")
+        trace = deepcopy(output.get("trace") or {})
+        if not isinstance(trace, dict) or not trace.get("trace_id"):
+            trace = _new_trace(
+                company_id=company_id,
+                workflow=workflow,
+                execution_key=execution_key,
+            )
+        trace["status"] = "running"
+        trace["finished_at"] = None
+
+        run.status = "running"
+        run.resume_at = None
+        run.resume_event_name = None
+        run.error_message = None
+        db.flush()
+
+        try:
+            for index in range(step_index, len(workflow.steps or [])):
+                step = (workflow.steps or [])[index]
+                span_started_at = _trace_iso()
+                span_started_perf = perf_counter()
+                try:
+                    result = self.execute_step(
+                        db,
+                        company_id,
+                        step,
+                        state,
+                        run_id=run.id,
+                        step_index=index,
+                    )
+                except AutomationEventRequired as next_event:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_event",
+                        phase="resume_event",
+                        node_id=next_event.node_id,
+                    )
+                    raise
+                except AutomationWaitRequired as wait:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_time",
+                        phase="resume_event",
+                        node_id=wait.node_id,
+                    )
+                    raise
+                except AutomationApprovalRequired as approval:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_approval",
+                        phase="resume_event",
+                        node_id=approval.node_id,
+                    )
+                    raise
+                except Exception as exc:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="failed",
+                        phase="resume_event",
+                        error=str(exc),
+                    )
+                    raise
+
+                _append_step_span(
+                    trace,
+                    index=index,
+                    step=step,
+                    started_at=span_started_at,
+                    started_perf=span_started_perf,
+                    status="success",
+                    phase="resume_event",
+                )
+                step_results.append(
+                    {
+                        "index": index,
+                        "type": step.get("type"),
+                        "label": step.get("label"),
+                        "result": result,
+                    }
+                )
+                if isinstance(result, dict):
+                    state.update(result)
+                state.pop("_xvond_graph_resume", None)
+
+            run.status = "success"
+            run.resume_at = None
+            run.resume_event_name = None
+            run.finished_at = _utcnow_naive()
+            trace["status"] = "success"
+            trace["finished_at"] = _trace_iso(run.finished_at)
+            run.output_data = {
+                "state": state,
+                "steps": step_results,
+                "trace": trace,
+                "event_wait": {
+                    **event_wait,
+                    "event_id": clean_event_id,
+                    "status": "received",
+                },
+            }
+            db.commit()
+            db.refresh(run)
+            return run
+        except AutomationEventRequired as next_event:
+            state.pop("_xvond_graph_resume", None)
+            return _store_event_checkpoint(
+                db,
+                run=run,
+                workflow=workflow,
+                event_wait=next_event,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+            )
+        except AutomationWaitRequired as wait:
+            state.pop("_xvond_graph_resume", None)
+            return _store_wait_checkpoint(
+                db,
+                run=run,
+                workflow=workflow,
+                wait=wait,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+            )
+        except AutomationApprovalRequired as approval:
+            state.pop("_xvond_graph_resume", None)
+            return _store_approval_checkpoint(
+                db,
+                run=run,
+                workflow=workflow,
+                approval=approval,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+            )
+        except Exception as exc:
+            run.status = "failed"
+            run.resume_at = None
+            run.resume_event_name = None
+            run.error_message = str(exc)[:2000]
+            run.finished_at = _utcnow_naive()
+            trace["status"] = "failed"
+            trace["finished_at"] = _trace_iso(run.finished_at)
+            run.output_data = {
+                "state": state,
+                "steps": step_results,
+                "trace": trace,
+                "event_wait": {
+                    **event_wait,
+                    "event_id": clean_event_id,
+                    "status": "resume_failed",
+                },
+            }
+            db.commit()
+            raise
+
     def execute_step(
         self,
         db,
