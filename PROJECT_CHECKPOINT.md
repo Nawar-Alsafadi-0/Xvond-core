@@ -64,18 +64,27 @@ Canonical sequence:
 5. Xvond provisions generated capabilities/actions/automation contracts.
 6. Customer supplies only the inputs and communication channels actually required by the current employee contract.
 7. Readiness evaluates subscription, provider route, compiled requirements, provisioned execution and required channel setup.
-8. Customer launches the employee atomically.
-9. Customer may deactivate, revise the Job Brief, rebuild and relaunch.
-10. Recurring/background work runs through the production automation scheduler when the employee specification requires it.
+8. Customer previews/tests the exact current build without live channel sends or business side effects.
+9. Customer launches the employee atomically.
+10. Customer may deactivate, refine or revise the Job Brief, roll back a saved version, rebuild and relaunch.
+11. Recurring/background work runs through the production automation scheduler when the employee specification requires it.
 
 Important Self-Service rules:
 
+- The Customer Portal exposes **Build your employee** as a first-class Self-Service workspace and opens Draft employees there by default.
+- The Builder presents one canonical journey: **Job Brief -> Plan -> Build -> Setup -> Preview & Test -> Launch**. Runtime readiness remains authoritative; the UI does not infer readiness by parsing blocker text.
+- Natural-language refinement recompiles the employee contract, while bounded version history supports rollback to a previous draft.
+- Launch requires Preview & Test evidence for the exact current compiled build. Setup, connection or build changes invalidate older preview evidence.
+- Owner-provided setup data is collected inside the Builder only for the exact compiled requirement fields. All required fields must be complete before the requirement resolves.
+- Password/token/API-key/credential-shaped requirements never use generic setup fields; they stay on a protected Xvond/provider connection path.
+- A `files` requirement resolves only from an enabled PDF actually attached to that employee; generic text knowledge does not falsely satisfy it.
 - A personal/background employee may legitimately require **zero communication channels**.
 - Customer-facing channel slots are derived from the current Job Brief plus compiled channel requirements.
 - Stale configured channels from an older Job Brief do not override the current employee contract.
 - Revising a Job Brief while Draft deactivates no-longer-requested communication channels but preserves reusable connection configuration/credentials.
 - Customer Website/WhatsApp setup is rejected at the API layer if that channel is outside the current Self-Service employee contract.
 - A live employee must be deactivated before changing its Website/WhatsApp connection.
+- Customer-owned API/POS/CRM/ERP/webhook connections must pass protected validation before binding. Configuration changes require deactivation when live, clear prior validation and preview evidence when Draft, and fail closed at readiness and runtime until revalidated.
 - Real non-Mock AI routing is required in production even for a channel-less employee.
 - Knowledge requirements resolve only from enabled, tenant-owned knowledge actually attached to the employee.
 - Managed delivery rules are not reused as blanket Self-Service blockers.
@@ -101,6 +110,7 @@ Implemented platform foundations include:
 - Company Profile / Business Information
 - AI Employees and provider routing
 - Job Brief compile/provision/revise/rebuild lifecycle
+- natural-language refinement, bounded version rollback and build-scoped Preview & Test
 - Knowledge
 - generic Actions / Action Requests
 - Website and WhatsApp customer setup
@@ -212,11 +222,28 @@ A correctly subscribed coexistence connection may serve AI traffic before the fi
 
 A live customer acceptance remains mandatory before WhatsApp is called service-ready: customer inbound, AI outbound, native human reply/echo, AI suppression while human owns the conversation, portal handoff/reply, explicit Return to AI and duplicate webhook replay.
 
-### Other communication surfaces
+### Unified communication channel delivery
 
-Voice has runtime/provisioning foundations but is not service-ready until a real provider/phone/call path passes end-to-end acceptance.
+The employee contract may request any registered communication surface. Xvond keeps channel request truth separate from runtime truth:
 
-Self-Service direct live channel support currently centers on **Website and WhatsApp**. Other compiled connection requirements must remain truthfully marked as needing an Xvond/provider adapter rather than being shown as magically connectable.
+- **Xvond Workspace** — built in; no external channel slot.
+- **Website Chat** — Self-Service setup; live Xvond widget runtime.
+- **WhatsApp** — Self-Service setup; live Meta Cloud API runtime.
+- **Voice / Phone** — Xvond-managed setup; live Vapi runtime foundation. It is not service-ready until a real phone/call path passes end-to-end acceptance.
+- **Telegram** — uses the shared Xvond Managed Channel Gateway plus a source-controlled Telegram Bot API provider workflow. Inbound webhook updates are normalized with stable `update_id` identity; outbound `sendMessage` must return Telegram `message_id` before Xvond accepts delivery. Bot tokens and webhook/provider secrets remain in the workflow plane. Telegram still requires real tenant provisioning and external round-trip acceptance before a sold customer channel is called service-ready.
+- **Instagram DM / Facebook Messenger** — use a source-controlled Meta Messaging provider workflow on the same durable Xvond Managed Channel Gateway. The workflow verifies Meta webhook signatures from the raw request body before normalization, ignores echoes, uses provider message IDs for durable outbound confirmation, and keeps Meta access tokens/app secrets in the workflow plane. Each tenant still requires correct provider permissions, webhook subscription and a real inbound/outbound acceptance run before that exact customer channel is service-ready.
+- **Email, SMS, Slack, Microsoft Teams and Custom/API channels** — the shared Xvond Managed Channel Gateway runtime exists, but these currently require a custom/provider-specific Xvond binding. They must not be presented as packaged live connectors until a source-controlled provider binding and real external acceptance exist.
+
+A requested Managed channel creates a durable, disabled provisioning work item for Xvond Admin. Removing that channel from the current Job Brief cancels/deactivates the request without fabricating a live connection. The shared runtime does not make a provider service-ready by itself: each provider workflow, credential set, webhook and real customer round-trip still require external acceptance before that connector is sold as live.
+
+A channel must never be presented or activated as live merely because configuration values exist. Runtime activation requires a registered live adapter plus channel-specific readiness evidence. Voice specifically requires successful Vapi provisioning evidence before launch.
+
+Communication surfaces and action integrations remain distinct. For example:
+
+- `email` is an employee communication surface; `email_read` / `email_send` are mailbox action integrations.
+- `instagram` is Instagram DM; `instagram_publish` remains a publishing action integration.
+
+The public Builder, employee compiler, Self-Service readiness, Customer Portal and Xvond Admin all derive channel delivery truth from the same channel registry. The registry distinguishes a generic live gateway from a packaged provider binding, so a channel may be requestable through Xvond Managed delivery without being advertised as a completed connector.
 
 ## Automation scheduler
 
@@ -245,7 +272,15 @@ Self-Service plan flow currently behaves truthfully:
 - an active subscription is not silently replaced by a customer plan change
 - when Xvond/Admin activates a pending paid subscription, its billing period starts from activation time
 
-**There is no real online payment checkout/provider in Xvond Core yet.** Paid-plan selection must not be described as completed payment.
+Xvond Core has a provider-neutral online checkout boundary. Paddle remains an optional adapter, while Tap Payments is the intended Gulf/Oman production payment path.
+
+Tap checkout uses the hosted Charges API: Xvond creates a server-side charge with tenant/subscription metadata, a stable idempotency reference, the Xvond webhook URL and a redirect URL. Xvond never receives raw card data. Paid entitlement remains `pending_payment` until a Tap `CAPTURED` webhook passes Tap hashstring verification and is persisted as same-company/same-checkout payment evidence. Tap failed/unknown charge outcomes never grant entitlement.
+
+Tap recurring billing is intentionally feature-gated by the merchant account and by Xvond configuration. The first charge can request `save_card=true` only after Tap enables that capability. When a verified successful charge returns Customer ID, Card ID and Payment Agreement ID, Xvond stores only those provider references in encrypted configuration; raw PAN/CVC is never stored.
+
+Automatic renewal code is present but fail-closed and disabled by default. `TAP_RECURRING_ENABLED=true` additionally requires `TAP_SAVE_CARD_FOR_RECURRING=true`. The scheduler creates a durable, period-scoped renewal attempt before calling Tap, generates a fresh one-time saved-card token for every renewal, submits the merchant-initiated charge with a stable idempotency reference, and never extends entitlement from the synchronous API response alone. Only a verified Tap webhook may advance the billing period. Ambiguous charge outcomes become `unknown` and are never automatically retried.
+
+Online billing remains disabled by default. For Tap production, `BILLING_PROVIDER=tap`, a live `sk_live_` key, Merchant ID, HTTPS public origin/redirect, signed webhook acceptance and at least one real charge are required before the paid Self-Service path is service-ready.
 
 ## Security and privacy
 
@@ -321,6 +356,25 @@ Production deploy additionally:
 - requires the canonical `PUBLIC_BASE_URL/health/ready` to succeed over HTTPS with healthy production JSON
 - supports customer-specific production acceptance after cutover
 
+## Market launch gate
+
+Xvond now has a fail-closed final customer-path gate at `scripts/market_launch_gate.py`. It builds on the production acceptance gate instead of duplicating platform health checks.
+
+For one exact company/employee launch path it requires:
+
+- production post-live readiness and no unresolved external/delivery incidents
+- an eligible real AI provider route and, by default, one live AI health request
+- the requested launch mode to match the company lifecycle source (`managed` vs `self_service`)
+- every explicitly sold channel to be a packaged Xvond provider, configured, enabled and backed by persisted real-customer round-trip evidence
+- WhatsApp Coexistence launches to also have real human-takeover/echo evidence
+- an active AI Employee subscription
+- optional online-billing enforcement for paid Self-Service launch
+- optional same-company/same-checkout signed payment-webhook evidence before declaring the paid path accepted
+
+Production deploy can invoke this gate after cutover using `MARKET_ACCEPTANCE_MODE`, `MARKET_ACCEPTANCE_CHANNELS`, the existing acceptance company/agent ids, and the optional billing evidence flags.
+
+This gate deliberately cannot manufacture provider evidence. Telegram, Meta, WhatsApp, Website, Voice and payment acceptance markers must originate from the actual external/customer path.
+
 ## External validation boundary
 
 Repository CI cannot truthfully prove:
@@ -338,16 +392,38 @@ Repository CI cannot truthfully prove:
 
 No live provider, Meta, Workflow Engine, customer-integration or payment secret belongs in Git.
 
+## Managed channel delivery durability
+
+Xvond-managed communication channels now use a provider-neutral durable delivery state machine before any customer-facing side effect. AI and human replies are persisted as delivery records before network dispatch, use stable idempotency identities, and perform the external `channel.send` call without blind transport retries.
+
+Delivery states distinguish:
+
+- `pending` — persisted but not dispatched yet
+- `sending` — the side effect has started
+- `accepted` — the provider confirmed success and returned a provider message identity
+- `unknown` — Xvond cannot prove whether the provider accepted the send; automatic resend is forbidden
+- `failed` — a confirmed non-success; only explicitly retryable failures may be retried
+
+A successful workflow result without a provider message identity is not treated as accepted. Unknown outcomes require admin reconciliation. Admin may mark an unknown delivery as confirmed sent using a provider message ID, or as confirmed not sent; only the latter becomes safely retryable.
+
+The production acceptance gate counts unresolved managed-channel deliveries as incidents, and the Workflow Engine is required whenever an enabled employee depends on managed communication channels, not only when Business Actions are enabled.
+
+The channel inbound workflow remains backward-compatible for one release during the durable-delivery cutover because production deployment syncs the workflow before replacing Core. Old Core follows the legacy provider-send path; new Core returns durable delivery evidence and the workflow immediately stops before any second provider send. Do not remove that compatibility branch until a durable-delivery release has been promoted and verified in production.
+
 ## Current release status at this checkpoint
 
-Repository state through the Self-Service channel-contract work is **code validated**, but this checkpoint does **not** claim that the reviewed release has been deployed to the production server.
+Repository state through the Replit-like Self-Service build loop, Market Launch Gate and fail-closed Tap recurring renewal work is **code validated**, but this checkpoint does **not** claim that the reviewed release has been deployed to the production server.
 
 Highest-priority remaining external/product work:
 
-1. Deploy the reviewed `main` release to the server using the canonical Nginx + deploy flow.
-2. Run real production end-to-end acceptance for Website, WhatsApp/Meta, Workflow Engine and the intended AI provider.
-3. Implement a real payment provider/checkout/webhook/idempotency path before calling paid Self-Service checkout automated.
-4. Implement and externally validate real Email/Instagram provider adapters before selling them as live connectors.
+1. Deploy the reviewed `main` release on the canonical production server and pass the production acceptance gate.
+2. Configure production Workflow Engine route registries/secrets and provision one real Telegram bot; prove Telegram inbound -> Xvond employee -> durable provider-confirmed outbound -> handoff -> Return to AI.
+3. Configure Meta Messaging app permissions/subscriptions and real Instagram/Messenger routes; validate raw-body signature handling and one real inbound/outbound round trip for each launch channel.
+4. Re-activate Tap Payments, configure the live Tap key/Merchant ID and webhook/redirect paths, run sandbox then one real `CAPTURED` Self-Service charge, and confirm whether Save Card/recurring capability is enabled before turning on automatic renewals.
+5. Run the final Self-Service market gate for signup -> Job Brief -> Smart Intake -> plan/payment -> build -> setup -> launch -> conversation/action -> handoff/resume on the exact channels being sold.
+6. Run one Managed-customer market gate through Xvond Admin to prove operator-built and Self-Service employees converge on the same runtime without sharing lifecycle UX.
+7. After those external gates pass, the reviewed release can be truthfully exposed as the public/global Xvond AI Employee launch. Email/SMS/Slack/Teams/Custom remain custom Xvond setup until packaged provider bindings are intentionally added.
+
 
 ## Branch model
 

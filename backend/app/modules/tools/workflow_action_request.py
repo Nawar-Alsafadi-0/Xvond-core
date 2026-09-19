@@ -72,19 +72,19 @@ def _workflow_payload(result: dict) -> dict:
 
 
 class WorkflowActionRequestTool(ActionRequestTool):
-    """Authoritative business-action tool backed by the workflow engine.
+    """Authoritative business-action dispatcher.
 
     Xvond remains the control plane: it validates scope, collects customer data,
-    records request state and decides which action is allowed. The external
-    workflow engine is the only execution plane for availability checks,
-    execution and cancellation.
+    records request state and decides which action is allowed. Xvond-native
+    capabilities and customer-owned generic API integrations execute through the
+    hardened Core adapter so encrypted customer credentials never leave Xvond.
+    Packaged/managed workflow actions continue through the workflow engine.
     """
 
     description = (
-        "Run configured business actions through the Xvond Workflow Engine. "
-        "Xvond validates and tracks the request, while the workflow engine performs "
-        "availability checks, bookings, orders, CRM/POS/ERP/API work, notifications, "
-        "cancellations and other operational side effects."
+        "Run configured business actions through the correct Xvond execution path. "
+        "Native capabilities and protected customer connections stay inside Xvond; "
+        "packaged managed workflows use the Xvond Workflow Engine."
     )
 
     @staticmethod
@@ -125,6 +125,23 @@ class WorkflowActionRequestTool(ActionRequestTool):
                 success=False,
                 error="This business action is not configured or enabled",
             )
+
+        destination = action.get("destination") or {}
+        destination_type = str(destination.get("type") or "").strip()
+        adapter = str(destination.get("adapter") or "").strip()
+
+        # Concrete Xvond-native business modules and customer-owned protected
+        # integrations execute through the hardened Core adapter. The bounded
+        # generic capability runtime deliberately continues through the managed
+        # workflow -> Xvond Internal callback so its durable/idempotent execution
+        # contract remains intact.
+        if destination_type == "integration":
+            return super().execute(arguments, context)
+        if destination_type == "xvond_internal" and adapter in {
+            "booking",
+            "business_record",
+        }:
+            return super().execute(arguments, context)
 
         if operation == "check_availability":
             details = arguments.get("details") or {}

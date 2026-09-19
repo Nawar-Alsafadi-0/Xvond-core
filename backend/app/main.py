@@ -40,8 +40,12 @@ from backend.app.api.admin_automation import router as admin_automation_router
 from backend.app.api.admin_analytics_builder import router as admin_analytics_builder_router
 from backend.app.api.admin_service_billing import router as admin_service_billing_router
 from backend.app.api.internal_workflow_actions import router as internal_workflow_actions_router
+from backend.app.api.internal_channel_gateway import router as internal_channel_gateway_router
 from backend.app.api.public_channels import router as public_channels_router
 from backend.app.api.public_employee_builder import router as public_employee_builder_router
+from backend.app.api.public_billing import router as public_billing_router
+from backend.app.api.public_media import router as public_media_router
+from backend.app.api.public_automation_webhooks import router as public_automation_webhooks_router
 from backend.app.api.voice_llm import router as voice_llm_router
 from backend.app.api.website_widget import router as website_widget_router
 from backend.app.api.ai_agents import router as ai_agents_router
@@ -55,6 +59,7 @@ from backend.app.api.customer_meta_whatsapp import router as customer_meta_whats
 from backend.app.api.customer_operations import router as customer_operations_router
 from backend.app.api.customer_portal import router as customer_portal_router
 from backend.app.api.customer_subscription import router as customer_subscription_router
+from backend.app.api.billing_webhooks import router as billing_webhooks_router
 from backend.app.api.modules import router as modules_router
 from backend.app.api.usage import router as usage_router
 from backend.app.api.whatsapp_webhook import router as whatsapp_webhook_router
@@ -162,6 +167,8 @@ _RATE_LIMITS = {
     ("POST", "/auth/customer/reset-password"): (10, 300),
     ("POST", "/public/employee-builder/preview"): (60, 60),
     ("POST", "/webhooks/whatsapp"): (240, 60),
+    ("POST", "/webhooks/billing/paddle"): (240, 60),
+    ("POST", "/webhooks/billing/tap"): (240, 60),
 }
 
 
@@ -177,6 +184,8 @@ async def protect_public_endpoints(request: Request, call_next):
             rule = (180, 60)
         elif request.url.path.startswith("/v1/voice/") and request.url.path.endswith("/chat/completions"):
             rule = (240, 60)
+        elif request.url.path.startswith("/webhooks/automation/"):
+            rule = (120, 60)
     if rule is not None:
         client_ip = request_client_ip(request)
         limit, window = rule
@@ -225,9 +234,13 @@ for r in [
     admin_analytics_builder_router,
     admin_service_billing_router,
     internal_workflow_actions_router,
+    internal_channel_gateway_router,
     ai_agents_router,
     public_channels_router,
     public_employee_builder_router,
+    public_billing_router,
+    public_media_router,
+    public_automation_webhooks_router,
     voice_llm_router,
     website_widget_router,
     modules_router,
@@ -241,6 +254,7 @@ for r in [
     customer_operations_router,
     customer_portal_router,
     customer_subscription_router,
+    billing_webhooks_router,
     usage_router,
     whatsapp_webhook_router,
 ]:
@@ -308,6 +322,16 @@ def public_employee_builder():
     return RedirectResponse(
         url=f"/static/public/employee-builder.html?v={CUSTOMER_PORTAL_VERSION}"
     )
+
+
+@app.get("/checkout")
+def checkout():
+    return RedirectResponse(url=f"/static/public/checkout.html?v={CUSTOMER_PORTAL_VERSION}")
+
+
+@app.get("/billing/return")
+def billing_return():
+    return RedirectResponse(url="/customer-ui#employee-builder")
 
 
 @app.get("/privacy")

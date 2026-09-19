@@ -9,6 +9,7 @@ from backend.app.core.config_secrets import (
     reveal_config,
 )
 from backend.app.core.database.connection import SessionLocal
+from backend.app.core.n8n_gateway import N8NGatewayError, n8n_gateway
 from backend.app.core.dependencies import require_xvond_admin
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
@@ -16,7 +17,14 @@ from backend.app.models.user import User
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.audit.service import audit_service
 from backend.app.modules.billing.limits import limits_service
-from backend.app.modules.channels.catalog import get_channel_definition, validate_channel_config
+from backend.app.modules.channels.catalog import (
+    CHANNEL_RUNTIME_LIVE,
+    N8N_CHANNEL_ADAPTER,
+    canonical_channel_type,
+    get_channel_capability,
+    get_channel_definition,
+    validate_channel_config,
+)
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
 from backend.app.modules.knowledge.models import AgentKnowledge, KnowledgeDocument
@@ -113,11 +121,26 @@ def serialize_channel(
             "meta_error_code": None,
         }
 
+    capability = get_channel_capability(channel.channel_type) or {}
+    if capability.get("runtime_state") != CHANNEL_RUNTIME_LIVE:
+        connection = {
+            "connected": False,
+            "meta_onboarding_complete": False,
+            "connection_status": "adapter_required",
+            "connection_issue": "Xvond runtime adapter is not available for this channel yet.",
+            "connection_checked_at": None,
+            "meta_error_code": None,
+        }
+
     return {
         "id": channel.id,
         "company_id": channel.company_id,
         "agent_id": channel.agent_id,
-        "channel_type": channel.channel_type,
+        "channel_type": canonical_channel_type(channel.channel_type),
+        "channel_name": capability.get("name") or channel.channel_type,
+        "setup_mode": capability.get("setup_mode"),
+        "runtime_state": capability.get("runtime_state"),
+        "runtime_adapter": capability.get("runtime_adapter"),
         "config": public_config(channel.config),
         "configured_secret_fields": configured_secret_fields(channel.config),
         "configured": configured,
@@ -208,6 +231,14 @@ def _useful_business_knowledge(document: KnowledgeDocument) -> bool:
 
 def _activation_blockers(db, channel: AgentChannel) -> list[str]:
     blockers = []
+    capability = get_channel_capability(channel.channel_type)
+    if capability is None:
+        return ["Channel type is not registered"]
+    if capability.get("runtime_state") != CHANNEL_RUNTIME_LIVE:
+        return [
+            f"{capability.get('name') or channel.channel_type}: Xvond runtime adapter is not available yet"
+        ]
+
     company = db.query(Company).filter(Company.id == channel.company_id).first()
     agent = db.query(AIAgent).filter(
         AIAgent.id == channel.agent_id,
@@ -224,11 +255,12 @@ def _activation_blockers(db, channel: AgentChannel) -> list[str]:
 
     channel_config = reveal_config(channel.config)
     configured = _channel_configured(channel, channel_config)
+    channel_type = canonical_channel_type(channel.channel_type)
     if not configured:
         blockers.append(
-            f"{channel.channel_type.title()} channel configuration is incomplete"
+            f"{capability.get('name') or channel_type.title()} channel configuration is incomplete"
         )
-    elif channel.channel_type == "whatsapp":
+    elif channel_type == "whatsapp":
         connection = whatsapp_connection_state(
             channel_config,
             verify_remote=True,
@@ -238,6 +270,40 @@ def _activation_blockers(db, channel: AgentChannel) -> list[str]:
                 connection.get("connection_issue")
                 or "WhatsApp must be connected and verified with Meta"
             )
+    elif channel_type == "voice":
+        required = (
+            "vapi_assistant_id",
+            "vapi_phone_number_id",
+            "vapi_llm_credential_id",
+            "llm_api_key",
+        )
+        if str(channel_config.get("provisioning_state") or "").strip().lower() != "connected":
+            blockers.append("Voice: Xvond managed provisioning is not complete")
+        elif any(not str(channel_config.get(item) or "").strip() for item in required):
+            blockers.append("Voice: Vapi provisioning evidence is incomplete")
+    elif capability.get("runtime_adapter") == N8N_CHANNEL_ADAPTER:
+        if not n8n_gateway.configured():
+            blockers.append("Xvond managed channel gateway is not configured")
+        else:
+            try:
+                route_check = n8n_gateway.execute(
+                    company_id=channel.company_id,
+                    agent_id=channel.agent_id,
+                    action="channel.check",
+                    data={
+                        "channel_id": channel.id,
+                        "connection_key": str(channel_config.get("connection_key") or "").strip(),
+                    },
+                )
+            except N8NGatewayError:
+                blockers.append("Xvond managed channel route could not be verified")
+            else:
+                if (
+                    route_check.get("success") is not True
+                    or not isinstance(route_check.get("data"), dict)
+                    or route_check["data"].get("configured") is not True
+                ):
+                    blockers.append("Xvond managed channel route is not configured")
 
     docs = (
         db.query(KnowledgeDocument)
@@ -266,7 +332,7 @@ def create_channel(
         agent = db.query(AIAgent).filter(AIAgent.id == agent_id).first()
         if agent is None:
             raise HTTPException(404, "AI Agent not found")
-        channel_type = data.channel_type.strip().lower()
+        channel_type = canonical_channel_type(data.channel_type)
         if not channel_type:
             raise HTTPException(400, "Channel type is required")
         if get_channel_definition(channel_type) is None:

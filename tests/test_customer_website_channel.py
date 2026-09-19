@@ -240,6 +240,8 @@ def test_customer_website_setup_flows_into_atomic_self_service_launch(
                 "delivery_mode": "self_service",
                 "source_description": "Reply to website visitors.",
                 "requested_channels": ["website"],
+                "compiled_at": "2026-09-18T12:00:00Z",
+                "last_tested_compiled_at": "2026-09-18T12:00:00Z",
                 "compiled_spec": {
                     "scope": "business",
                     "requirements": [

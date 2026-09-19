@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Xvond — Build your AI employee</title>
   <style>
-    :root{font-family:Inter,Arial,sans-serif;color:#0f172a;background:#f8fafc}*{box-sizing:border-box}body{margin:0}.wrap{max-width:920px;margin:0 auto;padding:28px 20px 64px}.brand{font-size:28px;font-weight:800;color:#2563eb}.hero{padding:72px 0 34px}.hero h1{font-size:clamp(38px,7vw,72px);line-height:1.05;margin:12px 0}.hero p{font-size:20px;color:#475569;max-width:780px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:24px;box-shadow:0 14px 40px rgba(15,23,42,.06);margin-top:18px}textarea,input{width:100%;border:1px solid #cbd5e1;border-radius:12px;padding:14px 16px;font:inherit;background:#fff}textarea{min-height:190px;resize:vertical}button{border:0;border-radius:12px;padding:13px 18px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff}button:disabled{opacity:.55;cursor:not-allowed}.row{display:flex;gap:10px;flex-wrap:wrap}.muted{color:#64748b}.status{margin-top:12px;color:#b91c1c}.hidden{display:none!important}.chips{display:flex;gap:8px;flex-wrap:wrap}.chip{display:flex;gap:7px;align-items:center;padding:9px 11px;border:1px solid #dbeafe;border-radius:999px;background:#eff6ff}.chip input{width:auto}.auth-tabs{display:flex;gap:8px;margin-bottom:14px}.auth-tabs button{background:#e2e8f0;color:#0f172a}.auth-tabs button.active{background:#2563eb;color:#fff}.success{border-color:#86efac;background:#f0fdf4}.note{margin-top:14px;padding:12px 14px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0}.examples{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:16px 0 0}.example{padding:12px 14px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc;color:#334155;font-size:14px}.ltr{direction:ltr;text-align:left}@media(max-width:720px){.hero{padding-top:40px}.examples{grid-template-columns:1fr}}
+    :root{font-family:Inter,Arial,sans-serif;color:#0f172a;background:#f8fafc}*{box-sizing:border-box}body{margin:0}.wrap{max-width:920px;margin:0 auto;padding:28px 20px 64px}.brand{font-size:28px;font-weight:800;color:#2563eb}.hero{padding:72px 0 34px}.hero h1{font-size:clamp(38px,7vw,72px);line-height:1.05;margin:12px 0}.hero p{font-size:20px;color:#475569;max-width:780px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:24px;box-shadow:0 14px 40px rgba(15,23,42,.06);margin-top:18px}textarea,input{width:100%;border:1px solid #cbd5e1;border-radius:12px;padding:14px 16px;font:inherit;background:#fff}textarea{min-height:190px;resize:vertical}button{border:0;border-radius:12px;padding:13px 18px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff}button:disabled{opacity:.55;cursor:not-allowed}.row{display:flex;gap:10px;flex-wrap:wrap}.muted{color:#64748b}.status{margin-top:12px;color:#b91c1c}.hidden{display:none!important}.chips{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.chip{display:grid;grid-template-columns:auto 1fr;gap:8px 10px;align-items:start;padding:12px 14px;border:1px solid #dbeafe;border-radius:14px;background:#eff6ff}.chip input{width:auto;margin-top:3px}.chip-copy{display:grid;gap:3px}.chip-meta{font-size:12px;color:#64748b}.auth-tabs{display:flex;gap:8px;margin-bottom:14px}.auth-tabs button{background:#e2e8f0;color:#0f172a}.auth-tabs button.active{background:#2563eb;color:#fff}.success{border-color:#86efac;background:#f0fdf4}.note{margin-top:14px;padding:12px 14px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0}.examples{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:16px 0 0}.example{padding:12px 14px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc;color:#334155;font-size:14px}.ltr{direction:ltr;text-align:left}@media(max-width:720px){.hero{padding-top:40px}.examples,.chips{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
@@ -69,17 +69,17 @@
     <section id="success-card" class="card success hidden">
       <h2>طلب موظفك انحفظ</h2>
       <p>حفظنا الـJob Brief كامل بدون استخدام AI. من لوحة التحكم بتشترك، وبعدها يبدأ تجهيز وتشغيل الموظف حسب الشغل اللي طلبته.</p>
-      <a href="/customer-ui"><button>افتح لوحة التحكم</button></a>
+      <a href="/customer-ui#employee-builder"><button>كمّل تجهيز موظفي</button></a>
     </section>
   </main>
 
 <script>
 (() => {
-  const CHANNEL_LABELS = {
-    xvond: "Xvond Workspace",
-    website: "Website Chat",
-    whatsapp: "WhatsApp"
-  };
+  let channelOptions = [
+    {type:"xvond", name:"Xvond Workspace", setup_label:"Built in"},
+    {type:"website", name:"Website Chat", setup_label:"Connect yourself"},
+    {type:"whatsapp", name:"WhatsApp", setup_label:"Connect yourself"}
+  ];
 
   const $ = id => document.getElementById(id);
   const show = (id, yes=true) => $(id).classList.toggle("hidden", !yes);
@@ -91,7 +91,32 @@
 
   function renderChannels(selectedValues=[]) {
     const selected = new Set(selectedValues || []);
-    $("channels").innerHTML = Object.entries(CHANNEL_LABELS).map(([value, label]) => `<label class="chip"><input type="checkbox" name="channel" value="${value}" ${selected.has(value) ? "checked" : ""}> ${label}</label>`).join("");
+    $("channels").innerHTML = channelOptions.map(item => `
+      <label class="chip">
+        <input type="checkbox" name="channel" value="${item.type}" ${selected.has(item.type) ? "checked" : ""}>
+        <span class="chip-copy">
+          <strong>${item.name}</strong>
+          <span class="chip-meta">${item.setup_label || ""}</span>
+        </span>
+      </label>
+    `).join("");
+  }
+
+  async function loadChannelOptions(selectedValues=[]) {
+    try {
+      const response = await fetch("/public/employee-builder/channels", {
+        headers:{"Accept":"application/json"}
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data.channels) && data.channels.length) {
+          channelOptions = data.channels;
+        }
+      }
+    } catch (_) {
+      // Keep the built-in safe fallback if the public registry cannot load.
+    }
+    renderChannels(selectedValues);
   }
 
   const saveDraft = () => sessionStorage.setItem("xvond_employee_draft", JSON.stringify({
@@ -176,13 +201,12 @@
     await createEmployee(false);
   }
 
-  renderChannels();
   const saved = loadDraft();
   if (saved?.description) {
     $("description").value = saved.description;
     $("employee-name").value = saved.name || "My AI Employee";
-    renderChannels(saved.channels || []);
   }
+  loadChannelOptions(saved?.channels || []);
 
   $("create-btn").addEventListener("click", () => createEmployee(true));
   $("login-btn").addEventListener("click", login);

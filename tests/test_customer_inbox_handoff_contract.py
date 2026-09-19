@@ -31,6 +31,8 @@ def test_handoff_capability_matrix_matches_real_delivery_adapters():
     whatsapp = customer_inbox._handoff_capabilities("whatsapp")
     website = customer_inbox._handoff_capabilities("website")
     voice = customer_inbox._handoff_capabilities("voice")
+    telegram = customer_inbox._handoff_capabilities("telegram")
+    instagram = customer_inbox._handoff_capabilities("instagram")
     unknown = customer_inbox._handoff_capabilities("future_channel")
 
     assert whatsapp == {
@@ -45,6 +47,13 @@ def test_handoff_capability_matrix_matches_real_delivery_adapters():
     }
     assert voice["handoff_supported"] is False
     assert voice["human_reply_supported"] is False
+    assert telegram == {
+        "handoff_supported": True,
+        "human_reply_supported": True,
+        "human_reply_delivery": "xvond_managed_channel",
+    }
+    assert instagram["handoff_supported"] is True
+    assert instagram["human_reply_supported"] is True
     assert unknown["handoff_supported"] is False
     assert unknown["human_reply_supported"] is False
 
@@ -171,3 +180,18 @@ def test_handoff_model_and_migration_have_explicit_operator_ownership():
     assert '"assigned_user_id"' in migration
     assert '"taken_over_at"' in migration
     assert '"completed_at"' in migration
+
+
+def test_managed_channel_human_reply_is_durable_before_network_delivery():
+    source = inspect.getsource(customer_inbox.send_human_reply)
+    assert 'delivery == "xvond_managed_channel"' in source
+    assert "ensure_managed_delivery(" in source
+    assert "attempt_managed_delivery(" in source
+    assert '"idempotency_key": source_key' in source
+    assert 'action="customer_inbox.human_reply_prepared"' in source
+    ensure_position = source.index("ensure_managed_delivery(")
+    commit_position = source.index("db.commit()", ensure_position)
+    attempt_position = source.index("attempt_managed_delivery(", commit_position)
+    assert ensure_position < commit_position < attempt_position
+    assert "will not be resent blindly" in source
+    assert "n8n_gateway.execute(" not in source

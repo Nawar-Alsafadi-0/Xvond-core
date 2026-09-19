@@ -8,37 +8,53 @@ from fastapi import HTTPException
 
 from backend.app.core.ai.provider_policy import runtime_selections
 from backend.app.core.config.settings import settings
+from backend.app.core.n8n_gateway import N8NGatewayError, n8n_gateway
 from backend.app.core.config_secrets import reveal_config
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
+from backend.app.modules.ai_agent.employee_compiler import (
+    is_sensitive_requirement_key,
+    normalize_requirement_key,
+)
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.billing.service_limits import service_limits
 from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
-from backend.app.modules.channels.catalog import validate_channel_config
+from backend.app.modules.channels.catalog import (
+    CHANNEL_RUNTIME_ADAPTER_REQUIRED,
+    CHANNEL_RUNTIME_LIVE,
+    CHANNEL_SETUP_INTERNAL,
+    CHANNEL_SETUP_MANAGED,
+    CHANNEL_SETUP_SELF_SERVICE,
+    N8N_CHANNEL_ADAPTER,
+    canonical_channel_type,
+    customer_channel_types,
+    get_channel_capability,
+    live_managed_channel_types,
+    live_self_service_channel_types,
+    packaged_managed_channel_types,
+    validate_channel_config,
+)
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
+from backend.app.modules.integrations.catalog import integration_validation_ready
+from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.knowledge.models import AgentKnowledge, KnowledgeDocument
 
 
 SELF_SERVICE_SOURCE = "self_service"
 
-# Only communication surfaces consume a channel slot. Gmail, email read/send,
-# Instagram publishing and similar systems are integrations, not chat channels.
-COMMUNICATION_CHANNELS = frozenset(
-    {
-        "xvond",
-        "website",
-        "whatsapp",
-        "voice",
-        "telegram",
-        "custom",
-    }
-)
-
+# Communication surfaces are defined once in the channel delivery registry.
+# Publishing/actions (for example Instagram publishing or send-email actions)
+# remain integrations; Instagram DM and Email can also be selected as employee
+# communication surfaces and follow the channel delivery contract below.
+COMMUNICATION_CHANNELS = frozenset(customer_channel_types())
 EXTERNAL_COMMUNICATION_CHANNELS = COMMUNICATION_CHANNELS - {"xvond"}
-SELF_SERVICE_LIVE_EXTERNAL_CHANNELS = frozenset({"whatsapp", "website"})
-SELF_SERVICE_DIRECT_CONNECTION_REQUIREMENTS = SELF_SERVICE_LIVE_EXTERNAL_CHANNELS
+SELF_SERVICE_LIVE_EXTERNAL_CHANNELS = (
+    live_self_service_channel_types() - {"xvond"}
+)
+MANAGED_LIVE_EXTERNAL_CHANNELS = live_managed_channel_types()
+PACKAGED_MANAGED_EXTERNAL_CHANNELS = packaged_managed_channel_types()
 
 
 def is_self_service_company(company: Company | None) -> bool:
@@ -51,7 +67,7 @@ def is_self_service_company(company: Company | None) -> bool:
 def communication_channels(values: Any) -> list[str]:
     result: list[str] = []
     for item in values or []:
-        key = str(item or "").strip().lower()
+        key = canonical_channel_type(item)
         if key in COMMUNICATION_CHANNELS and key not in result:
             result.append(key)
     return result
@@ -100,7 +116,7 @@ def assert_self_service_channel_selected(
         else None
     )
     selected = self_service_channel_slots(builder)
-    key = str(channel_type or "").strip().lower()
+    key = canonical_channel_type(channel_type)
     if key not in selected:
         raise HTTPException(
             409,
@@ -115,7 +131,7 @@ def _requirement_channel_keys(spec: dict) -> list[str]:
             continue
         if str(item.get("kind") or "").strip().lower() != "channel":
             continue
-        key = str(item.get("key") or "").strip().lower()
+        key = canonical_channel_type(item.get("key"))
         if key == "xvond_workspace":
             key = "xvond"
         if key in COMMUNICATION_CHANNELS and key not in result:
@@ -127,10 +143,30 @@ def self_service_connection_status(item: dict) -> str | None:
     status = str(item.get("status") or "").strip().lower()
     if status != "connection_required":
         return None
-    key = str(item.get("key") or "").strip().lower()
     kind = str(item.get("kind") or "").strip().lower()
-    if kind == "channel" and key in SELF_SERVICE_DIRECT_CONNECTION_REQUIREMENTS:
+    if kind != "channel":
+        return "self_service_integration_available"
+
+    key = canonical_channel_type(item.get("key"))
+    if key == "xvond_workspace":
+        key = "xvond"
+    capability = get_channel_capability(key)
+    if capability is None:
+        return "xvond_adapter_required"
+    if capability.get("setup_mode") == CHANNEL_SETUP_INTERNAL:
+        return "internal_available"
+    if (
+        capability.get("runtime_state") == CHANNEL_RUNTIME_LIVE
+        and capability.get("setup_mode") == CHANNEL_SETUP_SELF_SERVICE
+    ):
         return "self_service_available"
+    if (
+        capability.get("runtime_state") == CHANNEL_RUNTIME_LIVE
+        and capability.get("setup_mode") == CHANNEL_SETUP_MANAGED
+    ):
+        if capability.get("packaged_provider") is True:
+            return "xvond_managed_available"
+        return "xvond_custom_provider_setup"
     return "xvond_adapter_required"
 
 
@@ -149,6 +185,23 @@ def self_service_spec_view(spec: dict | None) -> dict | None:
         connection_status = self_service_connection_status(item)
         if connection_status:
             item["self_service_connection_status"] = connection_status
+        if str(item.get("kind") or "").strip().lower() == "channel":
+            channel_key = canonical_channel_type(item.get("key"))
+            if channel_key == "xvond_workspace":
+                channel_key = "xvond"
+            capability = get_channel_capability(channel_key)
+            if capability is not None:
+                item["channel_delivery"] = {
+                    "type": channel_key,
+                    "name": capability.get("name"),
+                    "setup_mode": capability.get("setup_mode"),
+                    "runtime_state": capability.get("runtime_state"),
+                    "runtime_adapter": (
+                        "xvond_managed"
+                        if capability.get("setup_mode") == CHANNEL_SETUP_MANAGED
+                        else "xvond_native"
+                    ),
+                }
     return rendered
 
 
@@ -243,7 +296,7 @@ def enabled_channel_types(db, *, company_id: int, agent_id: int) -> list[str]:
     )
     result: list[str] = []
     for row in rows:
-        key = str(row.channel_type or "").strip().lower()
+        key = canonical_channel_type(row.channel_type)
         if key in EXTERNAL_COMMUNICATION_CHANNELS and key not in result:
             result.append(key)
     return result
@@ -261,13 +314,43 @@ def configured_channel_types(db, *, company_id: int, agent_id: int) -> list[str]
     )
     result: list[str] = []
     for row in rows:
-        key = str(row.channel_type or "").strip().lower()
-        if key not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS or key in result:
+        key = canonical_channel_type(row.channel_type)
+        if key in result:
             continue
+        capability = get_channel_capability(key)
+        if (
+            capability is None
+            or capability.get("runtime_state") != CHANNEL_RUNTIME_LIVE
+            or key not in EXTERNAL_COMMUNICATION_CHANNELS
+        ):
+            continue
+
+        config = reveal_config(row.config) or {}
         try:
-            validate_channel_config(key, reveal_config(row.config) or {})
+            validate_channel_config(key, config)
         except ValueError:
             continue
+
+        if capability.get("setup_mode") == CHANNEL_SETUP_MANAGED:
+            if key == "voice":
+                required = (
+                    "vapi_assistant_id",
+                    "vapi_phone_number_id",
+                    "vapi_llm_credential_id",
+                    "llm_api_key",
+                )
+                if str(config.get("provisioning_state") or "").strip().lower() != "connected":
+                    continue
+                if any(not str(config.get(item) or "").strip() for item in required):
+                    continue
+            elif capability.get("runtime_adapter") == N8N_CHANNEL_ADAPTER:
+                if not n8n_gateway.configured():
+                    continue
+                if not str(config.get("connection_key") or "").strip():
+                    continue
+            else:
+                continue
+
         result.append(key)
     return result
 
@@ -281,11 +364,22 @@ def self_service_channel_activation_blockers(
 ) -> list[str]:
     """Live activation checks for Self-Service communication channels only."""
     blockers: list[str] = []
-    channel_type = str(channel.channel_type or "").strip().lower()
+    channel_type = canonical_channel_type(channel.channel_type)
 
     if channel.company_id != company.id or channel.agent_id != agent.id:
         return ["Communication channel ownership does not match this employee"]
-    if channel_type not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS:
+
+    capability = get_channel_capability(channel_type)
+    if capability is None:
+        return [f"{channel_type or 'channel'} is not a registered communication channel"]
+    if capability.get("runtime_state") != CHANNEL_RUNTIME_LIVE:
+        return [
+            f"{capability.get('name') or channel_type}: Xvond runtime adapter is still required"
+        ]
+    if (
+        capability.get("setup_mode") != CHANNEL_SETUP_MANAGED
+        and channel_type not in SELF_SERVICE_LIVE_EXTERNAL_CHANNELS
+    ):
         return [f"{channel_type or 'channel'} is not available for Self-Service launch"]
 
     if not company.active:
@@ -322,7 +416,9 @@ def self_service_channel_activation_blockers(
     try:
         validate_channel_config(channel_type, channel_config)
     except ValueError:
-        blockers.append(f"{channel_type.title()} channel configuration is incomplete")
+        blockers.append(
+            f"{capability.get('name') or channel_type.title()} channel configuration is incomplete"
+        )
         return blockers
 
     if channel_type == "whatsapp":
@@ -340,8 +436,64 @@ def self_service_channel_activation_blockers(
             blockers.append("Website widget key is missing")
         if settings.is_production and not settings.PUBLIC_BASE_URL:
             blockers.append("Xvond public API URL is not configured")
+    elif channel_type == "voice":
+        required = (
+            "vapi_assistant_id",
+            "vapi_phone_number_id",
+            "vapi_llm_credential_id",
+            "llm_api_key",
+        )
+        if str(channel_config.get("provisioning_state") or "").strip().lower() != "connected":
+            blockers.append("Voice: Xvond managed provisioning is not complete")
+        elif any(not str(channel_config.get(key) or "").strip() for key in required):
+            blockers.append("Voice: Vapi provisioning evidence is incomplete")
+    elif capability.get("runtime_adapter") == N8N_CHANNEL_ADAPTER:
+        if not n8n_gateway.configured():
+            blockers.append("Xvond managed channel gateway is not configured")
+        else:
+            try:
+                route_check = n8n_gateway.execute(
+                    company_id=company.id,
+                    agent_id=agent.id,
+                    action="channel.check",
+                    data={
+                        "channel_id": channel.id,
+                        "connection_key": str(channel_config.get("connection_key") or "").strip(),
+                    },
+                )
+            except N8NGatewayError:
+                blockers.append("Xvond managed channel route could not be verified")
+            else:
+                if (
+                    route_check.get("success") is not True
+                    or not isinstance(route_check.get("data"), dict)
+                    or route_check["data"].get("configured") is not True
+                ):
+                    blockers.append("Xvond managed channel route is not configured")
 
     return blockers
+
+
+def _setup_answer_complete(requirement: dict, answer: Any) -> bool:
+    key = normalize_requirement_key(requirement.get("key"))
+    if not key or is_sensitive_requirement_key(key):
+        return False
+
+    required_fields: list[str] = []
+    for raw in requirement.get("customer_inputs") or []:
+        field = normalize_requirement_key(raw)
+        if not field or field in required_fields:
+            continue
+        if is_sensitive_requirement_key(field):
+            return False
+        required_fields.append(field)
+
+    if required_fields:
+        if not isinstance(answer, dict):
+            return False
+        return all(str(answer.get(field) or "").strip() for field in required_fields)
+
+    return isinstance(answer, str) and bool(answer.strip())
 
 
 def _resolved_customer_requirement_keys(
@@ -351,19 +503,41 @@ def _resolved_customer_requirement_keys(
     agent_id: int,
 ) -> set[str]:
     resolved: set[str] = set()
-    knowledge_count = (
-        db.query(AgentKnowledge)
-        .join(KnowledgeDocument, KnowledgeDocument.id == AgentKnowledge.document_id)
+    knowledge_query = (
+        db.query(KnowledgeDocument)
+        .join(AgentKnowledge, AgentKnowledge.document_id == KnowledgeDocument.id)
         .filter(
             AgentKnowledge.agent_id == agent_id,
             AgentKnowledge.enabled.is_(True),
             KnowledgeDocument.company_id == company_id,
             KnowledgeDocument.enabled.is_(True),
         )
-        .count()
     )
-    if knowledge_count > 0:
+    if knowledge_query.count() > 0:
         resolved.add("knowledge")
+    if knowledge_query.filter(KnowledgeDocument.source_type == "pdf").count() > 0:
+        resolved.add("files")
+
+    config = (
+        db.query(AgentConfig)
+        .filter(AgentConfig.agent_id == agent_id)
+        .first()
+    )
+    if config is not None:
+        builder = dict((config.settings or {}).get("employee_builder") or {})
+        answers = builder.get("setup_answers") or {}
+        spec = builder.get("compiled_spec")
+        if isinstance(answers, dict) and isinstance(spec, dict):
+            for requirement in spec.get("requirements") or []:
+                if not isinstance(requirement, dict):
+                    continue
+                key = normalize_requirement_key(requirement.get("key"))
+                if not key:
+                    continue
+                if str(requirement.get("status") or "").strip().lower() != "customer_input_required":
+                    continue
+                if _setup_answer_complete(requirement, answers.get(key)):
+                    resolved.add(key)
     return resolved
 
 
@@ -396,7 +570,7 @@ def _execution_blockers(
             continue
         key = str(item.get("key") or "requirement").strip()
         kind = str(item.get("kind") or "").strip().lower()
-        channel_key = "xvond" if key == "xvond_workspace" else key.lower()
+        channel_key = "xvond" if key == "xvond_workspace" else canonical_channel_type(key)
         status = str(item.get("status") or "").strip().lower()
         execution_status = str(item.get("execution_status") or "").strip().lower()
 
@@ -478,7 +652,12 @@ def evaluate_readiness(
     elif not provisioned:
         blockers.append("Employee action plan is not provisioned")
 
-    if channel_limit is not None and len(slot_channels) > channel_limit:
+    billed_slot_channels = [
+        item
+        for item in slot_channels
+        if (get_channel_capability(item) or {}).get("channel_slot") is True
+    ]
+    if channel_limit is not None and len(billed_slot_channels) > channel_limit:
         blockers.append(
             f"Selected communication channels exceed the plan limit ({channel_limit})"
         )
@@ -508,7 +687,8 @@ def evaluate_readiness(
         "active_channels": active,
         "missing_channels": missing_channels,
         "channel_limit": channel_limit,
-        "channel_slots_used": len(slot_channels),
+        "channel_slots_used": len(billed_slot_channels),
+        "billed_slot_channels": billed_slot_channels,
         "blockers": blockers,
     }
 
@@ -568,6 +748,11 @@ def self_service_readiness(
         company_id=company.id,
         agent_id=agent.id,
     )
+    connected_system_setup = _connected_system_setup(
+        db,
+        company_id=company.id,
+        spec=spec or {},
+    )
     state = evaluate_readiness(
         subscribed=bool(billing["active"]),
         channel_limit=billing["channel_limit"],
@@ -577,6 +762,12 @@ def self_service_readiness(
         provisioned=provisioned,
         resolved_requirements=resolved_requirements,
     )
+    state["connected_system_setup"] = connected_system_setup
+    if connected_system_setup:
+        state["ready"] = False
+        state["blockers"].extend(
+            item["message"] for item in connected_system_setup
+        )
     provider_ready = _self_service_provider_ready(
         db,
         company_id=company.id,
@@ -598,6 +789,63 @@ def self_service_readiness(
     state["employee_source"] = SELF_SERVICE_SOURCE
     state["lifecycle"] = "live" if agent.enabled else "draft"
     return state
+
+
+def _connected_system_setup(db, *, company_id: int, spec: dict) -> list[dict]:
+    """Re-check customer-owned execution connections at every readiness read."""
+
+    setup: list[dict] = []
+    for requirement in spec.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        if requirement.get("validation_required") is not True:
+            continue
+
+        key = normalize_requirement_key(requirement.get("key")) or "connected_system"
+        integration_id = requirement.get("integration_id")
+        try:
+            integration_id = int(integration_id)
+        except (TypeError, ValueError):
+            integration_id = 0
+
+        integration = None
+        if integration_id:
+            integration = (
+                db.query(CompanyIntegration)
+                .filter(
+                    CompanyIntegration.id == integration_id,
+                    CompanyIntegration.company_id == company_id,
+                    CompanyIntegration.enabled.is_(True),
+                )
+                .first()
+            )
+
+        label = str(requirement.get("purpose") or key.replace("_", " ")).strip()
+        if integration is None:
+            requirement["execution_status"] = "setup_required"
+            message = f"Reconnect the connected system for {label} before launch"
+            reason = "unavailable"
+            name = None
+        elif not integration_validation_ready(reveal_config(integration.config) or {}):
+            requirement["execution_status"] = "setup_required"
+            message = f"Validate {integration.name} again before launch"
+            reason = "validation_required"
+            name = integration.name
+        else:
+            if requirement.get("execution_status") == "setup_required":
+                requirement["execution_status"] = "ready"
+            continue
+
+        setup.append(
+            {
+                "requirement_key": key,
+                "integration_id": integration_id or None,
+                "integration_name": name,
+                "reason": reason,
+                "message": message,
+            }
+        )
+    return setup
 
 
 def assert_self_service_runtime_subscription(db, *, company_id: int) -> None:

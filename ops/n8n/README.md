@@ -48,7 +48,12 @@ docker compose -f docker-compose.production.yml --profile workflow up -d workflo
 
 ## Master workflow
 
-Import `ops/n8n/xvond-actions.workflow.json`.
+Import and activate the Xvond-owned gateway/provider workflows:
+
+- `ops/n8n/xvond-actions.workflow.json` for outbound actions and managed-channel sends.
+- `ops/n8n/xvond-channel-inbound.workflow.json` for normalized inbound communication-channel messages.
+- `ops/n8n/xvond-telegram-provider.workflow.json` for Telegram Bot API inbound/outbound transport.
+- `ops/n8n/xvond-meta-messaging-provider.workflow.json` for Instagram DM and Facebook Messenger transport.
 
 The first supported action is intentionally non-destructive: `health_check`.
 
@@ -97,6 +102,7 @@ Current contracts include:
 - `pos.create_order`
 - `custom_api.execute`
 - `notification.send`
+- `channel.send`
 
 Every side-effecting action must carry a stable `idempotency_key`. Xvond generates and persists that identity before dispatch. The workflow must reuse it when calling the third-party provider and must not invent a new request identity on retry.
 
@@ -115,6 +121,68 @@ A successful side-effect response must only be returned after the external provi
 ```
 
 Failures must return `success: false` and an error message without pretending the business operation succeeded.
+
+## Managed communication channels
+
+Telegram, Instagram DM, Facebook Messenger, Email, SMS, Slack, Microsoft Teams and Custom/API channels use one Xvond-managed channel contract instead of separate Core adapters. The provider workflow normalizes inbound events to `ops/n8n/channel-adapter.contract.json`; Xvond Core owns conversation continuity, AI execution, knowledge, tools and handoff state.
+
+Set these workflow-engine environment values:
+
+- `XVOND_INTERNAL_CHANNEL_URL=http://app:8000/internal/channels/message`
+- `XVOND_CHANNEL_ROUTES_JSON` with keys in the form `company_id:connection_key`
+
+A channel route points to a provider-specific webhook owned by the workflow engine. Provider OAuth/API credentials stay in that provider workflow or its credential store. Do not store those provider credentials in Xvond Core. A managed channel must remain disabled until its Xvond channel config contains a non-secret `connection_key`, `provisioning_state=connected`, and the shared Xvond workflow gateway is enabled.
+
+Inbound provider workflows must supply a stable provider message ID as `external_message_id`. Xvond uses it for deduplication, so provider retries do not create duplicate customer turns. Outbound `channel.send` calls must honor the provided `idempotency_key` before performing a side effect.
+
+
+### Telegram provider
+
+Telegram is the first concrete provider binding for the universal channel contract.
+
+Configure both registries with the same tenant-scoped key `company_id:connection_key`:
+
+- `XVOND_CHANNEL_ROUTES_JSON` points the generic channel gateway to `https://<workflow-host>/webhook/xvond-telegram-provider` and carries only the Xvond provider-route secret.
+- `XVOND_TELEGRAM_ROUTES_JSON` carries the workflow-only Telegram settings: `company_id`, `agent_id`, `channel_id`, `bot_token`, `webhook_secret`, and the matching `provider_secret`.
+
+Never copy the Telegram bot token into Xvond Core channel config.
+
+After the workflow is deployed, provision the Telegram webhook from inside the workflow container:
+
+```sh
+sh scripts/provision_telegram_channel.sh <company_id> <connection_key>
+```
+
+The provisioning command validates both route registries, calls Telegram `setWebhook` with the route's secret token, then verifies the installed URL with `getWebhookInfo`. Only after that succeeds should the Xvond channel config be marked `provisioning_state=connected`.
+
+Telegram inbound `update_id` is used as the stable external message identity. Telegram `sendMessage` must return a provider `message_id`; Xvond will not mark delivery accepted without it.
+
+
+### Meta Messaging provider — Instagram DM and Messenger
+
+Instagram DM and Facebook Messenger share the Xvond Meta Messaging provider workflow while remaining separate employee channels.
+
+Configure:
+
+- `XVOND_META_MESSAGING_VERIFY_TOKEN` as the Meta webhook verification token.
+- `XVOND_META_MESSAGING_ROUTES_JSON` with tenant-scoped keys `company_id:connection_key`.
+- `XVOND_CHANNEL_ROUTES_JSON` with the same keys pointing to `https://<workflow-host>/webhook/xvond-meta-messaging-provider`.
+
+Each Meta route contains the Xvond company/agent/channel ids, `channel_type` (`instagram` or `messenger`), the provider sender/account id, Graph version, provider access token, Meta app secret and the matching Xvond provider-route secret. These credentials remain in the workflow plane.
+
+The POST webhook keeps the provider raw request body and validates `X-Hub-Signature-256` with HMAC SHA-256 before parsing customer messages. Invalid signatures fail closed with HTTP 403. Message echoes and unsupported/non-text events are acknowledged without entering Xvond.
+
+Inbound provider `message.mid` becomes Xvond's stable external message identity. Outbound delivery uses the appropriate Graph endpoint for the channel and Xvond accepts success only when Meta returns `message_id`.
+
+Validate a configured route before marking its Xvond channel connected:
+
+```sh
+sh scripts/validate_meta_messaging_route.sh <company_id> <connection_key>
+```
+
+The validation command checks both route registries and confirms that the configured sender/account id is reachable with the stored provider token. It never prints the provider credentials.
+
+Provider-side setup remains an external acceptance gate. For Messenger, the Meta app/Page must have the messaging permissions needed for the intended Page. For Instagram, the professional account/app must have the messaging permission required by the Instagram Messages API. Meta webhook subscription, app review/access level where required, customer message eligibility and one real inbound/outbound round trip must all pass before that customer channel is called service-ready.
 
 ## Booking adapter
 

@@ -31,6 +31,9 @@ class Settings:
     DATABASE_URL = os.getenv("DATABASE_URL", "")
     REDIS_URL = os.getenv("REDIS_URL", "")
     PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    MEDIA_STORAGE_DIR = os.getenv("MEDIA_STORAGE_DIR", "/tmp/xvond-media").strip() or "/tmp/xvond-media"
+    MEDIA_PUBLIC_TTL_SECONDS = max(300, min(86400, int(os.getenv("MEDIA_PUBLIC_TTL_SECONDS", "7200"))))
+    IMAGE_GENERATION_MODEL = os.getenv("IMAGE_GENERATION_MODEL", "gpt-image-2.5-flare").strip() or "gpt-image-2.5-flare"
     WHATSAPP_HUMAN_HANDOFF_MINUTES = max(5, int(os.getenv("WHATSAPP_HUMAN_HANDOFF_MINUTES", "60")))
     WEBSITE_VISITOR_TOKEN_TTL_SECONDS = max(300, int(os.getenv("WEBSITE_VISITOR_TOKEN_TTL_SECONDS", "2592000")))
     TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -50,11 +53,36 @@ class Settings:
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
     XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+    META_GRAPH_API_VERSION = os.getenv("META_GRAPH_API_VERSION", "v26.0").strip() or "v26.0"
     N8N_ENABLED = os.getenv("N8N_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "").strip()
     N8N_SHARED_SECRET = os.getenv("N8N_SHARED_SECRET", "")
     N8N_TIMEOUT_SECONDS = max(1.0, float(os.getenv("N8N_TIMEOUT_SECONDS", "15")))
     N8N_MAX_RETRIES = min(3, max(0, int(os.getenv("N8N_MAX_RETRIES", "1"))))
+    BILLING_PROVIDER = os.getenv("BILLING_PROVIDER", "none").strip().lower()
+    PADDLE_API_KEY = os.getenv("PADDLE_API_KEY", "").strip()
+    PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
+    PADDLE_CLIENT_TOKEN = os.getenv("PADDLE_CLIENT_TOKEN", "").strip()
+    PADDLE_ENVIRONMENT = os.getenv("PADDLE_ENVIRONMENT", "sandbox").strip().lower()
+    PADDLE_CHECKOUT_URL = os.getenv("PADDLE_CHECKOUT_URL", "").strip()
+    PADDLE_PRICE_MAP_JSON = os.getenv("PADDLE_PRICE_MAP_JSON", "{}").strip() or "{}"
+    PADDLE_WEBHOOK_TOLERANCE_SECONDS = max(5, int(os.getenv("PADDLE_WEBHOOK_TOLERANCE_SECONDS", "30")))
+    TAP_SECRET_KEY = os.getenv("TAP_SECRET_KEY", "").strip()
+    TAP_MERCHANT_ID = os.getenv("TAP_MERCHANT_ID", "").strip()
+    TAP_SOURCE_ID = os.getenv("TAP_SOURCE_ID", "src_all").strip() or "src_all"
+    TAP_SAVE_CARD_FOR_RECURRING = os.getenv(
+        "TAP_SAVE_CARD_FOR_RECURRING",
+        "false",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    TAP_REDIRECT_URL = os.getenv("TAP_REDIRECT_URL", "").strip()
+    TAP_RECURRING_ENABLED = os.getenv(
+        "TAP_RECURRING_ENABLED",
+        "false",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    TAP_RENEWAL_LEAD_HOURS = max(
+        0,
+        min(168, int(os.getenv("TAP_RENEWAL_LEAD_HOURS", "24"))),
+    )
     KNOWLEDGE_SEMANTIC_ENABLED = os.getenv("KNOWLEDGE_SEMANTIC_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     KNOWLEDGE_EMBEDDING_PROVIDER = os.getenv("KNOWLEDGE_EMBEDDING_PROVIDER", "openai").strip().lower()
     KNOWLEDGE_EMBEDDING_MODEL = os.getenv("KNOWLEDGE_EMBEDDING_MODEL", "text-embedding-3-small").strip()
@@ -87,6 +115,41 @@ class Settings:
             errors.append("ACCESS_TOKEN_EXPIRE_MINUTES must be between 5 and 1440")
         if self.KNOWLEDGE_EMBEDDING_PROVIDER not in {"openai"}:
             errors.append("KNOWLEDGE_EMBEDDING_PROVIDER must be a supported provider")
+        if self.BILLING_PROVIDER not in {"none", "paddle", "tap"}:
+            errors.append("BILLING_PROVIDER must be none, paddle or tap")
+        if self.PADDLE_ENVIRONMENT not in {"sandbox", "live"}:
+            errors.append("PADDLE_ENVIRONMENT must be sandbox or live")
+        if self.BILLING_PROVIDER == "paddle":
+            if not self.PADDLE_API_KEY:
+                errors.append("PADDLE_API_KEY is required when Paddle billing is enabled")
+            if not self.PADDLE_WEBHOOK_SECRET:
+                errors.append("PADDLE_WEBHOOK_SECRET is required when Paddle billing is enabled")
+            if not self.PADDLE_CLIENT_TOKEN:
+                errors.append("PADDLE_CLIENT_TOKEN is required when Paddle billing is enabled")
+            if not self.PADDLE_CHECKOUT_URL:
+                errors.append("PADDLE_CHECKOUT_URL is required when Paddle billing is enabled")
+            if self.is_production and self.PADDLE_ENVIRONMENT != "live":
+                errors.append("PADDLE_ENVIRONMENT must be live in production when Paddle billing is enabled")
+            if self.is_production and not self.PADDLE_CHECKOUT_URL.startswith("https://"):
+                errors.append("PADDLE_CHECKOUT_URL must use HTTPS in production")
+        if self.BILLING_PROVIDER == "tap":
+            if not self.TAP_SECRET_KEY:
+                errors.append("TAP_SECRET_KEY is required when Tap billing is enabled")
+            if not self.TAP_MERCHANT_ID:
+                errors.append("TAP_MERCHANT_ID is required when Tap billing is enabled")
+            if self.is_production and not self.TAP_SECRET_KEY.startswith("sk_live_"):
+                errors.append("TAP_SECRET_KEY must be a live key in production")
+            tap_redirect = self.TAP_REDIRECT_URL or (
+                f"{self.PUBLIC_BASE_URL}/billing/return"
+                if self.PUBLIC_BASE_URL
+                else ""
+            )
+            if self.is_production and not tap_redirect.startswith("https://"):
+                errors.append("Tap redirect URL must use HTTPS in production")
+            if self.TAP_RECURRING_ENABLED and not self.TAP_SAVE_CARD_FOR_RECURRING:
+                errors.append(
+                    "TAP_SAVE_CARD_FOR_RECURRING must be enabled before Tap recurring billing"
+                )
         if self.N8N_ENABLED:
             if not self.N8N_WEBHOOK_URL:
                 errors.append("N8N_WEBHOOK_URL is required when n8n is enabled")

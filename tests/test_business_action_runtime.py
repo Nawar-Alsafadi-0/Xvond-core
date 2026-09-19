@@ -58,3 +58,5 @@ def test_incomplete_operation_is_not_runtime_ready():
         "availability": {"mode": "xvond_schedule", "date_field": "date", "time_field": "time", "schedule": {"weekdays": [], "start": "", "end": ""}},
     }) is False
     assert _operation_config_ready({"destination": {"type": "xvond_internal"}, "availability": {"mode": "none"}}) is True
+
+

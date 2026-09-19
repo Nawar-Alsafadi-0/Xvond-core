@@ -3,77 +3,382 @@
   "name": "Xvond Actions Gateway",
   "nodes": [
     {
-      "parameters": {"httpMethod": "POST", "path": "xvond-actions", "responseMode": "responseNode", "options": {}},
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "xvond-actions",
+        "responseMode": "responseNode",
+        "options": {}
+      },
       "id": "xvond-webhook",
       "name": "Xvond Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [260, 300],
+      "position": [
+        260,
+        300
+      ],
       "webhookId": "xvond-actions"
     },
     {
       "parameters": {
-        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst suppliedSecret = headers['x-xvond-n8n-secret'] || headers['X-Xvond-N8N-Secret'];\nconst expectedSecret = $env.N8N_SHARED_SECRET;\nconst requestId = String(body.request_id || headers['x-xvond-request-id'] || '');\nconst action = String(body.action || '').trim();\nconst data = body.data && typeof body.data === 'object' ? body.data : {};\nconst configuredAction = data.action_config && typeof data.action_config === 'object' ? data.action_config : null;\nconst destination = configuredAction?.destination && typeof configuredAction.destination === 'object' ? configuredAction.destination : {};\nconst destinationType = String(destination.type || '').trim();\nconst fail = (error, code, extra = {}) => [{ json: { success: false, request_id: requestId, action, data: { code, ...extra }, error } }];\nif (!expectedSecret || suppliedSecret !== expectedSecret) return fail('Unauthorized workflow request', 'unauthorized');\nif (!requestId || !body.company_id || !body.agent_id || !action) return fail('Invalid workflow request contract', 'invalid_contract');\nif (action === 'health_check') return [{ json: { success: true, request_id: requestId, action, data: { status: 'ok', engine: 'workflow', company_id: body.company_id, agent_id: body.agent_id }, error: null } }];\nconst routes = {\n  'booking.check_availability': { adapter: 'booking', mutates: false, operation: 'check_availability' },\n  'booking.execute': { adapter: 'booking', mutates: true, operation: 'execute' },\n  'booking.cancel': { adapter: 'booking', mutates: true, operation: 'cancel' },\n  'send_email.execute': { adapter: 'email', mutates: true, operation: 'execute' },\n  'crm.upsert_contact': { adapter: 'crm', mutates: true },\n  'crm.create_lead': { adapter: 'crm', mutates: true },\n  'pos.create_order': { adapter: 'pos', mutates: true },\n  'custom_api.execute': { adapter: 'custom_api', mutates: true, operation: 'execute' },\n  'notification.send': { adapter: 'notification', mutates: true }\n};\nlet route = routes[action];\nlet actionKey = '';\nlet operation = route?.operation || '';\nif (!route) {\n  const match = action.match(/^([a-z0-9][a-z0-9_\\-]{0,127})\\.(check_availability|execute|cancel)$/i);\n  if (!match) return fail(`Unsupported workflow action: ${action}`, 'unsupported_action');\n  actionKey = match[1];\n  operation = match[2];\n  const declaredActionType = String(data.action_type || '').trim();\n  const moduleName = String(configuredAction?.module || '').trim();\n  if (!configuredAction || !declaredActionType || declaredActionType !== actionKey || !moduleName) return fail('Invalid generic business action contract', 'invalid_business_action', { action_key: actionKey || null });\n  route = { adapter: 'business', mutates: operation !== 'check_availability', action_key: actionKey, operation, module: moduleName, destination_type: destinationType || 'unconfigured' };\n}\nconst idempotencyKey = String(data.idempotency_key || '');\nif (route.mutates && !idempotencyKey) return fail('Mutating workflow action requires idempotency_key', 'missing_idempotency_key', { adapter: route.adapter });\nif (configuredAction && destinationType === 'xvond_internal' && ['check_availability', 'execute', 'cancel'].includes(operation)) {\n  return [{ json: { _dispatch: 'xvond_internal', company_id: body.company_id, agent_id: body.agent_id, conversation_id: body.conversation_id || null, action, request_id: requestId, data } }];\n}\nif (configuredAction && destinationType === 'integration' && ['check_availability', 'execute', 'cancel'].includes(operation)) {\n  const integrationId = Number(destination.integration_id || 0);\n  if (!integrationId) return fail('Connected integration is not selected', 'provider_not_configured', { destination_type: 'integration' });\n  let registry = {};\n  try { registry = JSON.parse($env.XVOND_WORKFLOW_INTEGRATIONS_JSON || '{}'); } catch (_e) { return fail('Workflow integration registry is invalid', 'provider_not_configured'); }\n  const routeKey = `${body.company_id}:${integrationId}`;\n  const target = registry[routeKey];\n  if (!target || target.type !== 'webhook' || typeof target.url !== 'string' || !target.url.startsWith('https://')) return fail('Connected integration route is not configured', 'provider_not_configured', { integration_id: integrationId, route_key: routeKey });\n  return [{ json: { _dispatch: 'connected_integration', company_id: body.company_id, agent_id: body.agent_id, conversation_id: body.conversation_id || null, integration_id: integrationId, route_key: routeKey, action, request_id: requestId, data } }];\n}\nreturn fail(`Workflow adapter is not configured: ${route.adapter}`, 'provider_not_configured', { adapter: route.adapter, action_key: route.action_key || null, operation: route.operation || null, module: route.module || null, destination_type: destinationType || route.destination_type || null, idempotency_key: idempotencyKey || null });"
+        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst suppliedSecret = headers['x-xvond-n8n-secret'] || headers['X-Xvond-N8N-Secret'];\nconst expectedSecret = $env.N8N_SHARED_SECRET;\nconst requestId = String(body.request_id || headers['x-xvond-request-id'] || '');\nconst action = String(body.action || '').trim();\nconst data = body.data && typeof body.data === 'object' ? body.data : {};\nconst configuredAction = data.action_config && typeof data.action_config === 'object' ? data.action_config : null;\nconst destination = configuredAction?.destination && typeof configuredAction.destination === 'object' ? configuredAction.destination : {};\nconst destinationType = String(destination.type || '').trim();\nconst fail = (error, code, extra = {}) => [{ json: { success: false, request_id: requestId, action, data: { code, ...extra }, error } }];\nif (!expectedSecret || suppliedSecret !== expectedSecret) return fail('Unauthorized workflow request', 'unauthorized');\nif (!requestId || !body.company_id || !body.agent_id || !action) return fail('Invalid workflow request contract', 'invalid_contract');\nif (action === 'health_check') return [{ json: { success: true, request_id: requestId, action, data: { status: 'ok', engine: 'workflow', company_id: body.company_id, agent_id: body.agent_id }, error: null } }];\nconst routes = {\n  'booking.check_availability': { adapter: 'booking', mutates: false, operation: 'check_availability' },\n  'booking.execute': { adapter: 'booking', mutates: true, operation: 'execute' },\n  'booking.cancel': { adapter: 'booking', mutates: true, operation: 'cancel' },\n  'send_email.execute': { adapter: 'email', mutates: true, operation: 'execute' },\n  'crm.upsert_contact': { adapter: 'crm', mutates: true },\n  'crm.create_lead': { adapter: 'crm', mutates: true },\n  'pos.create_order': { adapter: 'pos', mutates: true },\n  'custom_api.execute': { adapter: 'custom_api', mutates: true, operation: 'execute' },\n  'notification.send': { adapter: 'notification', mutates: true },\n  'channel.check': { adapter: 'channel', mutates: false, operation: 'check' },\n  'channel.send': { adapter: 'channel', mutates: true, operation: 'send' }\n};\nlet route = routes[action];\nlet actionKey = '';\nlet operation = route?.operation || '';\nif (!route) {\n  const match = action.match(/^([a-z0-9][a-z0-9_\\-]{0,127})\\.(check_availability|execute|cancel)$/i);\n  if (!match) return fail(`Unsupported workflow action: ${action}`, 'unsupported_action');\n  actionKey = match[1];\n  operation = match[2];\n  const declaredActionType = String(data.action_type || '').trim();\n  const moduleName = String(configuredAction?.module || '').trim();\n  if (!configuredAction || !declaredActionType || declaredActionType !== actionKey || !moduleName) return fail('Invalid generic business action contract', 'invalid_business_action', { action_key: actionKey || null });\n  route = { adapter: 'business', mutates: operation !== 'check_availability', action_key: actionKey, operation, module: moduleName, destination_type: destinationType || 'unconfigured' };\n}\nconst idempotencyKey = String(data.idempotency_key || '');\nif (route.mutates && !idempotencyKey) return fail('Mutating workflow action requires idempotency_key', 'missing_idempotency_key', { adapter: route.adapter });\nif (configuredAction && destinationType === 'xvond_internal' && ['check_availability', 'execute', 'cancel'].includes(operation)) {\n  return [{ json: { _dispatch: 'xvond_internal', company_id: body.company_id, agent_id: body.agent_id, conversation_id: body.conversation_id || null, action, request_id: requestId, data } }];\n}\nif (configuredAction && destinationType === 'integration' && ['check_availability', 'execute', 'cancel'].includes(operation)) {\n  const integrationId = Number(destination.integration_id || 0);\n  if (!integrationId) return fail('Connected integration is not selected', 'provider_not_configured', { destination_type: 'integration' });\n  let registry = {};\n  try { registry = JSON.parse($env.XVOND_WORKFLOW_INTEGRATIONS_JSON || '{}'); } catch (_e) { return fail('Workflow integration registry is invalid', 'provider_not_configured'); }\n  const routeKey = `${body.company_id}:${integrationId}`;\n  const target = registry[routeKey];\n  if (!target || target.type !== 'webhook' || typeof target.url !== 'string' || !target.url.startsWith('https://')) return fail('Connected integration route is not configured', 'provider_not_configured', { integration_id: integrationId, route_key: routeKey });\n  return [{ json: { _dispatch: 'connected_integration', company_id: body.company_id, agent_id: body.agent_id, conversation_id: body.conversation_id || null, integration_id: integrationId, route_key: routeKey, action, request_id: requestId, data } }];\n}\nif (action === 'channel.check' || action === 'channel.send') {\n  const channelId = Number(data.channel_id || 0);\n  const connectionKey = String(data.connection_key || '').trim();\n  if (!channelId || !connectionKey) return fail('Invalid managed channel contract', 'invalid_channel_contract');\n  let registry = {};\n  try { registry = JSON.parse($env.XVOND_CHANNEL_ROUTES_JSON || '{}'); } catch (_e) { return fail('Channel route registry is invalid', 'provider_not_configured'); }\n  const routeKey = `${body.company_id}:${connectionKey}`;\n  const target = registry[routeKey];\n  if (!target || target.type !== 'webhook' || typeof target.url !== 'string' || !target.url.startsWith('https://')) return fail('Managed channel route is not configured', 'provider_not_configured', { channel_id: channelId, route_key: routeKey });\n  if (action === 'channel.check') {\n    return [{ json: { success: true, request_id: requestId, action, data: { configured: true, channel_id: channelId }, error: null } }];\n  }\n  const externalContactId = String(data.external_contact_id || '').trim();\n  const message = String(data.message || '').trim();\n  if (!externalContactId || !message) return fail('Invalid channel send contract', 'invalid_channel_send');\n  return [{ json: { _dispatch: 'channel_provider', company_id: body.company_id, agent_id: body.agent_id, conversation_id: body.conversation_id || null, channel_id: channelId, route_key: routeKey, action, request_id: requestId, data } }];\n}\nreturn fail(`Workflow adapter is not configured: ${route.adapter}`, 'provider_not_configured', { adapter: route.adapter, action_key: route.action_key || null, operation: route.operation || null, module: route.module || null, destination_type: destinationType || route.destination_type || null, idempotency_key: idempotencyKey || null });"
       },
       "id": "validate-dispatch",
       "name": "Validate and Dispatch",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [500, 300]
+      "position": [
+        500,
+        300
+      ]
     },
     {
-      "parameters": {"conditions": {"options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2}, "conditions": [{"id": "dispatch-xvond-internal", "leftValue": "={{ $json._dispatch }}", "rightValue": "xvond_internal", "operator": {"type": "string", "operation": "equals"}}], "combinator": "and"}, "options": {}},
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "dispatch-xvond-internal",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "xvond_internal",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
       "id": "route-xvond-internal",
       "name": "Xvond Internal?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [740, 260]
+      "position": [
+        740,
+        260
+      ]
     },
     {
-      "parameters": {"method": "POST", "url": "={{ $env.XVOND_INTERNAL_ACTION_URL }}", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Xvond-N8N-Secret", "value": "={{ $env.N8N_SHARED_SECRET }}"}]}, "sendBody": true, "contentType": "raw", "rawContentType": "application/json", "body": "={{ JSON.stringify({ company_id: $json.company_id, agent_id: $json.agent_id, conversation_id: $json.conversation_id, action: $json.action, request_id: $json.request_id, data: $json.data }) }}", "options": {"timeout": 15000}},
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.XVOND_INTERNAL_ACTION_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Xvond-N8N-Secret",
+              "value": "={{ $env.N8N_SHARED_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ company_id: $json.company_id, agent_id: $json.agent_id, conversation_id: $json.conversation_id, action: $json.action, request_id: $json.request_id, data: $json.data }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
       "id": "execute-xvond-internal",
       "name": "Execute Xvond Internal",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [980, 140]
+      "position": [
+        980,
+        140
+      ]
     },
     {
-      "parameters": {"conditions": {"options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2}, "conditions": [{"id":"dispatch-connected-integration","leftValue":"={{ $json._dispatch }}","rightValue":"connected_integration","operator":{"type":"string","operation":"equals"}}],"combinator":"and"},"options":{}},
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "dispatch-connected-integration",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "connected_integration",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
       "id": "route-connected-integration",
       "name": "Connected Integration?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [980, 380]
+      "position": [
+        980,
+        380
+      ]
     },
     {
-      "parameters": {"method":"POST","url":"={{ JSON.parse($env.XVOND_WORKFLOW_INTEGRATIONS_JSON || '{}')[$json.route_key].url }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Content-Type","value":"application/json"},{"name":"X-Xvond-Integration-Secret","value":"={{ JSON.parse($env.XVOND_WORKFLOW_INTEGRATIONS_JSON || '{}')[$json.route_key].secret || '' }}"},{"name":"X-Xvond-Request-ID","value":"={{ $json.request_id }}"},{"name":"Idempotency-Key","value":"={{ $json.data.idempotency_key || '' }}"}]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({ company_id: $json.company_id, agent_id: $json.agent_id, conversation_id: $json.conversation_id, integration_id: $json.integration_id, action: $json.action, request_id: $json.request_id, data: $json.data }) }}","options":{"timeout":15000}},
+      "parameters": {
+        "method": "POST",
+        "url": "={{ JSON.parse($env.XVOND_WORKFLOW_INTEGRATIONS_JSON || '{}')[$json.route_key].url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Xvond-Integration-Secret",
+              "value": "={{ JSON.parse($env.XVOND_WORKFLOW_INTEGRATIONS_JSON || '{}')[$json.route_key].secret || '' }}"
+            },
+            {
+              "name": "X-Xvond-Request-ID",
+              "value": "={{ $json.request_id }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.data.idempotency_key || '' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ company_id: $json.company_id, agent_id: $json.agent_id, conversation_id: $json.conversation_id, integration_id: $json.integration_id, action: $json.action, request_id: $json.request_id, data: $json.data }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
       "id": "execute-connected-integration",
       "name": "Execute Connected Integration",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1220, 300]
+      "position": [
+        1220,
+        300
+      ]
     },
     {
-      "parameters": {"respondWith": "firstIncomingItem", "options": {}},
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
       "id": "xvond-response",
       "name": "Return to Xvond",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.4,
-      "position": [1480, 260]
+      "position": [
+        1480,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "dispatch-channel-provider",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "channel_provider",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-channel-provider",
+      "name": "Channel Provider?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1220,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ JSON.parse($env.XVOND_CHANNEL_ROUTES_JSON || '{}')[$json.route_key].url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Xvond-Channel-Secret",
+              "value": "={{ JSON.parse($env.XVOND_CHANNEL_ROUTES_JSON || '{}')[$json.route_key].secret || '' }}"
+            },
+            {
+              "name": "X-Xvond-Request-ID",
+              "value": "={{ $json.request_id }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.data.idempotency_key || '' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ company_id: $json.company_id, agent_id: $json.agent_id, conversation_id: $json.conversation_id, channel_id: $json.channel_id, action: $json.action, request_id: $json.request_id, data: $json.data }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "execute-channel-provider",
+      "name": "Execute Channel Provider",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1460,
+        440
+      ]
     }
   ],
   "pinData": {},
   "connections": {
-    "Xvond Webhook": {"main": [[{"node": "Validate and Dispatch", "type": "main", "index": 0}]]},
-    "Validate and Dispatch": {"main": [[{"node": "Xvond Internal?", "type": "main", "index": 0}]]},
-    "Xvond Internal?": {"main": [[{"node": "Execute Xvond Internal", "type": "main", "index": 0}], [{"node": "Connected Integration?", "type": "main", "index": 0}]]},
-    "Execute Xvond Internal": {"main": [[{"node": "Return to Xvond", "type": "main", "index": 0}]]},
-    "Connected Integration?": {"main": [[{"node": "Execute Connected Integration", "type": "main", "index": 0}], [{"node": "Return to Xvond", "type": "main", "index": 0}]]},
-    "Execute Connected Integration": {"main": [[{"node": "Return to Xvond", "type": "main", "index": 0}]]}
+    "Xvond Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate and Dispatch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate and Dispatch": {
+      "main": [
+        [
+          {
+            "node": "Xvond Internal?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Xvond Internal?": {
+      "main": [
+        [
+          {
+            "node": "Execute Xvond Internal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Connected Integration?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Xvond Internal": {
+      "main": [
+        [
+          {
+            "node": "Return to Xvond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Connected Integration?": {
+      "main": [
+        [
+          {
+            "node": "Execute Connected Integration",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Channel Provider?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Connected Integration": {
+      "main": [
+        [
+          {
+            "node": "Return to Xvond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Channel Provider?": {
+      "main": [
+        [
+          {
+            "node": "Execute Channel Provider",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return to Xvond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Channel Provider": {
+      "main": [
+        [
+          {
+            "node": "Return to Xvond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
   },
   "active": false,
-  "settings": {"executionOrder": "v1"},
+  "settings": {
+    "executionOrder": "v1"
+  },
   "versionId": "33333333-3333-4333-8333-333333333333",
-  "meta": {"templateCredsSetupCompleted": true},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
   "tags": []
 }

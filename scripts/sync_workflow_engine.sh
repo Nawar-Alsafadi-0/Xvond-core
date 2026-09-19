@@ -2,26 +2,30 @@
 set -eu
 
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.production.yml}"
-WORKFLOW_FILE="${WORKFLOW_FILE:-ops/n8n/xvond-actions.workflow.json}"
-WORKFLOW_ID="${WORKFLOW_ID:-77dbf1b8-241b-44ec-b0f8-a16fe415490a}"
+ACTION_WORKFLOW_FILE="${ACTION_WORKFLOW_FILE:-ops/n8n/xvond-actions.workflow.json}"
+ACTION_WORKFLOW_ID="${ACTION_WORKFLOW_ID:-77dbf1b8-241b-44ec-b0f8-a16fe415490a}"
+CHANNEL_WORKFLOW_FILE="${CHANNEL_WORKFLOW_FILE:-ops/n8n/xvond-channel-inbound.workflow.json}"
+CHANNEL_WORKFLOW_ID="${CHANNEL_WORKFLOW_ID:-xvond-channel-inbound-v1}"
+TELEGRAM_WORKFLOW_FILE="${TELEGRAM_WORKFLOW_FILE:-ops/n8n/xvond-telegram-provider.workflow.json}"
+TELEGRAM_WORKFLOW_ID="${TELEGRAM_WORKFLOW_ID:-xvond-telegram-provider-v1}"
+META_WORKFLOW_FILE="${META_WORKFLOW_FILE:-ops/n8n/xvond-meta-messaging-provider.workflow.json}"
+META_WORKFLOW_ID="${META_WORKFLOW_ID:-xvond-meta-messaging-provider-v1}"
 
-if [ ! -f "$WORKFLOW_FILE" ]; then
-    echo "Workflow sync failed: $WORKFLOW_FILE not found" >&2
-    exit 1
-fi
+for file in "$ACTION_WORKFLOW_FILE" "$CHANNEL_WORKFLOW_FILE" "$TELEGRAM_WORKFLOW_FILE" "$META_WORKFLOW_FILE"; do
+    if [ ! -f "$file" ]; then
+        echo "Workflow sync failed: $file not found" >&2
+        exit 1
+    fi
+done
 
 compose_workflow() {
     docker compose -f "$COMPOSE_FILE" --profile workflow "$@"
 }
 
-wait_for_runtime_webhook() {
-    attempts="${1:-90}"
-    count=0
-    last_error=""
-    while [ "$count" -lt "$attempts" ]; do
-        if output="$(docker exec xvond-workflow-engine node -e '
+probe_action_gateway() {
+    docker exec xvond-workflow-engine node -e '
 const secret = String(process.env.N8N_SHARED_SECRET || "");
-const requestId = `sync-${Date.now()}`;
+const requestId = `sync-action-${Date.now()}`;
 fetch("http://127.0.0.1:5678/webhook/xvond-actions", {
   method: "POST",
   headers: {
@@ -29,7 +33,14 @@ fetch("http://127.0.0.1:5678/webhook/xvond-actions", {
     "x-xvond-n8n-secret": secret,
     "x-xvond-request-id": requestId,
   },
-  body: JSON.stringify({request_id: requestId, company_id: 1, agent_id: 1, conversation_id: null, action: "health_check", data: {source: "workflow_sync"}}),
+  body: JSON.stringify({
+    request_id: requestId,
+    company_id: 1,
+    agent_id: 1,
+    conversation_id: null,
+    action: "health_check",
+    data: {source: "workflow_sync"}
+  }),
 }).then(async response => {
   const text = await response.text();
   if (!response.ok) {
@@ -42,55 +53,174 @@ fetch("http://127.0.0.1:5678/webhook/xvond-actions", {
     console.error(`invalid_json_response:${text.slice(0, 300)}`);
     process.exit(2);
   }
-  if (!result || result.success !== true || !result.data || String(result.data.status || "").toLowerCase() !== "ok") {
-    console.error(`invalid_contract_response:${text.slice(0, 300)}`);
+  if (!result || result.request_id !== requestId || result.success !== true ||
+      !result.data || String(result.data.status || "").toLowerCase() !== "ok") {
+    console.error(`invalid_action_gateway_response:${text.slice(0, 300)}`);
     process.exit(2);
   }
   process.exit(0);
 }).catch(error => {
   console.error(`fetch_failed:${String(error && error.message || "unknown")}`);
   process.exit(2);
-});' 2>&1)"; then
+});'
+}
+
+probe_channel_gateway() {
+    docker exec xvond-workflow-engine node -e '
+const secret = String(process.env.N8N_SHARED_SECRET || "");
+fetch("http://127.0.0.1:5678/webhook/xvond-channel-inbound", {
+  method: "POST",
+  headers: {
+    "content-type": "application/json",
+    "x-xvond-n8n-secret": secret,
+  },
+  // Deliberately incomplete: this proves the webhook is registered without
+  // invoking Xvond Core or any provider route.
+  body: JSON.stringify({external_message_id: "workflow-sync-probe"}),
+}).then(async response => {
+  const text = await response.text();
+  if (!response.ok) {
+    console.error(`http_${response.status}:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  let result;
+  try { result = JSON.parse(text); }
+  catch (_error) {
+    console.error(`invalid_json_response:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  if (!result || result.success !== false || String(result.code || "") !== "invalid_contract") {
+    console.error(`invalid_channel_gateway_response:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  process.exit(0);
+}).catch(error => {
+  console.error(`fetch_failed:${String(error && error.message || "unknown")}`);
+  process.exit(2);
+});'
+}
+
+
+probe_telegram_gateway() {
+    docker exec xvond-workflow-engine node -e '
+fetch("http://127.0.0.1:5678/webhook/xvond-telegram-provider", {
+  method: "POST",
+  headers: {"content-type": "application/json"},
+  body: JSON.stringify({action: "health_probe"}),
+}).then(async response => {
+  const text = await response.text();
+  if (!response.ok) {
+    console.error(`http_${response.status}:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  let result;
+  try { result = JSON.parse(text); }
+  catch (_error) {
+    console.error(`invalid_json_response:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  if (!result || result.success !== false) {
+    console.error(`invalid_telegram_gateway_response:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  process.exit(0);
+}).catch(error => {
+  console.error(`fetch_failed:${String(error && error.message || "unknown")}`);
+  process.exit(2);
+});'
+}
+
+
+probe_meta_gateway() {
+    docker exec xvond-workflow-engine node -e '
+fetch("http://127.0.0.1:5678/webhook/xvond-meta-messaging-provider", {
+  method: "POST",
+  headers: {"content-type": "application/json"},
+  body: JSON.stringify({action: "health_probe"}),
+}).then(async response => {
+  const text = await response.text();
+  if (!response.ok) {
+    console.error(`http_${response.status}:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  let result;
+  try { result = JSON.parse(text); }
+  catch (_error) {
+    console.error(`invalid_json_response:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  if (!result || result.success !== false) {
+    console.error(`invalid_meta_gateway_response:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  process.exit(0);
+}).catch(error => {
+  console.error(`fetch_failed:${String(error && error.message || "unknown")}`);
+  process.exit(2);
+});'
+}
+
+wait_for_runtime_webhooks() {
+    attempts="${1:-90}"
+    count=0
+    last_error=""
+    while [ "$count" -lt "$attempts" ]; do
+        if action_output="$(probe_action_gateway 2>&1)" &&
+           channel_output="$(probe_channel_gateway 2>&1)" &&
+           telegram_output="$(probe_telegram_gateway 2>&1)" &&
+           meta_output="$(probe_meta_gateway 2>&1)"; then
             return 0
         else
             code="$?"
-            last_error="$output"
+            last_error="${action_output:-}
+${channel_output:-}
+${telegram_output:-}
+${meta_output:-}"
             if [ "$code" -ne 2 ]; then
-                printf '%s\n' "$last_error" >&2
+                printf '%b\n' "$last_error" >&2
                 return "$code"
             fi
         fi
         count=$((count + 1))
         sleep 1
     done
-    echo "Workflow runtime webhook did not become ready after restart" >&2
+    echo "Workflow runtime webhooks did not become ready after restart" >&2
     if [ -n "$last_error" ]; then
-        printf 'Last runtime probe error: %s\n' "$last_error" >&2
+        printf 'Last runtime probe error:\n%b\n' "$last_error" >&2
     fi
     docker logs --tail 100 xvond-workflow-engine >&2 || true
     return 1
 }
 
-# Stop the runtime before importing so the DB and registered webhook state are
-# updated as one unit. The imported workflow uses a stable source-controlled ID,
-# so repeated deploys overwrite the same workflow rather than creating copies.
+sync_one_workflow() {
+    file="$1"
+    workflow_id="$2"
+    import_name="$(basename "$file")"
+
+    compose_workflow run --rm \
+        -v "$PWD/ops/n8n:/import:ro" \
+        workflow-engine \
+        import:workflow --input="/import/$import_name"
+
+    compose_workflow run --rm \
+        workflow-engine \
+        publish:workflow --id="$workflow_id"
+
+    compose_workflow run --rm \
+        workflow-engine \
+        update:workflow --id="$workflow_id" --active=true
+}
+
+# Stop runtime while source-controlled workflow state is replaced so database
+# state and registered webhooks cannot drift during deployment.
 compose_workflow stop workflow-engine >/dev/null 2>&1 || true
 
-compose_workflow run --rm \
-    -v "$PWD/ops/n8n:/import:ro" \
-    workflow-engine \
-    import:workflow --input=/import/xvond-actions.workflow.json
-
-# Publish and explicitly preserve the active flag for the pinned n8n runtime.
-compose_workflow run --rm \
-    workflow-engine \
-    publish:workflow --id="$WORKFLOW_ID"
-
-compose_workflow run --rm \
-    workflow-engine \
-    update:workflow --id="$WORKFLOW_ID" --active=true
+sync_one_workflow "$ACTION_WORKFLOW_FILE" "$ACTION_WORKFLOW_ID"
+sync_one_workflow "$CHANNEL_WORKFLOW_FILE" "$CHANNEL_WORKFLOW_ID"
+sync_one_workflow "$TELEGRAM_WORKFLOW_FILE" "$TELEGRAM_WORKFLOW_ID"
+sync_one_workflow "$META_WORKFLOW_FILE" "$META_WORKFLOW_ID"
 
 compose_workflow up -d --no-deps workflow-engine
-wait_for_runtime_webhook
+wait_for_runtime_webhooks
 
-echo "Workflow engine synced from Git: $WORKFLOW_ID"
+echo "Workflow engine synced from Git: $ACTION_WORKFLOW_ID, $CHANNEL_WORKFLOW_ID, $TELEGRAM_WORKFLOW_ID, $META_WORKFLOW_ID"

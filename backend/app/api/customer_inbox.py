@@ -13,12 +13,24 @@ from backend.app.modules.ai_agent.customer_access import can_view_conversations
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIConversation, AIMessage
 from backend.app.modules.audit.service import audit_service
+from backend.app.modules.channels.catalog import (
+    N8N_CHANNEL_ADAPTER,
+    canonical_channel_type,
+    get_channel_capability,
+    live_managed_channel_types,
+    live_self_service_channel_types,
+)
 from backend.app.modules.channels.handoff import (
     activate_human_handoff,
     human_handoff_active,
     resume_ai,
 )
-from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.channels.managed_delivery import (
+    attempt_delivery as attempt_managed_delivery,
+    delivery_payload as managed_delivery_payload,
+    ensure_delivery as ensure_managed_delivery,
+)
+from backend.app.modules.channels.models import AgentChannel, ManagedChannelOutboundDelivery
 from backend.app.modules.channels.whatsapp_delivery import (
     attempt_delivery,
     delivery_payload,
@@ -31,7 +43,9 @@ from backend.app.modules.tools.business_models import HumanHandoff
 router = APIRouter(prefix="/customer/inbox", tags=["Customer Conversation Inbox"])
 ACTIVE_HANDOFF_STATUSES = {"pending", "in_progress"}
 HANDOFF_MANAGER_ROLES = {"owner", "admin", "manager"}
-LIVE_INBOX_CHANNELS = {"whatsapp", "website", "voice", "instagram"}
+LIVE_INBOX_CHANNELS = (
+    live_self_service_channel_types() | live_managed_channel_types()
+) - {"xvond"}
 
 # Handoff is a channel capability, not a generic button. Only expose controls when
 # Xvond has a real delivery path back to the customer on that channel.
@@ -104,20 +118,26 @@ def _visible_agents(db, current_user: User) -> list[AIAgent]:
 
 
 def _channel_label(channel_type: str | None) -> str:
-    value = (channel_type or "unknown").strip().lower()
-    labels = {
-        "website": "Website",
-        "whatsapp": "WhatsApp",
-        "instagram": "Instagram",
-        "voice": "Voice",
-        "portal_test": "Test Console",
-        "unknown": "Unclassified",
-    }
-    return labels.get(value, value.replace("_", " ").title())
+    value = canonical_channel_type(channel_type or "unknown")
+    if value == "portal_test":
+        return "Test Console"
+    if value == "unknown":
+        return "Unclassified"
+    capability = get_channel_capability(value)
+    if capability is not None:
+        return str(capability.get("name") or value)
+    return value.replace("_", " ").title()
 
 
 def _handoff_capabilities(channel_type: str | None) -> dict:
-    value = str(channel_type or "unknown").strip().lower()
+    value = canonical_channel_type(channel_type or "unknown")
+    capability = get_channel_capability(value) or {}
+    if capability.get("runtime_adapter") == N8N_CHANNEL_ADAPTER:
+        return {
+            "handoff_supported": True,
+            "human_reply_supported": True,
+            "human_reply_delivery": "xvond_managed_channel",
+        }
     capabilities = HANDOFF_CAPABILITIES.get(value)
     if capabilities is None:
         capabilities = {
@@ -316,14 +336,20 @@ def _audit_handoff(db, *, action: str, conversation: AIConversation, current_use
 def _message_delivery_map(db, message_ids: list[int]) -> dict[int, dict]:
     if not message_ids:
         return {}
-    rows = (
+    whatsapp_rows = (
         db.query(WhatsAppOutboundDelivery)
         .filter(WhatsAppOutboundDelivery.message_id.in_(message_ids))
         .order_by(WhatsAppOutboundDelivery.id.desc())
         .all()
     )
+    managed_rows = (
+        db.query(ManagedChannelOutboundDelivery)
+        .filter(ManagedChannelOutboundDelivery.message_id.in_(message_ids))
+        .order_by(ManagedChannelOutboundDelivery.id.desc())
+        .all()
+    )
     result = {}
-    for row in rows:
+    for row in [*whatsapp_rows, *managed_rows]:
         result.setdefault(
             row.message_id,
             {
@@ -666,6 +692,7 @@ def send_human_reply(
         audit_details = {"delivery": delivery, "assigned_user_id": current_user.id}
         message = None
         delivery_row = None
+        gateway_delivery_state = None
 
         if delivery == "whatsapp":
             session = _session(db, current_user.company_id, conversation.id)
@@ -752,6 +779,94 @@ def send_human_reply(
             db.add(message)
             handoff.status = "in_progress"
             handoff.updated_at = datetime.utcnow()
+        elif delivery == "xvond_managed_channel":
+            channel = (
+                db.query(AgentChannel)
+                .filter(
+                    AgentChannel.id == conversation.channel_id,
+                    AgentChannel.company_id == current_user.company_id,
+                    AgentChannel.agent_id == conversation.agent_id,
+                    AgentChannel.channel_type == canonical_channel_type(conversation.channel_type),
+                    AgentChannel.enabled.is_(True),
+                )
+                .first()
+            )
+            if channel is None:
+                raise HTTPException(409, "The managed channel for this conversation is not active")
+            capability = get_channel_capability(channel.channel_type) or {}
+            if capability.get("runtime_adapter") != N8N_CHANNEL_ADAPTER:
+                raise HTTPException(409, "This conversation is not using the Xvond managed channel gateway")
+
+            external_contact_id = str(conversation.external_contact_id or "").strip()
+            if not external_contact_id:
+                raise HTTPException(409, "The managed channel contact identity is unavailable")
+
+            client_message_id = data.client_message_id or str(uuid4())
+            source_key = (
+                f"xvond-human:{current_user.company_id}:{conversation.id}:"
+                f"{current_user.id}:{client_message_id}"
+            )
+            existing_message = (
+                db.query(AIMessage)
+                .filter(AIMessage.source_key == source_key)
+                .first()
+            )
+            if existing_message is not None:
+                if existing_message.conversation_id != conversation.id or existing_message.content != text:
+                    raise HTTPException(
+                        409,
+                        "This client message identity is already used by a different reply",
+                    )
+                message = existing_message
+            else:
+                message = AIMessage(
+                    conversation_id=conversation.id,
+                    role="human",
+                    content=text,
+                    source_key=source_key,
+                )
+                db.add(message)
+                db.flush()
+                handoff.status = "in_progress"
+                handoff.updated_at = datetime.utcnow()
+                _audit_handoff(
+                    db,
+                    action="customer_inbox.human_reply_prepared",
+                    conversation=conversation,
+                    current_user=current_user,
+                    details={**audit_details, "idempotency_key": source_key},
+                )
+
+            delivery_row = ensure_managed_delivery(
+                db,
+                idempotency_key=source_key,
+                company_id=current_user.company_id,
+                agent_id=conversation.agent_id,
+                conversation_id=conversation.id,
+                channel_id=channel.id,
+                message_id=message.id,
+                external_contact_id=external_contact_id,
+            )
+            db.commit()
+            result = attempt_managed_delivery(db, delivery_id=delivery_row.id)
+            if not result.get("success"):
+                if result.get("unknown"):
+                    raise HTTPException(
+                        502,
+                        "Managed channel delivery outcome is unknown; the saved reply will not be resent blindly",
+                    )
+                raise HTTPException(
+                    502,
+                    "Managed channel delivery failed; the saved reply needs review",
+                )
+            gateway_delivery_state = result
+            audit_details.update(
+                {
+                    "delivery_id": delivery_row.id,
+                    "delivery_status": result.get("status"),
+                    "provider_message_id": result.get("provider_message_id"),
+                }
+            )
         else:
             raise HTTPException(409, "No human reply delivery adapter exists for this channel")
 
@@ -771,7 +886,15 @@ def send_human_reply(
             "status": "sent",
             "mode": "human",
             "delivery": delivery,
-            "delivery_state": delivery_payload(delivery_row) if delivery_row is not None else None,
+            "delivery_state": (
+                managed_delivery_payload(delivery_row)
+                if delivery == "xvond_managed_channel" and delivery_row is not None
+                else delivery_payload(delivery_row)
+                if delivery_row is not None
+                else gateway_delivery_state
+                if delivery == "xvond_managed_channel"
+                else None
+            ),
             "message": {
                 "id": message.id,
                 "role": message.role,

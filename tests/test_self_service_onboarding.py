@@ -43,6 +43,7 @@ def test_public_builder_is_open_ended_and_creates_directly_without_preview():
     assert "preview-btn" not in html
     assert "review-card" not in html
     assert "/customer/employee-builder/create" in html
+    assert "/customer-ui#employee-builder" in html
     assert "/auth/login" in html
     assert "/auth/signup" in html
     assert "sessionStorage" in html
@@ -66,10 +67,18 @@ def test_customer_portal_treats_job_brief_as_source_of_truth():
     assert "source of truth" in source
     assert "instead of limiting it to a predefined agent type" in source
     assert "Xvond builds this" in source
+    assert "BUILD PROGRESS" in source
+    assert "data-builder-action" in source
+    assert "setup_website" in source
+    assert "setup_whatsapp" in source
+    assert "manage_knowledge" in source
     assert "Capabilities" not in source
     assert "/customer/employee-builder/create" not in source
     assert "/customer/employee-builder/preview" not in source
-    assert "/customer/employee-builder/${employee.agent_id}/test" not in source
+    assert "/customer/employee-builder/${agentId}/test" in source
+    assert "Preview & Test" in source
+    assert "employee-refine-instruction" in source
+    assert "Version history" in source
 
 
 def test_xvond_com_nginx_exposes_public_builder_without_replacing_landing():
@@ -110,3 +119,27 @@ def test_self_service_portal_visibility_does_not_fake_paid_entitlement():
     assert "has_self_service_employee" in source
     assert "portal_service_codes" in source
     assert '"active_services": active_service_codes' in source
+
+
+def test_self_service_builder_is_a_first_class_portal_route():
+    portal = (ROOT / "backend" / "app" / "api" / "customer_portal.py").read_text(
+        encoding="utf-8"
+    )
+    app = (ROOT / "frontend" / "customer" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    session = (ROOT / "frontend" / "customer" / "session-security.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"id": "employee-builder"' in portal
+    assert '"loader": "employee-builder"' in portal
+    assert "is_self_service_workspace = company.onboarding_source == \"self_service\"" in portal
+    assert "if is_self_service_workspace:" in portal
+    assert "async function openInitialPortalPage()" in app
+    assert 'requestedPage' in app
+    assert 'selfServiceDraft' in app
+    draft_block = app.split("const selfServiceDraft =", 1)[1].split(");", 1)[0]
+    assert "summary?.agents" not in draft_block
+    assert '"employee-builder"' in app
+    assert "await openInitialPortalPage()" in session

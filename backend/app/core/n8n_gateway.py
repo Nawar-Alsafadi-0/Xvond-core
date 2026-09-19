@@ -75,6 +75,7 @@ class N8NActionGateway:
         data: dict[str, Any] | None = None,
         conversation_id: int | None = None,
         request_id: str | None = None,
+        max_retries_override: int | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
             raise N8NGatewayError("n8n workflow execution is disabled")
@@ -102,7 +103,8 @@ class N8NActionGateway:
             "X-Xvond-Request-ID": request_id,
         }
 
-        attempts = self.max_retries + 1
+        retry_count = self.max_retries if max_retries_override is None else max(0, int(max_retries_override))
+        attempts = retry_count + 1
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:

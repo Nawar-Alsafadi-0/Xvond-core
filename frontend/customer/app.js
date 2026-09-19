@@ -137,6 +137,27 @@ function ensurePortalPage(item) {
     container.appendChild(section);
 }
 
+async function openInitialPortalPage() {
+    const requestedPage = decodeURIComponent(
+        String(window.location.hash || "").replace(/^#/, "")
+    ).trim();
+    const validRequestedPage = portalNavigation.some(item => item.id === requestedPage)
+        ? requestedPage
+        : null;
+    const selfServiceDraft = (
+        portalOverview?.company?.onboarding_source === "self_service"
+        && Number(portalOverview?.summary?.active_agents || 0) === 0
+        && portalNavigation.some(item => item.id === "employee-builder")
+    );
+    const initialPage = validRequestedPage || (selfServiceDraft ? "employee-builder" : null);
+    if (!initialPage) return;
+
+    const initialButton = [...document.querySelectorAll("#portal-nav .nav-item")]
+        .find(item => item.dataset.page === initialPage);
+    await openPage(initialPage, initialButton || null);
+}
+
+
 function renderPortalNavigation() {
     const nav = document.getElementById("portal-nav");
     if (!nav) return;
@@ -282,26 +303,159 @@ function renderServicePage(serviceCode, pageId) {
     target.innerHTML = serviceDetailMarkup(serviceByCode(serviceCode));
 }
 
-function renderIntegrations() {
-    const target = document.getElementById("customer-integrations-content");
+async function renderIntegrations() {
+    const target = document.getElementById("customer-integrations-content")
+        || document.querySelector("#page-integrations .dynamic-page-content");
     if (!target) return;
-    const service = serviceByCode("integrations");
-    const integrations = portalOverview?.integrations || [];
-    target.innerHTML = `
-        ${serviceDetailMarkup(service)}
-        <div class="panel" style="margin-top:20px">
-            <h2>Connected Systems</h2>
-            ${integrations.length ? integrations.map(item => `
-                <div class="agent">
-                    <div class="service-card-head">
-                        <div><strong>${safe(item.name)}</strong><p>${safe(item.type)}</p></div>
-                        <span class="pill">${item.enabled ? "Active" : "Inactive"}</span>
+    target.innerHTML = '<div class="panel"><p class="muted">Loading connected systems…</p></div>';
+
+    try {
+        const [catalogResult, listResult] = await Promise.all([
+            api("/manage/integrations/catalog"),
+            api("/manage/integrations"),
+        ]);
+        const definitions = catalogResult.integrations || [];
+        const integrations = listResult.integrations || [];
+        const definitionOptions = definitions.map(item =>
+            `<option value="${safe(item.type)}">${safe(item.name || item.type)}</option>`
+        ).join("");
+
+        target.innerHTML = `
+            <div class="panel" style="margin-bottom:20px">
+                <div class="service-card-head">
+                    <div>
+                        <h2>Connected Systems</h2>
+                        <p class="muted">Connect an existing CRM, POS, booking API, ERP, webhook or custom API. Secrets are stored encrypted and are never shown again.</p>
                     </div>
                 </div>
-            `).join("") : '<p class="muted">No external systems connected yet.</p>'}
-        </div>
-    `;
+                <div class="service-grid" style="margin-top:14px">
+                    <label>Type
+                        <select id="customer-integration-type">${definitionOptions}</select>
+                    </label>
+                    <label>Name
+                        <input id="customer-integration-name" maxlength="200" placeholder="My booking system">
+                    </label>
+                </div>
+                <div id="customer-integration-fields" class="service-grid" style="margin-top:14px"></div>
+                <div class="chat-input" style="margin-top:14px">
+                    <button type="button" id="customer-integration-create">Add connected system</button>
+                </div>
+                <div id="customer-integration-error" class="error"></div>
+            </div>
+            <div class="panel">
+                <h2>Your connections</h2>
+                ${integrations.length ? integrations.map(item => `
+                    <div class="agent">
+                        <div class="service-card-head">
+                            <div>
+                                <strong>${safe(item.name)}</strong>
+                                <p>${safe(item.integration_type)} · ${item.validated ? "Validated" : item.configured ? "Configured · validation required" : "Setup incomplete"}</p>
+                            </div>
+                            <span class="pill">${item.enabled ? "Active" : "Inactive"}</span>
+                        </div>
+                        ${(item.configured_secret_fields || []).length
+                            ? `<p class="muted">Protected credentials configured: ${safe((item.configured_secret_fields || []).join(", "))}</p>`
+                            : ""}
+                        ${item.configured && !item.validated ? `<button type="button" onclick="validateCustomerIntegration(${Number(item.id)})">Validate connection</button>` : ""}
+                        <button type="button" onclick="deleteCustomerIntegration(${Number(item.id)})">Remove</button>
+                    </div>
+                `).join("") : '<p class="muted">No connected systems yet.</p>'}
+            </div>
+        `;
+
+        const type = document.getElementById("customer-integration-type");
+        const renderFields = () => {
+            const definition = definitions.find(item => item.type === type?.value) || definitions[0];
+            const host = document.getElementById("customer-integration-fields");
+            if (!host) return;
+            host.innerHTML = (definition?.config_fields || []).map(field => {
+                const choices = Array.isArray(field.choices) ? field.choices : [];
+                const defaultValue = field.default == null ? "" : String(field.default);
+                const control = choices.length
+                    ? `<select
+                            data-integration-config="${safe(field.name)}"
+                            ${field.required ? "required" : ""}
+                        >
+                            ${choices.map(value => `
+                                <option value="${safe(value)}" ${String(value) === defaultValue ? "selected" : ""}>
+                                    ${safe(value)}
+                                </option>
+                            `).join("")}
+                        </select>`
+                    : `<input
+                            data-integration-config="${safe(field.name)}"
+                            type="${field.secret ? "password" : "text"}"
+                            autocomplete="off"
+                            ${field.required ? "required" : ""}
+                            ${!field.secret && defaultValue ? `value="${safe(defaultValue)}"` : ""}
+                            placeholder="${field.secret ? "Stored encrypted" : safe(field.label || field.name)}"
+                        >`;
+                return `
+                    <label>
+                        ${safe(field.label || field.name)}
+                        ${control}
+                    </label>
+                `;
+            }).join("");
+        };
+        type?.addEventListener("change", renderFields);
+        renderFields();
+
+        document.getElementById("customer-integration-create")?.addEventListener("click", async event => {
+            const button = event.currentTarget;
+            const error = document.getElementById("customer-integration-error");
+            if (error) error.textContent = "";
+            const integrationType = String(type?.value || "").trim();
+            const name = String(document.getElementById("customer-integration-name")?.value || "").trim();
+            const config = {};
+            document.querySelectorAll("#customer-integration-fields [data-integration-config]").forEach(input => {
+                const value = String(input.value || "").trim();
+                if (value) config[input.dataset.integrationConfig] = value;
+            });
+            if (!integrationType || !name) {
+                if (error) error.textContent = "Choose a type and name.";
+                return;
+            }
+            button.disabled = true;
+            try {
+                await api("/manage/integrations", {
+                    method: "POST",
+                    body: JSON.stringify({integration_type: integrationType, name, config}),
+                });
+                await renderIntegrations();
+            } catch (err) {
+                if (error) error.textContent = err?.message || "Could not add connected system.";
+            } finally {
+                if (document.body.contains(button)) button.disabled = false;
+            }
+        });
+    } catch (error) {
+        target.innerHTML = `<div class="panel"><p>${safe(error.message)}</p></div>`;
+    }
 }
+
+async function validateCustomerIntegration(integrationId) {
+    try {
+        await api(`/manage/integrations/${Number(integrationId)}/validate`, {method: "POST"});
+        await renderIntegrations();
+    } catch (error) {
+        alert(error.message);
+    }
+}
+
+window.validateCustomerIntegration = validateCustomerIntegration;
+
+async function deleteCustomerIntegration(integrationId) {
+    if (!confirm("Remove this connected system?")) return;
+    try {
+        await api(`/manage/integrations/${Number(integrationId)}`, {method: "DELETE"});
+        await renderIntegrations();
+    } catch (error) {
+        alert(error.message);
+    }
+}
+
+window.deleteCustomerIntegration = deleteCustomerIntegration;
 
 function renderPaymentMethod() {
     const billing = portalOverview?.billing || {};
@@ -369,6 +523,7 @@ async function startPortal() {
         renderPortalNavigation();
         renderAccountInfo();
         renderDashboard();
+        await openInitialPortalPage();
     } catch (err) {
         clearSession();
         const error = document.getElementById("login-error");
@@ -487,41 +642,81 @@ async function openPage(name, button) {
         await loadConversations();
     }
     if (loader === "usage") await loadUsage();
-    if (loader === "business") await loadCustomerBusiness();
-    if (loader === "integrations") renderIntegrations();
+    if (loader === "business") {
+        await loadCustomerBusiness({
+            pageId: item.id || "business",
+            capabilityModule: item.capability_module || null,
+            includeHandoffs: item.include_handoffs !== false && !item.capability_module,
+            label: item.label || "Operations",
+        });
+    }
+    if (loader === "integrations") await renderIntegrations();
     if (loader === "billing") renderBilling();
     if (loader === "service") renderServicePage(item.service_code, item.id);
 }
 
-async function loadCustomerBusiness() {
-    const target = document.getElementById("customer-business-content");
+async function loadCustomerBusiness(options = {}) {
+    const pageId = options.pageId || "business";
+    const capabilityModule = String(options.capabilityModule || "").trim();
+    const includeHandoffs = options.includeHandoffs !== false;
+    const label = options.label || (capabilityModule ? capabilityModule.replaceAll("_", " ") : "Operations");
+    const page = document.getElementById(`page-${pageId}`);
+    const target = pageId === "business"
+        ? document.getElementById("customer-business-content")
+        : page?.querySelector(".dynamic-page-content");
+    if (!target) return;
+
     try {
+        const operationPath = capabilityModule
+            ? `/customer/action-requests?module=${encodeURIComponent(capabilityModule)}`
+            : "/customer/action-requests";
         const [operationResult, handoffs] = await Promise.all([
-            api("/customer/action-requests"),
-            api("/customer/business/handoffs")
+            api(operationPath),
+            includeHandoffs ? api("/customer/business/handoffs") : Promise.resolve([])
         ]);
         const operations = operationResult.requests || [];
         const open = operations.filter(x => !["completed", "cancelled"].includes(x.status));
         const completed = operations.filter(x => x.status === "completed");
-        document.getElementById("customer-operations-count").textContent = operations.length;
-        document.getElementById("customer-open-count").textContent = open.length;
-        document.getElementById("customer-completed-count").textContent = completed.length;
-        document.getElementById("customer-handoffs-count").textContent = handoffs.length;
+
+        if (pageId === "business") {
+            const totalEl = document.getElementById("customer-operations-count");
+            const openEl = document.getElementById("customer-open-count");
+            const completedEl = document.getElementById("customer-completed-count");
+            const handoffsEl = document.getElementById("customer-handoffs-count");
+            if (totalEl) totalEl.textContent = operations.length;
+            if (openEl) openEl.textContent = open.length;
+            if (completedEl) completedEl.textContent = completed.length;
+            if (handoffsEl) handoffsEl.textContent = handoffs.length;
+        }
+
+        const metrics = capabilityModule ? `
+            <div class="cards" style="margin-bottom:20px">
+                <div class="card"><span>Total</span><strong>${operations.length}</strong></div>
+                <div class="card"><span>Open</span><strong>${open.length}</strong></div>
+                <div class="card"><span>Completed</span><strong>${completed.length}</strong></div>
+            </div>
+        ` : "";
+
         target.innerHTML = `
-            ${customerBusinessSection("Operations", operations, item => `
-                <strong>${safe((item.action_type || "operation").replaceAll("_", " "))} #${item.id}</strong>
-                <p>Status: ${safe(item.status)}</p>
-                <p>${safe(item.summary || "")}</p>
+            ${metrics}
+            ${customerBusinessSection(label, operations, item => `
+                <div class="service-card-head">
+                    <div>
+                        <strong>${safe(item.action_label || (item.action_type || "operation").replaceAll("_", " "))} #${item.id}</strong>
+                        <p class="muted">${safe(item.summary || "")}</p>
+                    </div>
+                    <span class="pill">${safe(item.status)}</span>
+                </div>
                 ${operationDetails(item.details)}
                 ${operationButtons(item)}
             `)}
-            ${customerBusinessSection("Human Handoffs", handoffs, item => `
+            ${includeHandoffs ? customerBusinessSection("Human Handoffs", handoffs, item => `
                 <strong>Handoff #${item.id}</strong>
                 <p>Reason: ${safe(item.reason || "-")}</p>
                 <p>Department: ${safe(item.department || "-")}</p>
                 <p>Priority: ${safe(item.priority || "-")}</p>
                 <p>Status: ${safe(item.status)}</p>
-            `)}
+            `) : ""}
         `;
     } catch (err) {
         target.innerHTML = `<div class="panel">${safe(err.message)}</div>`;
@@ -542,6 +737,20 @@ function operationButtons(item) {
     if (item.status === "awaiting_confirmation") {
         return `<p><em>Waiting for customer confirmation in the conversation.</em></p>`;
     }
+    if (item.external_execution?.reconciliation_required) {
+        return `
+            <div class="note">
+                <strong>External result needs reconciliation</strong>
+                <p class="muted">Xvond will not retry this action automatically because the external system outcome is not certain. Check the connected system, then confirm what actually happened.</p>
+                ${item.external_execution?.error ? `<p class="error">${safe(item.external_execution.error)}</p>` : ""}
+                <div class="chat-input">
+                    <button onclick="reconcileCustomerOperation(${Number(item.id)},'executed')">Confirm executed</button>
+                    <button onclick="reconcileCustomerOperation(${Number(item.id)},'not_executed')">Confirm not executed</button>
+                    <button onclick="reconcileCustomerOperation(${Number(item.id)},'cancelled')">Confirm cancelled</button>
+                </div>
+            </div>
+        `;
+    }
     const buttons = [];
     if (!["in_progress", "processing", "completed", "cancelled"].includes(item.status)) {
         buttons.push(`<button onclick="setCustomerOperationStatus(${item.id},'in_progress')">Start</button>`);
@@ -558,6 +767,26 @@ async function setCustomerOperationStatus(id, status) {
         await api(`/customer/action-requests/${id}`, {
             method: "PATCH",
             body: JSON.stringify({status})
+        });
+        await loadCustomerBusiness();
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+async function reconcileCustomerOperation(id, outcome) {
+    const labels = {
+        executed: "executed successfully",
+        not_executed: "not executed",
+        cancelled: "cancelled",
+    };
+    const label = labels[outcome] || outcome;
+    if (!confirm(`Confirm that this external operation was ${label}?`)) return;
+    const note = prompt("Optional reconciliation note:", "") || "";
+    try {
+        await api(`/customer/action-requests/${id}/reconcile`, {
+            method: "PATCH",
+            body: JSON.stringify({outcome, note})
         });
         await loadCustomerBusiness();
     } catch (err) {

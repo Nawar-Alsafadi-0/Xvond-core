@@ -12,10 +12,12 @@ services:
       APP_ENV: production
       DATABASE_URL: ${DATABASE_URL_DOCKER:?DATABASE_URL_DOCKER is required}
       REDIS_URL: redis://redis:6379/0
+      MEDIA_STORAGE_DIR: /var/lib/xvond/media
       BACKUP_STATUS_DIR: /backup-status
       BACKUP_STALE_AFTER_SECONDS: ${BACKUP_STALE_AFTER_SECONDS:-129600}
     volumes:
       - xvond_backup_status:/backup-status:ro
+      - xvond_media:/var/lib/xvond/media
     ports:
       - "127.0.0.1:${APP_PORT:-8000}:8000"
     depends_on:
@@ -70,7 +72,10 @@ services:
       APP_ENV: production
       DATABASE_URL: ${DATABASE_URL_DOCKER:?DATABASE_URL_DOCKER is required}
       REDIS_URL: redis://redis:6379/0
+      MEDIA_STORAGE_DIR: /var/lib/xvond/media
       AUTOMATION_SCHEDULER_POLL_SECONDS: ${AUTOMATION_SCHEDULER_POLL_SECONDS:-30}
+    volumes:
+      - xvond_media:/var/lib/xvond/media
     depends_on:
       app:
         condition: service_healthy
@@ -215,7 +220,14 @@ services:
       N8N_ENCRYPTION_KEY: ${WORKFLOW_ENCRYPTION_KEY:?WORKFLOW_ENCRYPTION_KEY is required}
       N8N_SHARED_SECRET: ${N8N_SHARED_SECRET:?N8N_SHARED_SECRET is required}
       XVOND_INTERNAL_ACTION_URL: ${XVOND_INTERNAL_ACTION_URL:-http://app:8000/internal/workflow/xvond-internal}
+      XVOND_INTERNAL_CHANNEL_URL: ${XVOND_INTERNAL_CHANNEL_URL:-http://app:8000/internal/channels/message}
+      XVOND_INTERNAL_CHANNEL_CONFIRM_URL: ${XVOND_INTERNAL_CHANNEL_CONFIRM_URL:-http://app:8000/internal/channels/delivery-confirmed}
       XVOND_WORKFLOW_INTEGRATIONS_JSON: ${XVOND_WORKFLOW_INTEGRATIONS_JSON:-{}}
+      XVOND_CHANNEL_ROUTES_JSON: ${XVOND_CHANNEL_ROUTES_JSON:-{}}
+      XVOND_TELEGRAM_ROUTES_JSON: ${XVOND_TELEGRAM_ROUTES_JSON:-{}}
+      XVOND_META_MESSAGING_ROUTES_JSON: ${XVOND_META_MESSAGING_ROUTES_JSON:-{}}
+      XVOND_META_MESSAGING_VERIFY_TOKEN: ${XVOND_META_MESSAGING_VERIFY_TOKEN:-}
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto
       N8N_HOST: ${WORKFLOW_HOST:-workflow.xvond.com}
       N8N_PORT: 5678
       N8N_PROTOCOL: https
@@ -250,6 +262,7 @@ services:
 
 volumes:
   xvond_postgres_data:
+  xvond_media:
   xvond_redis_data:
   xvond_backups:
   xvond_backup_status:

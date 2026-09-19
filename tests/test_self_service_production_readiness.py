@@ -16,6 +16,7 @@ from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.ai_agent.profile_models import AIAgentProfile
 from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
+from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.knowledge.models import AgentKnowledge, KnowledgeDocument
 
 
@@ -270,6 +271,91 @@ def test_self_service_knowledge_requirement_resolves_only_after_enabled_knowledg
     assert state["ready"] is True
     assert "knowledge" in state["resolved_requirements"]
     assert "knowledge: setup required" not in state["blockers"]
+
+
+def test_self_service_connection_must_stay_validated_until_launch(
+    self_service_database,
+):
+    factory = self_service_database
+    connection_spec = _compiled_spec(
+        [
+            {
+                "key": "booking",
+                "kind": "integration",
+                "purpose": "Book appointments",
+                "status": "xvond_managed",
+                "execution_status": "setup_required",
+                "fulfillment_mode": "external_connection",
+                "integration_id": 31,
+                "validation_required": True,
+            }
+        ]
+    )
+
+    with factory() as db:
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings = dict(config.settings)
+        builder = dict(settings["employee_builder"])
+        builder["compiled_spec"] = connection_spec
+        settings["employee_builder"] = builder
+        config.settings = settings
+        db.add(
+            CompanyIntegration(
+                id=31,
+                company_id=1,
+                integration_type="custom_api",
+                name="Booking API",
+                config={
+                    "base_url": "https://booking.example.com",
+                    "validation_endpoint": "/me",
+                },
+                enabled=True,
+            )
+        )
+        db.commit()
+
+    with factory() as db:
+        state = self_service_policy.self_service_readiness(
+            db,
+            company=db.get(Company, 1),
+            agent=db.get(AIAgent, 1),
+            config=db.query(AgentConfig).filter_by(agent_id=1).one(),
+        )
+
+    assert state["ready"] is False
+    assert state["connected_system_setup"] == [
+        {
+            "requirement_key": "booking",
+            "integration_id": 31,
+            "integration_name": "Booking API",
+            "reason": "validation_required",
+            "message": "Validate Booking API again before launch",
+        }
+    ]
+    assert "Validate Booking API again before launch" in state["blockers"]
+
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 31)
+        integration.config = {
+            "base_url": "https://booking.example.com",
+            "validation_endpoint": "/me",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-18T12:00:00Z",
+            },
+        }
+        db.commit()
+
+    with factory() as db:
+        state = self_service_policy.self_service_readiness(
+            db,
+            company=db.get(Company, 1),
+            agent=db.get(AIAgent, 1),
+            config=db.query(AgentConfig).filter_by(agent_id=1).one(),
+        )
+
+    assert state["ready"] is True
+    assert state["connected_system_setup"] == []
 
 
 def test_production_self_service_requires_real_provider_even_without_channel(monkeypatch):

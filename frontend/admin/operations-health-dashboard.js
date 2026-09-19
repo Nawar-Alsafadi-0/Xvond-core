@@ -35,6 +35,7 @@ loadDashboard=async function(){
     target.insertAdjacentHTML('beforeend',[
       xvondHealthCard('Backup Health',backupState,`${localDetail} · ${offsiteDetail}`),
       xvondHealthCard('WhatsApp Deliveries to Review',adminNumber(summary.unresolved_whatsapp_deliveries||0),'Failed or unknown transport outcomes'),
+      xvondHealthCard('Managed Channel Deliveries to Review',adminNumber(summary.unresolved_managed_channel_deliveries||0),'Telegram, Instagram, Email and other managed channel outcomes'),
     ].join(''));
   }catch(error){
     target.insertAdjacentHTML('beforeend',xvondHealthCard('Operations Health','Unavailable','Backup/delivery health check failed'));

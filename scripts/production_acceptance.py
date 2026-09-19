@@ -21,6 +21,8 @@ from backend.app.core.readiness import company_readiness
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
 from backend.app.modules.automation.scheduler_health import automation_scheduler_health
 from backend.app.modules.billing.limits import limits_service
+from backend.app.modules.channels.catalog import N8N_CHANNEL_ADAPTER, get_channel_capability
+from backend.app.modules.channels.models import AgentChannel, ManagedChannelOutboundDelivery
 from backend.app.modules.channels.whatsapp_models import WhatsAppOutboundDelivery
 from backend.app.modules.channels.whatsapp_queue import whatsapp_job_queue
 from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord
@@ -76,13 +78,7 @@ def _backup_checks() -> dict:
 
 
 def _workflow_engine_check(db, *, company_id: int, agent_id: int) -> dict:
-    """Verify the external execution plane when this employee can run actions.
-
-    The registered live business-action tool is ``action_request``. A customer
-    must never be declared production-ready for bookings/orders/CRM/POS/etc. when
-    that tool is assigned but the Workflow Engine cannot execute its safe
-    ``health_check`` contract.
-    """
+    """Verify the external execution plane whenever this employee depends on it."""
 
     assigned = (
         db.query(AgentToolAssignment)
@@ -93,12 +89,34 @@ def _workflow_engine_check(db, *, company_id: int, agent_id: int) -> dict:
         )
         .first()
     )
-    if assigned is None:
+    managed_channels = []
+    for channel in (
+        db.query(AgentChannel)
+        .filter(
+            AgentChannel.company_id == company_id,
+            AgentChannel.agent_id == agent_id,
+            AgentChannel.enabled.is_(True),
+        )
+        .all()
+    ):
+        capability = get_channel_capability(channel.channel_type) or {}
+        if capability.get("runtime_adapter") == N8N_CHANNEL_ADAPTER:
+            managed_channels.append(channel.channel_type)
+
+    required_by = []
+    if assigned is not None:
+        required_by.append("business_actions")
+    if managed_channels:
+        required_by.append("managed_channels")
+
+    if not required_by:
         return {
             "ok": True,
             "required": False,
             "configured": n8n_gateway.configured(),
             "status": "not_required",
+            "required_by": [],
+            "managed_channels": [],
         }
 
     if not n8n_gateway.configured():
@@ -108,6 +126,8 @@ def _workflow_engine_check(db, *, company_id: int, agent_id: int) -> dict:
             "configured": False,
             "status": "not_configured",
             "error": "Workflow Engine is required by this AI employee but is not configured",
+            "required_by": required_by,
+            "managed_channels": sorted(set(managed_channels)),
         }
 
     try:
@@ -125,6 +145,8 @@ def _workflow_engine_check(db, *, company_id: int, agent_id: int) -> dict:
             "configured": True,
             "status": "unreachable",
             "error": safe_error_label(exc),
+            "required_by": required_by,
+            "managed_channels": sorted(set(managed_channels)),
         }
 
     data = result.get("data") if isinstance(result, dict) else None
@@ -135,6 +157,8 @@ def _workflow_engine_check(db, *, company_id: int, agent_id: int) -> dict:
         "required": True,
         "configured": True,
         "status": "healthy" if healthy else "invalid_health_response",
+        "required_by": required_by,
+        "managed_channels": sorted(set(managed_channels)),
     }
 
 
@@ -224,6 +248,15 @@ def check_release(
             .scalar()
             or 0
         )
+        unresolved_managed_deliveries = (
+            db.query(func.count(ManagedChannelOutboundDelivery.id))
+            .filter(
+                ManagedChannelOutboundDelivery.company_id == company_id,
+                ManagedChannelOutboundDelivery.status.in_(UNRESOLVED_DELIVERY),
+            )
+            .scalar()
+            or 0
+        )
         recent_ai_failures = (
             db.query(func.count(AIUsage.id))
             .filter(
@@ -234,9 +267,10 @@ def check_release(
             or 0
         )
         checks["open_incidents"] = {
-            "ok": not unresolved_external and not unresolved_deliveries,
+            "ok": not unresolved_external and not unresolved_deliveries and not unresolved_managed_deliveries,
             "unresolved_external_operations": int(unresolved_external),
             "unresolved_whatsapp_deliveries": int(unresolved_deliveries),
+            "unresolved_managed_channel_deliveries": int(unresolved_managed_deliveries),
             "recorded_ai_failures": int(recent_ai_failures),
         }
 

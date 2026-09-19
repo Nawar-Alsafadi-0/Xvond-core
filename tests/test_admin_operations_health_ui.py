@@ -18,6 +18,8 @@ def test_operations_health_surfaces_backup_and_delivery_attention():
     assert "Offsite:" in HEALTH
     assert "WhatsApp Deliveries to Review" in HEALTH
     assert "unresolved_whatsapp_deliveries" in HEALTH
+    assert "Managed Channel Deliveries to Review" in HEALTH
+    assert "unresolved_managed_channel_deliveries" in HEALTH
 
 
 def test_backup_status_endpoint_does_not_expose_repository_secrets():

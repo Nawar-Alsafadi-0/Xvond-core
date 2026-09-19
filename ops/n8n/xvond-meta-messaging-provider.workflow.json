@@ -1,0 +1,576 @@
+{
+  "id": "xvond-meta-messaging-provider-v1",
+  "name": "Xvond Meta Messaging Provider",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "xvond-meta-messaging",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "meta-verify-webhook",
+      "name": "Meta Verify",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        180,
+        80
+      ],
+      "webhookId": "xvond-meta-messaging-verify"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst q = item.query || {};\nconst mode = String(q['hub.mode'] || q.hub_mode || '');\nconst token = String(q['hub.verify_token'] || q.hub_verify_token || '');\nconst challenge = String(q['hub.challenge'] || q.hub_challenge || '');\nconst expected = String($env.XVOND_META_MESSAGING_VERIFY_TOKEN || '');\nconst verified = Boolean(expected && mode === 'subscribe' && token === expected && challenge);\nreturn [{json:{verified, challenge: verified ? challenge : 'verification_failed'}}];"
+      },
+      "id": "validate-meta-verification",
+      "name": "Validate Meta Verification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "meta-verified",
+              "leftValue": "={{ String($json.verified) }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-meta-verification",
+      "name": "Meta Verification OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        650,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.challenge }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-meta-verification",
+      "name": "Return Meta Challenge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        890,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "verification_failed",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "id": "reject-meta-verification",
+      "name": "Reject Meta Verification",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        890,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "xvond-meta-messaging",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "meta-inbound-webhook",
+      "name": "Meta Messaging Inbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        180,
+        340
+      ],
+      "webhookId": "xvond-meta-messaging-inbound"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst item = $input.first();\nconst json = item.json || {};\nconst headers = json.headers || {};\nconst body = json.body || {};\nconst rawBase64 = item.binary?.data?.data || '';\nconst rawBody = rawBase64 ? Buffer.from(rawBase64, 'base64') : null;\nconst signatureHeader = String(headers['x-hub-signature-256'] || headers['X-Hub-Signature-256'] || '');\nlet registry = {};\ntry { registry = JSON.parse($env.XVOND_META_MESSAGING_ROUTES_JSON || '{}'); }\ncatch (_e) { return [{json:{success:false,_dispatch:'reject',code:'registry_invalid'}}]; }\n\nconst entries = Array.isArray(body.entry) ? body.entry : [];\nif (!entries.length) return [{json:{success:true,_dispatch:'ignore',ignored:true}}];\n\nconst firstSenderId = String(entries[0]?.id || '');\nconst routeEntry = Object.entries(registry).find(([, route]) => String(route?.sender_id || '') === firstSenderId);\nif (!routeEntry) return [{json:{success:false,_dispatch:'reject',code:'route_not_found'}}];\nconst [routeKey, route] = routeEntry;\n\nconst appSecret = String(route.app_secret || '');\nif (!rawBody || !appSecret || !signatureHeader.startsWith('sha256=')) {\n  return [{json:{success:false,_dispatch:'reject',code:'signature_missing'}}];\n}\nconst expected = 'sha256=' + crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');\nconst a = Buffer.from(expected);\nconst b = Buffer.from(signatureHeader);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n  return [{json:{success:false,_dispatch:'reject',code:'signature_invalid'}}];\n}\n\nconst output = [];\nfor (const entry of entries) {\n  const senderAccountId = String(entry?.id || '');\n  const match = Object.entries(registry).find(([, candidate]) =>\n    String(candidate?.sender_id || '') === senderAccountId\n  );\n  if (!match) continue;\n  const [matchedRouteKey, matchedRoute] = match;\n  const expectedChannel = String(matchedRoute.channel_type || '').trim().toLowerCase();\n  if (!['instagram','messenger'].includes(expectedChannel)) continue;\n\n  const events = Array.isArray(entry?.messaging) ? entry.messaging : [];\n  for (const event of events) {\n    const message = event?.message || null;\n    const text = String(message?.text || '').trim();\n    const senderId = String(event?.sender?.id || '');\n    const mid = String(message?.mid || '');\n    if (!message || message.is_echo === true || !text || !senderId || !mid) continue;\n\n    output.push({json:{\n      success:true,\n      _dispatch:'xvond',\n      route_key:matchedRouteKey,\n      payload:{\n        company_id:Number(matchedRoute.company_id || 0),\n        agent_id:Number(matchedRoute.agent_id || 0),\n        channel_id:Number(matchedRoute.channel_id || 0),\n        channel_type:expectedChannel,\n        external_contact_id:senderId,\n        external_message_id:mid,\n        message:text\n      }\n    }});\n  }\n}\nreturn output.length ? output : [{json:{success:true,_dispatch:'ignore',ignored:true}}];"
+      },
+      "id": "validate-normalize-meta",
+      "name": "Validate and Normalize Meta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        430,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "meta-forward",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "xvond",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-meta-inbound",
+      "name": "Forward Meta Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        920,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.XVOND_INTERNAL_CHANNEL_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Xvond-N8N-Secret",
+              "value": "={{ $env.N8N_SHARED_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "forward-meta-xvond",
+      "name": "Forward Meta to Xvond",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        940,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {status:'ok'} }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "return-meta-inbound",
+      "name": "Return Meta Inbound",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1190,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "xvond-meta-messaging-provider",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "meta-provider-webhook",
+      "name": "Meta Messaging Provider",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        180,
+        650
+      ],
+      "webhookId": "xvond-meta-messaging-provider"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst supplied = String(headers['x-xvond-channel-secret'] || headers['X-Xvond-Channel-Secret'] || '');\nconst requestId = String(body.request_id || headers['x-xvond-request-id'] || '').trim();\nconst action = String(body.action || '').trim();\nconst data = body.data && typeof body.data === 'object' ? body.data : {};\nconst companyId = Number(body.company_id || 0);\nconst connectionKey = String(data.connection_key || '').trim();\n\nlet registry = {};\ntry { registry = JSON.parse($env.XVOND_META_MESSAGING_ROUTES_JSON || '{}'); }\ncatch (_e) { return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Meta route registry is invalid',error_code:'provider_not_configured',data:null}}]; }\n\nconst routeKey = `${companyId}:${connectionKey}`;\nconst route = registry[routeKey];\nif (!route || !route.access_token || !route.provider_secret || !route.sender_id) {\n  return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Meta messaging route is not configured',error_code:'provider_not_configured',data:null}}];\n}\nif (!supplied || supplied !== String(route.provider_secret)) {\n  return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unauthorized Meta provider request',error_code:'unauthorized',data:null}}];\n}\nconst channelType = String(route.channel_type || '').trim().toLowerCase();\nif (!['instagram','messenger'].includes(channelType) || action !== 'channel.send') {\n  return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unsupported Meta messaging provider action',error_code:'unsupported_action',data:null}}];\n}\nconst recipientId = String(data.external_contact_id || '').trim();\nconst message = String(data.message || '').trim();\nif (!requestId || !recipientId || !message) {\n  return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Invalid Meta send contract',error_code:'invalid_contract',data:null}}];\n}\nreturn [{json:{\n  success:true,\n  _dispatch:'meta_send',\n  request_id:requestId,\n  action,\n  route_key:routeKey,\n  channel_type:channelType,\n  recipient_id:recipientId,\n  message,\n  idempotency_key:String(data.idempotency_key || '').trim()\n}}];"
+      },
+      "id": "validate-meta-send",
+      "name": "Validate Meta Send",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        650
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "meta-send",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "meta_send",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-meta-send",
+      "name": "Send Meta Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        690,
+        650
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ (() => { const r=JSON.parse($env.XVOND_META_MESSAGING_ROUTES_JSON || '{}')[$json.route_key]; const v=String(r.graph_version || 'v26.0'); const base=String(r.channel_type || '').toLowerCase()==='instagram' ? 'https://graph.instagram.com' : 'https://graph.facebook.com'; return `${base}/${v}/${r.sender_id}/messages`; })() }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + JSON.parse($env.XVOND_META_MESSAGING_ROUTES_JSON || '{}')[$json.route_key].access_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.channel_type === 'messenger' ? {recipient:{id:$json.recipient_id}, messaging_type:'RESPONSE', message:{text:$json.message}} : {recipient:{id:$json.recipient_id}, message:{text:$json.message}}) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "send-meta-message",
+      "name": "Send Meta Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        940,
+        580
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst request = $('Validate Meta Send').first().json;\nconst providerMessageId = String(response?.message_id || '');\nif (!providerMessageId) {\n  return [{json:{success:false,request_id:request.request_id,action:request.action,error:'Meta provider did not confirm the message',error_code:'provider_rejected',data:null}}];\n}\nreturn [{json:{\n  success:true,\n  request_id:request.request_id,\n  action:request.action,\n  data:{provider_message_id:providerMessageId},\n  error:null\n}}];"
+      },
+      "id": "normalize-meta-send-result",
+      "name": "Normalize Meta Send Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1190,
+        580
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
+      "id": "return-meta-provider",
+      "name": "Return Meta Provider",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1430,
+        650
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "meta-rejected",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "reject",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-meta-reject",
+      "name": "Reject Meta Request?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        680,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {status:'rejected'} }}",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "id": "reject-meta-inbound",
+      "name": "Reject Meta Inbound",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        920,
+        420
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Meta Verify": {
+      "main": [
+        [
+          {
+            "node": "Validate Meta Verification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Meta Verification": {
+      "main": [
+        [
+          {
+            "node": "Meta Verification OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta Verification OK?": {
+      "main": [
+        [
+          {
+            "node": "Return Meta Challenge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject Meta Verification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta Messaging Inbound": {
+      "main": [
+        [
+          {
+            "node": "Validate and Normalize Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate and Normalize Meta": {
+      "main": [
+        [
+          {
+            "node": "Reject Meta Request?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Forward Meta Message?": {
+      "main": [
+        [
+          {
+            "node": "Forward Meta to Xvond",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Meta Inbound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Forward Meta to Xvond": {
+      "main": [
+        [
+          {
+            "node": "Return Meta Inbound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta Messaging Provider": {
+      "main": [
+        [
+          {
+            "node": "Validate Meta Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Meta Send": {
+      "main": [
+        [
+          {
+            "node": "Send Meta Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Meta Message?": {
+      "main": [
+        [
+          {
+            "node": "Send Meta Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Meta Provider",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Meta Message": {
+      "main": [
+        [
+          {
+            "node": "Normalize Meta Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Meta Send Result": {
+      "main": [
+        [
+          {
+            "node": "Return Meta Provider",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reject Meta Request?": {
+      "main": [
+        [
+          {
+            "node": "Reject Meta Inbound",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Forward Meta Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "66666666-6666-4666-8666-666666666666",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

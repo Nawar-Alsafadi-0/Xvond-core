@@ -20,11 +20,17 @@ def test_acceptance_checks_platform_operations_health():
     assert 'checks["open_incidents"]' in SOURCE
     assert "UNRESOLVED_EXTERNAL" in SOURCE
     assert "UNRESOLVED_DELIVERY" in SOURCE
+    assert "ManagedChannelOutboundDelivery" in SOURCE
+    assert '"unresolved_managed_channel_deliveries"' in SOURCE
 
 
-def test_acceptance_requires_workflow_health_when_business_actions_are_assigned():
+def test_acceptance_requires_workflow_health_for_actions_or_managed_channels():
     assert "def _workflow_engine_check" in SOURCE
     assert 'AgentToolAssignment.tool_name == "action_request"' in SOURCE
+    assert "N8N_CHANNEL_ADAPTER" in SOURCE
+    assert "managed_channels" in SOURCE
+    assert '"business_actions"' in SOURCE
+    assert '"managed_channels"' in SOURCE
     assert "n8n_gateway.configured()" in SOURCE
     assert 'action="health_check"' in SOURCE
     assert 'checks["workflow_engine"]' in SOURCE

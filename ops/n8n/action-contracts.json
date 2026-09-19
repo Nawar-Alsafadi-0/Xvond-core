@@ -1,85 +1,196 @@
 {
   "version": 2,
   "actions": {
-    "booking.check_availability": {
-      "adapter": "booking",
-      "required_data": ["details"],
-      "required_detail_fields": ["date", "time"],
-      "side_effect": false,
-      "idempotent": true,
-      "success_data": ["available", "available_slots"]
-    },
-    "booking.execute": {
-      "adapter": "booking",
-      "required_data": ["request_id", "details", "idempotency_key"],
-      "required_detail_fields": ["date", "time", "customer_name"],
-      "side_effect": true,
-      "idempotent": true,
-      "success_data": ["booking_id"]
-    },
-    "booking.cancel": {
-      "adapter": "booking",
-      "required_data": ["request_id", "details", "idempotency_key"],
+    "channel.send": {
+      "adapter": "channel",
+      "required_data": [
+        "channel_id",
+        "connection_key",
+        "external_contact_id",
+        "message",
+        "idempotency_key"
+      ],
       "required_detail_fields": [],
       "side_effect": true,
       "idempotent": true,
-      "success_data": ["cancelled"]
+      "success_data": [
+        "provider_message_id"
+      ]
+    },
+    "booking.check_availability": {
+      "adapter": "booking",
+      "required_data": [
+        "details"
+      ],
+      "required_detail_fields": [
+        "date",
+        "time"
+      ],
+      "side_effect": false,
+      "idempotent": true,
+      "success_data": [
+        "available",
+        "available_slots"
+      ]
+    },
+    "booking.execute": {
+      "adapter": "booking",
+      "required_data": [
+        "request_id",
+        "details",
+        "idempotency_key"
+      ],
+      "required_detail_fields": [
+        "date",
+        "time",
+        "customer_name"
+      ],
+      "side_effect": true,
+      "idempotent": true,
+      "success_data": [
+        "booking_id"
+      ]
+    },
+    "booking.cancel": {
+      "adapter": "booking",
+      "required_data": [
+        "request_id",
+        "details",
+        "idempotency_key"
+      ],
+      "required_detail_fields": [],
+      "side_effect": true,
+      "idempotent": true,
+      "success_data": [
+        "cancelled"
+      ]
     },
     "send_email.execute": {
       "adapter": "email",
-      "required_data": ["request_id", "details", "idempotency_key"],
-      "required_detail_fields": ["to", "subject", "body"],
+      "required_data": [
+        "request_id",
+        "details",
+        "idempotency_key"
+      ],
+      "required_detail_fields": [
+        "to",
+        "subject",
+        "body"
+      ],
       "side_effect": true,
       "idempotent": true,
-      "success_data": ["message_id"]
+      "success_data": [
+        "message_id"
+      ]
     },
     "crm.upsert_contact": {
       "adapter": "crm",
-      "required_data": ["details", "idempotency_key"],
-      "required_detail_fields": ["customer_name"],
+      "required_data": [
+        "details",
+        "idempotency_key"
+      ],
+      "required_detail_fields": [
+        "customer_name"
+      ],
       "side_effect": true,
       "idempotent": true,
-      "success_data": ["contact_id"]
+      "success_data": [
+        "contact_id"
+      ]
     },
     "crm.create_lead": {
       "adapter": "crm",
-      "required_data": ["details", "idempotency_key"],
-      "required_detail_fields": ["customer_name"],
+      "required_data": [
+        "details",
+        "idempotency_key"
+      ],
+      "required_detail_fields": [
+        "customer_name"
+      ],
       "side_effect": true,
       "idempotent": true,
-      "success_data": ["lead_id"]
+      "success_data": [
+        "lead_id"
+      ]
     },
     "pos.create_order": {
       "adapter": "pos",
-      "required_data": ["details", "idempotency_key"],
-      "required_detail_fields": ["items"],
+      "required_data": [
+        "details",
+        "idempotency_key"
+      ],
+      "required_detail_fields": [
+        "items"
+      ],
       "side_effect": true,
       "idempotent": true,
-      "success_data": ["order_id"]
+      "success_data": [
+        "order_id"
+      ]
     },
     "custom_api.execute": {
       "adapter": "custom_api",
-      "required_data": ["details", "idempotency_key"],
-      "required_detail_fields": ["operation"],
+      "required_data": [
+        "details",
+        "idempotency_key"
+      ],
+      "required_detail_fields": [
+        "operation"
+      ],
       "side_effect": true,
       "idempotent": true,
-      "success_data": ["provider_reference"]
+      "success_data": [
+        "provider_reference"
+      ]
     },
     "notification.send": {
       "adapter": "notification",
-      "required_data": ["details", "idempotency_key"],
-      "required_detail_fields": ["channel", "recipient", "message"],
+      "required_data": [
+        "details",
+        "idempotency_key"
+      ],
+      "required_detail_fields": [
+        "channel",
+        "recipient",
+        "message"
+      ],
       "side_effect": true,
       "idempotent": true,
-      "success_data": ["notification_id"]
+      "success_data": [
+        "notification_id"
+      ]
+    },
+    "channel.check": {
+      "adapter": "channel",
+      "required_data": [
+        "channel_id",
+        "connection_key"
+      ],
+      "required_detail_fields": [],
+      "side_effect": false,
+      "idempotent": true,
+      "success_data": [
+        "configured",
+        "channel_id"
+      ]
     }
   },
   "generic_business_action": {
     "pattern": "<action_key>.(check_availability|execute|cancel)",
     "adapter": "business",
-    "required_data": ["action_type", "action_config", "details"],
-    "required_action_config": ["module", "destination"],
-    "mutating_operations": ["execute", "cancel"],
+    "required_data": [
+      "action_type",
+      "action_config",
+      "details"
+    ],
+    "required_action_config": [
+      "module",
+      "destination"
+    ],
+    "mutating_operations": [
+      "execute",
+      "cancel"
+    ],
     "mutating_operations_require_idempotency": true,
     "purpose": "Allow any enabled AI Employee operation key to use the same execution gateway without adding code for each new operation name."
   },
@@ -95,6 +206,8 @@
     "provider_success_required_before_success_true": true,
     "credentials_live_in_workflow_engine": true,
     "xvond_database_access_from_workflows": false,
-    "generic_employee_actions_are_config_driven": true
+    "generic_employee_actions_are_config_driven": true,
+    "channel_credentials_live_in_workflow_engine": true,
+    "channel_routes_are_tenant_scoped": true
   }
 }
