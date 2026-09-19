@@ -51,6 +51,10 @@ from backend.app.modules.ai_agent.self_service_policy import (
     self_service_spec_view,
 )
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
+from backend.app.modules.automation.execution_graph import (
+    graph_contract_errors,
+    normalize_execution_graph,
+)
 from backend.app.modules.automation.runtime import automation_runtime
 from backend.app.modules.automation.webhook_auth import automation_webhook_key
 from backend.app.modules.billing.limits import limits_service
@@ -133,6 +137,13 @@ class EmployeeBuilderRoutineStateRequest(BaseModel):
     enabled: bool
 
 
+class EmployeeBuilderRoutinePreviewRequest(BaseModel):
+    routine_id: str = Field(min_length=1, max_length=80)
+    input_data: dict = Field(default_factory=dict)
+    simulated_outputs: dict = Field(default_factory=dict)
+    event_payloads: dict = Field(default_factory=dict)
+
+
 DEFAULT_CUSTOMER_CONTROLS = {
     "can_enable_disable": True,
     "can_view_conversations": True,
@@ -145,6 +156,159 @@ DEFAULT_CUSTOMER_CONTROLS = {
 
 BUILDER_HISTORY_LIMIT = 20
 OWNER_PERMISSION_MODES = {"automatic", "ask_before", "never"}
+
+
+def _compiled_execution_routines(spec: dict | None) -> list[dict]:
+    value = spec if isinstance(spec, dict) else {}
+    result: list[dict] = []
+    used: set[str] = set()
+
+    raw_routines = value.get("execution_routines")
+    if isinstance(raw_routines, list):
+        for index, raw in enumerate(raw_routines):
+            if not isinstance(raw, dict):
+                continue
+            graph = normalize_execution_graph(
+                raw.get("graph")
+                if isinstance(raw.get("graph"), dict)
+                else raw.get("execution_graph")
+            )
+            if not graph.get("nodes"):
+                continue
+            routine_id = (
+                normalize_requirement_key(
+                    raw.get("id")
+                    or raw.get("key")
+                    or raw.get("name")
+                    or f"routine_{index + 1}"
+                )
+                or f"routine_{index + 1}"
+            )
+            if routine_id in used:
+                continue
+            used.add(routine_id)
+            result.append(
+                {
+                    "id": routine_id,
+                    "name": str(
+                        raw.get("name")
+                        or routine_id.replace("_", " ").title()
+                    )[:200],
+                    "requirement_keys": [
+                        key
+                        for key in (
+                            normalize_requirement_key(item)
+                            for item in (raw.get("requirement_keys") or [])
+                        )
+                        if key
+                    ],
+                    "requirement_scope_declared": "requirement_keys" in raw,
+                    "graph": graph,
+                }
+            )
+
+    if result:
+        return result
+
+    graph = normalize_execution_graph(value.get("execution_graph") or {})
+    if graph.get("nodes"):
+        return [
+            {
+                "id": "primary",
+                "name": "Primary routine",
+                "requirement_keys": [],
+                "requirement_scope_declared": False,
+                "graph": graph,
+            }
+        ]
+    return []
+
+
+def _routine_preview_defaults(spec: dict, routine: dict) -> dict:
+    requirements = [
+        item
+        for item in (spec.get("requirements") or [])
+        if isinstance(item, dict)
+    ]
+    requirements_by_key = {
+        normalize_requirement_key(item.get("key")): item
+        for item in requirements
+        if normalize_requirement_key(item.get("key"))
+    }
+    keys = [
+        key
+        for key in (
+            normalize_requirement_key(item)
+            for item in (routine.get("requirement_keys") or [])
+        )
+        if key and key in requirements_by_key
+    ]
+
+    selected = (
+        [requirements_by_key[key] for key in keys]
+        if routine.get("requirement_scope_declared") is True
+        else requirements
+    )
+    defaults: dict = {}
+    conflicts: list[str] = []
+    for requirement in selected:
+        for raw_key, value in (requirement.get("runtime_inputs") or {}).items():
+            key = str(raw_key)
+            if key in defaults and defaults[key] != value:
+                if key not in conflicts:
+                    conflicts.append(key)
+                continue
+            defaults.setdefault(key, deepcopy(value))
+
+    if conflicts:
+        raise HTTPException(
+            409,
+            detail={
+                "message": "Routine runtime inputs are ambiguous",
+                "conflicting_keys": conflicts,
+            },
+        )
+    return defaults
+
+
+def _routine_preview_evidence(
+    container: dict,
+    *,
+    spec: dict,
+    routine_id: str | None = None,
+    record: bool = False,
+) -> tuple[list[str], list[str], bool]:
+    routines = _compiled_execution_routines(spec)
+    required = [str(item.get("id") or "") for item in routines if item.get("id")]
+    compiled_at = str(container.get("compiled_at") or "").strip()
+    evidence = (
+        deepcopy(container.get("routine_preview_evidence"))
+        if isinstance(container.get("routine_preview_evidence"), dict)
+        else {}
+    )
+
+    now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    if record and routine_id:
+        evidence[str(routine_id)] = {
+            "compiled_at": compiled_at,
+            "tested_at": now_iso,
+        }
+        container["routine_preview_evidence"] = evidence
+        container["routine_test_count"] = int(container.get("routine_test_count") or 0) + 1
+
+    tested = [
+        item
+        for item in required
+        if isinstance(evidence.get(item), dict)
+        and str(evidence[item].get("compiled_at") or "") == compiled_at
+    ]
+    complete = bool(required) and len(tested) == len(required)
+    if record and complete:
+        container["last_tested_at"] = now_iso
+        container["last_tested_compiled_at"] = compiled_at
+        if "status" in container:
+            container["status"] = "tested"
+    return required, tested, complete
 
 
 def _effective_compiled_permissions(spec: dict, builder: dict) -> dict:
