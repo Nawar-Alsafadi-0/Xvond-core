@@ -408,9 +408,6 @@ def validate_integration_config(
 
     for field in definition["config_fields"]:
 
-        if not field.get("required"):
-            continue
-
         name = field["name"]
 
         value = config.get(
@@ -419,7 +416,8 @@ def validate_integration_config(
         )
 
         if value is None or str(value).strip() == "":
-            missing.append(name)
+            if field.get("required"):
+                missing.append(name)
             continue
 
         choices = field.get("choices")
