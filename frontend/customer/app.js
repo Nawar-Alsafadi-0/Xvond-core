@@ -311,9 +311,9 @@ async function renderIntegrations() {
 
     try {
         const [catalogResult, listResult, googleOAuth] = await Promise.all([
-            api("/manage/integrations/catalog"),
-            api("/manage/integrations"),
-            api("/manage/integrations/google-calendar/oauth/status").catch(() => ({ready: false})),
+            api("/customer/agents/manage/integrations/catalog"),
+            api("/customer/agents/manage/integrations"),
+            api("/customer/agents/manage/integrations/google-calendar/oauth/status").catch(() => ({ready: false})),
         ]);
         const definitions = catalogResult.integrations || [];
         const integrations = listResult.integrations || [];
@@ -442,7 +442,7 @@ async function renderIntegrations() {
             button.disabled = true;
             try {
                 if (integrationType === "calendar" && googleOAuth.ready) {
-                    const result = await api("/manage/integrations/google-calendar/oauth/start", {
+                    const result = await api("/customer/agents/manage/integrations/google-calendar/oauth/start", {
                         method: "POST",
                         body: JSON.stringify({
                             name,
@@ -454,7 +454,7 @@ async function renderIntegrations() {
                     window.location.assign(result.authorization_url);
                     return;
                 }
-                await api("/manage/integrations", {
+                await api("/customer/agents/manage/integrations", {
                     method: "POST",
                     body: JSON.stringify({integration_type: integrationType, name, config}),
                 });
@@ -472,7 +472,7 @@ async function renderIntegrations() {
 
 async function connectGoogleCalendar(integrationId) {
     try {
-        const result = await api("/manage/integrations/google-calendar/oauth/start", {
+        const result = await api("/customer/agents/manage/integrations/google-calendar/oauth/start", {
             method: "POST",
             body: JSON.stringify({integration_id: Number(integrationId)}),
         });
@@ -486,7 +486,7 @@ window.connectGoogleCalendar = connectGoogleCalendar;
 
 async function validateCustomerIntegration(integrationId) {
     try {
-        await api(`/manage/integrations/${Number(integrationId)}/validate`, {method: "POST"});
+        await api(`/customer/agents/manage/integrations/${Number(integrationId)}/validate`, {method: "POST"});
         await renderIntegrations();
     } catch (error) {
         alert(error.message);
@@ -498,7 +498,7 @@ window.validateCustomerIntegration = validateCustomerIntegration;
 async function deleteCustomerIntegration(integrationId) {
     if (!confirm("Remove this connected system?")) return;
     try {
-        await api(`/manage/integrations/${Number(integrationId)}`, {method: "DELETE"});
+        await api(`/customer/agents/manage/integrations/${Number(integrationId)}`, {method: "DELETE"});
         await renderIntegrations();
     } catch (error) {
         alert(error.message);
