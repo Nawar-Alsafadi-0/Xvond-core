@@ -142,6 +142,10 @@ class EmployeeBuilderRoutineStateRequest(BaseModel):
     enabled: bool
 
 
+class EmployeeBuilderRoutineRetryRequest(BaseModel):
+    run_id: int = Field(gt=0)
+
+
 class EmployeeBuilderRoutinePreviewRequest(BaseModel):
     routine_id: str = Field(min_length=1, max_length=80)
     input_data: dict = Field(default_factory=dict)
@@ -4414,6 +4418,51 @@ def _run_failure_detail(run: AutomationRun | None) -> dict | None:
     }
 
 
+def _run_retry_state(run: AutomationRun | None) -> dict | None:
+    if run is None or run.status != "failed":
+        return None
+
+    output = run.output_data if isinstance(run.output_data, dict) else {}
+    checkpoint = (
+        output.get("retry_checkpoint")
+        if isinstance(output.get("retry_checkpoint"), dict)
+        else None
+    )
+    if checkpoint is None:
+        return {
+            "safe": False,
+            "run_id": run.id,
+            "reason": (
+                "This run has no durable node checkpoint. Start a new run instead "
+                "of replaying uncertain completed work."
+            ),
+            "node_id": None,
+            "node_type": None,
+            "node_scope": None,
+            "attempts": int(output.get("retry_attempts") or 0),
+        }
+
+    safe = bool(checkpoint.get("safe"))
+    reason = str(checkpoint.get("reason") or "").strip()
+    if safe and not reason:
+        reason = (
+            "Retry will resume from the last durable node checkpoint without "
+            "replaying completed nodes."
+        )
+    elif not safe and not reason:
+        reason = "Xvond cannot prove that replaying the failed node is safe."
+
+    return {
+        "safe": safe,
+        "run_id": run.id,
+        "reason": reason,
+        "node_id": checkpoint.get("failed_node_id"),
+        "node_type": checkpoint.get("failed_node_type"),
+        "node_scope": checkpoint.get("failed_node_scope"),
+        "attempts": int(output.get("retry_attempts") or 0),
+    }
+
+
 def _routine_health_summary(recent_runs: list[AutomationRun]) -> dict:
     runs = list(recent_runs or [])
     successes = [run for run in runs if run.status == "success"]
@@ -4554,17 +4603,7 @@ def _routine_operational_state(
         "waiting": waiting,
         "health": _routine_health_summary(recent_runs),
         "failure": failure,
-        "retry": (
-            {
-                "safe": False,
-                "reason": (
-                    "Automatic retry is disabled until node-level side-effect "
-                    "checkpointing can prove completed external actions will not replay."
-                ),
-            }
-            if latest_run is not None and latest_run.status == "failed"
-            else None
-        ),
+        "retry": _run_retry_state(latest_run),
         "last_run": (
             {
                 "id": latest_run.id,
@@ -4792,6 +4831,140 @@ def customer_employee_set_routine_state(
             "workflow_id": workflow.id,
             "trigger_type": workflow.trigger_type,
             "enabled": bool(workflow.enabled),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/routines/{routine_id}/retry")
+def customer_employee_retry_routine(
+    agent_id: int,
+    routine_id: str,
+    data: EmployeeBuilderRoutineRetryRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    normalized_routine = normalize_requirement_key(routine_id)
+    if not normalized_routine:
+        raise HTTPException(400, "Routine id is invalid")
+
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        company = _company_or_404(db, company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Routine retry is available only for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+        if not agent.enabled:
+            raise HTTPException(409, "Launch this employee before retrying its routine")
+
+        workflow = next(
+            (
+                row
+                for row in _employee_routine_rows(
+                    db,
+                    company_id=company_id,
+                    agent_id=agent.id,
+                )
+                if _workflow_routine_id(row) == normalized_routine
+            ),
+            None,
+        )
+        if workflow is None:
+            raise HTTPException(404, "Employee routine not found")
+        db.refresh(workflow, with_for_update=True)
+        if not workflow.enabled:
+            raise HTTPException(409, "Resume this routine before retrying it")
+
+        latest_run = (
+            db.query(AutomationRun)
+            .filter(
+                AutomationRun.company_id == company_id,
+                AutomationRun.workflow_id == workflow.id,
+            )
+            .order_by(AutomationRun.id.desc())
+            .with_for_update()
+            .first()
+        )
+        if latest_run is None:
+            raise HTTPException(409, "This routine has no run to retry")
+        if int(latest_run.id) != int(data.run_id):
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "A newer routine run exists. Refresh before retrying.",
+                    "latest_run_id": latest_run.id,
+                },
+            )
+        if latest_run.status != "failed":
+            raise HTTPException(409, "Only a failed routine run can be retried")
+
+        retry_state = _run_retry_state(latest_run)
+        if not retry_state or not retry_state.get("safe"):
+            raise HTTPException(
+                409,
+                detail={
+                    "message": (
+                        (retry_state or {}).get("reason")
+                        or "This failed run cannot be retried safely"
+                    ),
+                    "retry": retry_state,
+                },
+            )
+
+        try:
+            retried = automation_runtime.retry_failed(
+                db,
+                company_id=company_id,
+                workflow=workflow,
+                run=latest_run,
+            )
+        except Exception as exc:
+            db.rollback()
+            current = db.get(AutomationRun, int(data.run_id))
+            if current is not None and current.status == "failed":
+                raise HTTPException(
+                    409,
+                    detail={
+                        "message": current.error_message or str(exc),
+                        "run_id": current.id,
+                        "retry": _run_retry_state(current),
+                    },
+                ) from exc
+            if isinstance(exc, ValueError):
+                raise HTTPException(409, str(exc)) from exc
+            raise
+
+        return {
+            "status": retried.status,
+            "agent_id": agent.id,
+            "routine_id": normalized_routine,
+            "routine_name": (
+                (workflow.trigger_config or {}).get("_xvond_routine_name")
+                or workflow.name
+            ),
+            "workflow_id": workflow.id,
+            "run_id": retried.id,
+            "output_data": retried.output_data,
+            "error_message": retried.error_message,
+            "finished_at": retried.finished_at,
         }
     except HTTPException:
         db.rollback()
