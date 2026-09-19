@@ -2843,6 +2843,12 @@ def discover_self_service_capability(
                 auto_provisioned = True
 
         updated["requirements"] = requirements
+        if auto_provisioned:
+            updated["setup_required"] = [
+                item
+                for item in (updated.get("setup_required") or [])
+                if normalize_requirement_key(item) != key
+            ]
         updated, unresolved = _resolve_bound_graph_operations(
             updated,
             requirement_key=key,
