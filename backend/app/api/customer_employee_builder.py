@@ -3966,6 +3966,7 @@ def customer_employee_automation_runs(
         )
         workflow_ids = []
         workflow_names = {}
+        workflow_routines = {}
         for workflow in workflows:
             config = workflow.trigger_config if isinstance(workflow.trigger_config, dict) else {}
             if (
@@ -3974,6 +3975,12 @@ def customer_employee_automation_runs(
             ):
                 workflow_ids.append(workflow.id)
                 workflow_names[workflow.id] = workflow.name
+                workflow_routines[workflow.id] = {
+                    "routine_id": config.get("_xvond_routine_id") or (
+                        "primary" if config.get("_xvond_graph_trigger") is True else None
+                    ),
+                    "routine_name": config.get("_xvond_routine_name"),
+                }
 
         if not workflow_ids:
             return {"agent_id": agent.id, "runs": []}
@@ -3995,6 +4002,12 @@ def customer_employee_automation_runs(
                     "id": run.id,
                     "workflow_id": run.workflow_id,
                     "workflow_name": workflow_names.get(run.workflow_id),
+                    "routine_id": (
+                        workflow_routines.get(run.workflow_id) or {}
+                    ).get("routine_id"),
+                    "routine_name": (
+                        workflow_routines.get(run.workflow_id) or {}
+                    ).get("routine_name"),
                     "status": run.status,
                     "input_data": run.input_data,
                     "output_data": run.output_data,
