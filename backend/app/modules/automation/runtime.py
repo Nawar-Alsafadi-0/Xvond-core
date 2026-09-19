@@ -788,6 +788,7 @@ class AutomationRuntime:
 
         run.status = "running"
         run.resume_at = None
+        run.resume_event_name = None
         run.error_message = None
         db.flush()
 
@@ -805,6 +806,18 @@ class AutomationRuntime:
                         run_id=run.id,
                         step_index=index,
                     )
+                except AutomationEventRequired as event_wait:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_event",
+                        phase="resume",
+                        node_id=event_wait.node_id,
+                    )
+                    raise
                 except AutomationWaitRequired as wait:
                     _append_step_span(
                         trace,
@@ -865,6 +878,7 @@ class AutomationRuntime:
 
             run.status = "success"
             run.resume_at = None
+            run.resume_event_name = None
             run.finished_at = _utcnow_naive()
             trace["status"] = "success"
             trace["finished_at"] = _trace_iso(run.finished_at)
@@ -880,6 +894,18 @@ class AutomationRuntime:
             db.commit()
             db.refresh(run)
             return run
+        except AutomationEventRequired as event_wait:
+            state.pop("_xvond_approved_request_id", None)
+            state.pop("_xvond_graph_resume", None)
+            return _store_event_checkpoint(
+                db,
+                run=run,
+                workflow=workflow,
+                event_wait=event_wait,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+            )
         except AutomationWaitRequired as wait:
             state.pop("_xvond_approved_request_id", None)
             state.pop("_xvond_graph_resume", None)
@@ -1044,6 +1070,7 @@ class AutomationRuntime:
 
         run.status = "running"
         run.resume_at = None
+        run.resume_event_name = None
         run.error_message = None
         db.flush()
 
@@ -1061,6 +1088,18 @@ class AutomationRuntime:
                         run_id=run.id,
                         step_index=index,
                     )
+                except AutomationEventRequired as event_wait:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_event",
+                        phase="resume_wait",
+                        node_id=event_wait.node_id,
+                    )
+                    raise
                 except AutomationWaitRequired as next_wait:
                     _append_step_span(
                         trace,
@@ -1121,6 +1160,7 @@ class AutomationRuntime:
 
             run.status = "success"
             run.resume_at = None
+            run.resume_event_name = None
             run.finished_at = _utcnow_naive()
             trace["status"] = "success"
             trace["finished_at"] = _trace_iso(run.finished_at)
@@ -1136,6 +1176,17 @@ class AutomationRuntime:
             db.commit()
             db.refresh(run)
             return run
+        except AutomationEventRequired as event_wait:
+            state.pop("_xvond_graph_resume", None)
+            return _store_event_checkpoint(
+                db,
+                run=run,
+                workflow=workflow,
+                event_wait=event_wait,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+            )
         except AutomationWaitRequired as next_wait:
             state.pop("_xvond_graph_resume", None)
             return _store_wait_checkpoint(
