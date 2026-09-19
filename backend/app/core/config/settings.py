@@ -52,6 +52,9 @@ class Settings:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+    GOOGLE_CALENDAR_OAUTH_CLIENT_ID = os.getenv("GOOGLE_CALENDAR_OAUTH_CLIENT_ID", "").strip()
+    GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET", "").strip()
+    GOOGLE_CALENDAR_OAUTH_REDIRECT_URI = os.getenv("GOOGLE_CALENDAR_OAUTH_REDIRECT_URI", "").strip()
     XAI_API_KEY = os.getenv("XAI_API_KEY", "")
     META_GRAPH_API_VERSION = os.getenv("META_GRAPH_API_VERSION", "v26.0").strip() or "v26.0"
     N8N_ENABLED = os.getenv("N8N_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -150,6 +153,25 @@ class Settings:
                 errors.append(
                     "TAP_SAVE_CARD_FOR_RECURRING must be enabled before Tap recurring billing"
                 )
+        google_calendar_oauth_any = bool(
+            self.GOOGLE_CALENDAR_OAUTH_CLIENT_ID
+            or self.GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET
+            or self.GOOGLE_CALENDAR_OAUTH_REDIRECT_URI
+        )
+        if google_calendar_oauth_any:
+            if not self.GOOGLE_CALENDAR_OAUTH_CLIENT_ID:
+                errors.append("GOOGLE_CALENDAR_OAUTH_CLIENT_ID is required when Google Calendar OAuth is configured")
+            if not self.GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET:
+                errors.append("GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET is required when Google Calendar OAuth is configured")
+            google_redirect = self.GOOGLE_CALENDAR_OAUTH_REDIRECT_URI or (
+                f"{self.PUBLIC_BASE_URL}/customer/agents/manage/integrations/google-calendar/oauth/callback"
+                if self.PUBLIC_BASE_URL
+                else ""
+            )
+            if not google_redirect:
+                errors.append("Google Calendar OAuth requires a redirect URI or PUBLIC_BASE_URL")
+            elif self.is_production and not google_redirect.startswith("https://"):
+                errors.append("Google Calendar OAuth redirect URI must use HTTPS in production")
         if self.N8N_ENABLED:
             if not self.N8N_WEBHOOK_URL:
                 errors.append("N8N_WEBHOOK_URL is required when n8n is enabled")

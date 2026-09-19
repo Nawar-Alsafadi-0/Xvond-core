@@ -310,22 +310,30 @@ async function renderIntegrations() {
     target.innerHTML = '<div class="panel"><p class="muted">Loading connected systems…</p></div>';
 
     try {
-        const [catalogResult, listResult] = await Promise.all([
-            api("/manage/integrations/catalog"),
-            api("/manage/integrations"),
+        const [catalogResult, listResult, googleOAuth] = await Promise.all([
+            api("/customer/agents/manage/integrations/catalog"),
+            api("/customer/agents/manage/integrations"),
+            api("/customer/agents/manage/integrations/google-calendar/oauth/status").catch(() => ({ready: false})),
         ]);
         const definitions = catalogResult.integrations || [];
         const integrations = listResult.integrations || [];
         const definitionOptions = definitions.map(item =>
             `<option value="${safe(item.type)}">${safe(item.name || item.type)}</option>`
         ).join("");
+        const oauthResult = new URLSearchParams(window.location.search).get("calendar_oauth");
+        const oauthMessage = oauthResult === "connected"
+            ? '<div class="success">Google Calendar connected and validated.</div>'
+            : oauthResult === "cancelled"
+                ? '<div class="muted">Google Calendar connection was cancelled.</div>'
+                : "";
 
         target.innerHTML = `
+            ${oauthMessage}
             <div class="panel" style="margin-bottom:20px">
                 <div class="service-card-head">
                     <div>
                         <h2>Connected Systems</h2>
-                        <p class="muted">Connect an existing CRM, POS, booking API, ERP, webhook or custom API. Secrets are stored encrypted and are never shown again.</p>
+                        <p class="muted">Connect the systems your employee needs. Google Calendar uses a secure consent flow when Xvond OAuth is configured; other secrets stay encrypted and are never shown again.</p>
                     </div>
                 </div>
                 <div class="service-grid" style="margin-top:14px">
@@ -356,7 +364,11 @@ async function renderIntegrations() {
                         ${(item.configured_secret_fields || []).length
                             ? `<p class="muted">Protected credentials configured: ${safe((item.configured_secret_fields || []).join(", "))}</p>`
                             : ""}
-                        ${item.configured && !item.validated ? `<button type="button" onclick="validateCustomerIntegration(${Number(item.id)})">Validate connection</button>` : ""}
+                        ${item.integration_type === "calendar" && googleOAuth.ready
+                            ? `<button type="button" onclick="connectGoogleCalendar(${Number(item.id)})">Reconnect Google Calendar</button>`
+                            : item.configured && !item.validated
+                                ? `<button type="button" onclick="validateCustomerIntegration(${Number(item.id)})">Validate connection</button>`
+                                : ""}
                         <button type="button" onclick="deleteCustomerIntegration(${Number(item.id)})">Remove</button>
                     </div>
                 `).join("") : '<p class="muted">No connected systems yet.</p>'}
@@ -364,11 +376,17 @@ async function renderIntegrations() {
         `;
 
         const type = document.getElementById("customer-integration-type");
+        const createButton = document.getElementById("customer-integration-create");
         const renderFields = () => {
             const definition = definitions.find(item => item.type === type?.value) || definitions[0];
             const host = document.getElementById("customer-integration-fields");
             if (!host) return;
-            host.innerHTML = (definition?.config_fields || []).map(field => {
+            const oauthCalendar = definition?.type === "calendar" && googleOAuth.ready;
+            const hiddenOAuthFields = new Set(["access_token", "refresh_token", "client_id", "client_secret"]);
+            const fields = (definition?.config_fields || []).filter(
+                field => !oauthCalendar || !hiddenOAuthFields.has(String(field.name || ""))
+            );
+            host.innerHTML = fields.map(field => {
                 const choices = Array.isArray(field.choices) ? field.choices : [];
                 const defaultValue = field.default == null ? "" : String(field.default);
                 const control = choices.length
@@ -397,11 +415,16 @@ async function renderIntegrations() {
                     </label>
                 `;
             }).join("");
+            if (createButton) {
+                createButton.textContent = oauthCalendar
+                    ? "Connect Google Calendar"
+                    : "Add connected system";
+            }
         };
         type?.addEventListener("change", renderFields);
         renderFields();
 
-        document.getElementById("customer-integration-create")?.addEventListener("click", async event => {
+        createButton?.addEventListener("click", async event => {
             const button = event.currentTarget;
             const error = document.getElementById("customer-integration-error");
             if (error) error.textContent = "";
@@ -418,7 +441,20 @@ async function renderIntegrations() {
             }
             button.disabled = true;
             try {
-                await api("/manage/integrations", {
+                if (integrationType === "calendar" && googleOAuth.ready) {
+                    const result = await api("/customer/agents/manage/integrations/google-calendar/oauth/start", {
+                        method: "POST",
+                        body: JSON.stringify({
+                            name,
+                            calendar_id: config.calendar_id || "primary",
+                            timezone: config.timezone || "",
+                            slot_minutes: Number(config.slot_minutes || 30),
+                        }),
+                    });
+                    window.location.assign(result.authorization_url);
+                    return;
+                }
+                await api("/customer/agents/manage/integrations", {
                     method: "POST",
                     body: JSON.stringify({integration_type: integrationType, name, config}),
                 });
@@ -434,9 +470,23 @@ async function renderIntegrations() {
     }
 }
 
+async function connectGoogleCalendar(integrationId) {
+    try {
+        const result = await api("/customer/agents/manage/integrations/google-calendar/oauth/start", {
+            method: "POST",
+            body: JSON.stringify({integration_id: Number(integrationId)}),
+        });
+        window.location.assign(result.authorization_url);
+    } catch (error) {
+        alert(error.message);
+    }
+}
+
+window.connectGoogleCalendar = connectGoogleCalendar;
+
 async function validateCustomerIntegration(integrationId) {
     try {
-        await api(`/manage/integrations/${Number(integrationId)}/validate`, {method: "POST"});
+        await api(`/customer/agents/manage/integrations/${Number(integrationId)}/validate`, {method: "POST"});
         await renderIntegrations();
     } catch (error) {
         alert(error.message);
@@ -448,7 +498,7 @@ window.validateCustomerIntegration = validateCustomerIntegration;
 async function deleteCustomerIntegration(integrationId) {
     if (!confirm("Remove this connected system?")) return;
     try {
-        await api(`/manage/integrations/${Number(integrationId)}`, {method: "DELETE"});
+        await api(`/customer/agents/manage/integrations/${Number(integrationId)}`, {method: "DELETE"});
         await renderIntegrations();
     } catch (error) {
         alert(error.message);
@@ -456,6 +506,7 @@ async function deleteCustomerIntegration(integrationId) {
 }
 
 window.deleteCustomerIntegration = deleteCustomerIntegration;
+
 
 function renderPaymentMethod() {
     const billing = portalOverview?.billing || {};
