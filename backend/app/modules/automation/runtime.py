@@ -259,6 +259,235 @@ def _approval_checkpoint_matches(
     return str(meta.get("node_id") or "").strip() == expected_node
 
 
+RETRY_CHECKPOINT_VERSION = 1
+_RETRY_TRANSIENT_STATE_KEYS = {
+    "_xvond_graph_resume",
+    "_xvond_retry_root_step_index",
+    "_xvond_retry_root_state",
+    "_xvond_retry_lineage",
+    "_xvond_loop_item",
+    "_xvond_loop_index",
+    "_xvond_nested_graph_depth",
+    "_xvond_graph_path",
+    "_xvond_approved_request_id",
+}
+
+
+def _retry_root_state(state: dict) -> dict:
+    return {
+        str(key): deepcopy(value)
+        for key, value in dict(state or {}).items()
+        if str(key) not in _RETRY_TRANSIENT_STATE_KEYS
+    }
+
+
+def _graph_retry_safety(
+    db,
+    *,
+    graph_agent_id: int | None,
+    node_type: str,
+    params: dict,
+    resolved: bool,
+) -> tuple[bool, str | None]:
+    clean_type = str(node_type or "").strip().lower()
+    values = params if isinstance(params, dict) else {}
+
+    if not resolved and clean_type in {"action", "browser", "media"}:
+        return (
+            False,
+            "Retry safety could not be proven before this side-effect-capable node started.",
+        )
+
+    if clean_type == "media":
+        return (
+            False,
+            "Generated media does not have a durable idempotency contract, so Xvond will not regenerate it automatically after an uncertain failure.",
+        )
+
+    if clean_type == "browser":
+        actions = values.get("actions")
+        mutating_ops = {"click", "fill", "press", "select"}
+        if isinstance(actions, list) and any(
+            isinstance(item, dict)
+            and str(item.get("op") or "").strip().lower() in mutating_ops
+            for item in actions
+        ):
+            return (
+                False,
+                "Interactive browser work may already have changed an external system; reconcile it before retrying.",
+            )
+        return True, None
+
+    if clean_type == "action":
+        agent_id = int(values.get("agent_id") or graph_agent_id or 0)
+        action_type = str(values.get("action_type") or "").strip()
+        if not agent_id or not action_type:
+            return False, "The action identity is incomplete, so retry safety cannot be proven."
+
+        assignment = (
+            db.query(AgentToolAssignment)
+            .filter(
+                AgentToolAssignment.agent_id == agent_id,
+                AgentToolAssignment.tool_name == "action_request",
+                AgentToolAssignment.enabled.is_(True),
+            )
+            .first()
+        )
+        if assignment is None:
+            return False, "The employee action contract is unavailable."
+
+        config = reveal_config(assignment.config) or {}
+        action = (config.get("actions") or {}).get(action_type)
+        destination = action.get("destination") if isinstance(action, dict) else None
+        destination = destination if isinstance(destination, dict) else {}
+
+        if (
+            destination.get("type") == "xvond_internal"
+            and destination.get("adapter") == "generic_capability"
+        ):
+            return True, None
+
+        return (
+            False,
+            "This action targets an external integration whose final outcome may be uncertain; reconcile the external system before retrying.",
+        )
+
+    return True, None
+
+
+def _compose_retry_graph_resume(
+    *,
+    lineage: list,
+    node_id: str,
+    node_outputs: dict,
+) -> dict:
+    checkpoint = {
+        "node_id": str(node_id or ""),
+        "node_outputs": deepcopy(dict(node_outputs or {})),
+    }
+    for raw_frame in reversed(list(lineage or [])):
+        frame = raw_frame if isinstance(raw_frame, dict) else {}
+        checkpoint = {
+            "node_id": str(frame.get("node_id") or ""),
+            "node_outputs": deepcopy(frame.get("node_outputs") or {}),
+            "foreach": {
+                "loop_index": int(frame.get("loop_index") or 0),
+                "items_fingerprint": str(frame.get("items_fingerprint") or ""),
+                "completed_results": deepcopy(frame.get("completed_results") or []),
+                "child_resume": checkpoint,
+            },
+        }
+    return checkpoint
+
+
+def _persist_graph_retry_checkpoint(
+    db,
+    *,
+    run_id: int,
+    root_step_index: int,
+    root_state: dict,
+    lineage: list,
+    graph_agent_id: int | None,
+    node_id: str,
+    node_type: str,
+    node_scope: str,
+    node_outputs: dict,
+    params: dict,
+    resolved: bool,
+) -> None:
+    run = db.get(AutomationRun, int(run_id))
+    if run is None:
+        raise ValueError("Automation run checkpoint is unavailable")
+
+    safe, reason = _graph_retry_safety(
+        db,
+        graph_agent_id=graph_agent_id,
+        node_type=node_type,
+        params=params,
+        resolved=resolved,
+    )
+    output = deepcopy(run.output_data if isinstance(run.output_data, dict) else {})
+    workflow_fingerprint = str(output.get("workflow_fingerprint") or "").strip()
+    output["retry_checkpoint"] = {
+        "version": RETRY_CHECKPOINT_VERSION,
+        "workflow_fingerprint": workflow_fingerprint,
+        "workflow_step_index": int(root_step_index),
+        "graph_resume": _compose_retry_graph_resume(
+            lineage=lineage,
+            node_id=node_id,
+            node_outputs=node_outputs,
+        ),
+        "state": deepcopy(dict(root_state or {})),
+        "failed_node_id": str(node_id or ""),
+        "failed_node_type": str(node_type or ""),
+        "failed_node_scope": str(node_scope or ""),
+        "safe": bool(safe),
+        "reason": reason,
+    }
+    run.output_data = output
+    db.flush()
+    # The checkpoint is intentionally durable before the next node starts.
+    # This also commits successful database effects from prior nodes so retry can
+    # skip them instead of replaying work whose outcome is already known.
+    db.commit()
+
+
+def _store_failed_run(
+    db,
+    *,
+    run_id: int,
+    state: dict,
+    step_results: list,
+    trace: dict,
+    error: Exception,
+    extra_output: dict | None = None,
+) -> AutomationRun:
+    error_message = str(error)[:2000]
+    db.rollback()
+
+    run = db.get(AutomationRun, int(run_id))
+    if run is None:
+        raise RuntimeError("Durable automation run disappeared after failure") from error
+
+    persisted = deepcopy(run.output_data if isinstance(run.output_data, dict) else {})
+    checkpoint = (
+        persisted.get("retry_checkpoint")
+        if isinstance(persisted.get("retry_checkpoint"), dict)
+        else None
+    )
+    spans = trace.get("spans") if isinstance(trace.get("spans"), list) else []
+    if checkpoint and spans:
+        last = spans[-1] if isinstance(spans[-1], dict) else None
+        if (
+            isinstance(last, dict)
+            and str(last.get("status") or "").lower() == "failed"
+            and not last.get("node_id")
+        ):
+            last["node_id"] = checkpoint.get("failed_node_id") or None
+
+    run.status = "failed"
+    run.resume_at = None
+    run.resume_event_name = None
+    run.error_message = error_message
+    run.finished_at = _utcnow_naive()
+    trace["status"] = "failed"
+    trace["finished_at"] = _trace_iso(run.finished_at)
+
+    output = {
+        **persisted,
+        "state": deepcopy(dict(state or {})),
+        "steps": deepcopy(list(step_results or [])),
+        "trace": deepcopy(trace),
+        "usage_recorded": True,
+    }
+    if isinstance(extra_output, dict):
+        output.update(deepcopy(extra_output))
+    run.output_data = output
+    db.commit()
+    db.refresh(run)
+    return run
+
+
 WAIT_UNIT_SECONDS = {
     "seconds": 1,
     "minutes": 60,
@@ -636,6 +865,17 @@ class AutomationRuntime:
             workflow=workflow,
             execution_key=execution_key,
         )
+        workflow_fingerprint = _checkpoint_fingerprint(workflow.steps or [])
+        run.output_data = {
+            "state": deepcopy(state),
+            "steps": [],
+            "trace": deepcopy(trace),
+            "workflow_fingerprint": workflow_fingerprint,
+        }
+        # Persist the run and its billed usage before any business node starts.
+        # Later node checkpoints can then survive a rollback of the failed node.
+        db.commit()
+        db.refresh(run)
 
         try:
             for index, step in enumerate(workflow.steps or []):
@@ -712,6 +952,13 @@ class AutomationRuntime:
                 )
                 if isinstance(result, dict):
                     state.update(result)
+                run.output_data = {
+                    "state": deepcopy(state),
+                    "steps": deepcopy(step_results),
+                    "trace": deepcopy(trace),
+                    "workflow_fingerprint": workflow_fingerprint,
+                }
+                db.commit()
 
             run.status = "success"
             run.resume_at = None
@@ -719,7 +966,12 @@ class AutomationRuntime:
             run.finished_at = _utcnow_naive()
             trace["finished_at"] = _trace_iso(run.finished_at)
             trace["status"] = "success"
-            run.output_data = {"state": state, "steps": step_results, "trace": trace}
+            run.output_data = {
+                "state": state,
+                "steps": step_results,
+                "trace": trace,
+                "workflow_fingerprint": workflow_fingerprint,
+            }
             db.commit()
             db.refresh(run)
             return run
@@ -798,43 +1050,14 @@ class AutomationRuntime:
                 trace=trace,
             )
         except Exception as original_error:
-            error_message = str(original_error)[:2000]
-            trace["finished_at"] = _trace_iso()
-            trace["status"] = "failed"
-            failed_output = {"state": state, "steps": step_results, "trace": trace}
-            db.rollback()
-
-            usage_recorded = True
-            try:
-                service_limits.record(
-                    db,
-                    company_id,
-                    billing_service,
-                    billing_metric,
-                    quantity=1,
-                    metadata={"workflow_id": workflow.id, "status": "failed"},
-                )
-            except Exception:
-                # A concurrent run may have consumed the final quota slot after
-                # the original transaction rolled back. Preserve the workflow
-                # failure instead of masking it with an accounting race.
-                usage_recorded = False
-                db.rollback()
-
-            failed_run = AutomationRun(
-                company_id=company_id,
-                workflow_id=workflow.id,
-                status="failed",
-                input_data=original_input,
-                output_data={
-                    **failed_output,
-                    "usage_recorded": usage_recorded,
-                },
-                error_message=error_message,
-                finished_at=_utcnow_naive(),
+            _store_failed_run(
+                db,
+                run_id=run_id,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+                error=original_error,
             )
-            db.add(failed_run)
-            db.commit()
             raise
 
     def resume_approval(
@@ -1645,6 +1868,23 @@ class AutomationRuntime:
                 if isinstance(state.get("_xvond_preview_outputs"), dict)
                 else {}
             )
+            retry_root_step_index = int(
+                state.get("_xvond_retry_root_step_index")
+                if state.get("_xvond_retry_root_step_index") is not None
+                else step_index
+            )
+            stored_root_state = state.get("_xvond_retry_root_state")
+            retry_root_state = (
+                deepcopy(stored_root_state)
+                if isinstance(stored_root_state, dict)
+                else _retry_root_state(state)
+            )
+            stored_lineage = state.get("_xvond_retry_lineage")
+            retry_lineage = (
+                deepcopy(stored_lineage)
+                if isinstance(stored_lineage, list)
+                else []
+            )
             for node_index, node in enumerate(nodes):
                 node_id = str(node.get("id") or "").strip()
                 is_resume_node = bool(
@@ -1663,6 +1903,26 @@ class AutomationRuntime:
                     else node_id
                 )
                 node_type = str(node.get("type") or "").strip().lower()
+                raw_node_params = (
+                    node.get("params")
+                    if isinstance(node.get("params"), dict)
+                    else {}
+                )
+                if not preview_mode:
+                    _persist_graph_retry_checkpoint(
+                        db,
+                        run_id=run_id,
+                        root_step_index=retry_root_step_index,
+                        root_state=retry_root_state,
+                        lineage=retry_lineage,
+                        graph_agent_id=graph_agent_id,
+                        node_id=node_id,
+                        node_type=node_type,
+                        node_scope=node_scope,
+                        node_outputs=node_outputs,
+                        params=raw_node_params,
+                        resolved=False,
+                    )
                 dependencies = list(node.get("depends_on") or [])
                 if any(dep not in node_outputs for dep in dependencies):
                     raise ValueError(
@@ -1694,6 +1954,22 @@ class AutomationRuntime:
                     )
                 if not isinstance(params, dict):
                     params = {}
+
+                if not preview_mode:
+                    _persist_graph_retry_checkpoint(
+                        db,
+                        run_id=run_id,
+                        root_step_index=retry_root_step_index,
+                        root_state=retry_root_state,
+                        lineage=retry_lineage,
+                        graph_agent_id=graph_agent_id,
+                        node_id=node_id,
+                        node_type=node_type,
+                        node_scope=node_scope,
+                        node_outputs=node_outputs,
+                        params=params,
+                        resolved=True,
+                    )
 
                 if preview_mode and node_scope in preview_outputs:
                     override = deepcopy(preview_outputs[node_scope])
@@ -2347,6 +2623,18 @@ class AutomationRuntime:
                             "_xvond_loop_index": loop_index,
                             "_xvond_nested_graph_depth": nested_depth,
                             "_xvond_graph_path": f"{node_scope}[{loop_index}]",
+                            "_xvond_retry_root_step_index": retry_root_step_index,
+                            "_xvond_retry_root_state": deepcopy(retry_root_state),
+                            "_xvond_retry_lineage": [
+                                *deepcopy(retry_lineage),
+                                {
+                                    "node_id": node_id,
+                                    "node_outputs": deepcopy(node_outputs),
+                                    "loop_index": loop_index,
+                                    "items_fingerprint": _checkpoint_fingerprint(items),
+                                    "completed_results": deepcopy(results),
+                                },
+                            ],
                         }
                         if child_resume is not None and loop_index == start_index:
                             nested_state["_xvond_graph_resume"] = {
