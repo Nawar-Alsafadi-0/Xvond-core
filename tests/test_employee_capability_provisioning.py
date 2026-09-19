@@ -2871,3 +2871,125 @@ def test_routine_inventory_exposes_live_operational_state(database):
 
     assert routines["paused"]["operational_state"] == "paused"
     assert routines["paused"]["next_scheduled_at"] is None
+
+
+
+def test_routine_observability_exposes_health_duration_and_failed_step(database):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live"
+        company.active = True
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+
+        workflow = AutomationWorkflow(
+            id=601,
+            company_id=1,
+            name="Observed routine",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "observed",
+                "_xvond_routine_name": "Observed",
+            },
+            steps=[],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.flush()
+        db.add_all(
+            [
+                AutomationRun(
+                    company_id=1,
+                    workflow_id=601,
+                    status="success",
+                    input_data={},
+                    output_data={},
+                    created_at=datetime(2026, 9, 19, 9, 0),
+                    finished_at=datetime(2026, 9, 19, 9, 0, 2),
+                ),
+                AutomationRun(
+                    company_id=1,
+                    workflow_id=601,
+                    status="failed",
+                    input_data={},
+                    output_data={
+                        "trace": {
+                            "spans": [
+                                {
+                                    "step_index": 0,
+                                    "step_type": "graph",
+                                    "phase": "execute",
+                                    "status": "failed",
+                                    "node_id": "fetch_price",
+                                    "duration_ms": 125.5,
+                                    "error": "upstream timeout",
+                                }
+                            ]
+                        }
+                    },
+                    error_message="upstream timeout",
+                    created_at=datetime(2026, 9, 19, 10, 0),
+                    finished_at=datetime(2026, 9, 19, 10, 0, 3),
+                ),
+                AutomationRun(
+                    company_id=1,
+                    workflow_id=601,
+                    status="failed",
+                    input_data={},
+                    output_data={
+                        "trace": {
+                            "spans": [
+                                {
+                                    "step_index": 1,
+                                    "step_type": "graph",
+                                    "phase": "resume",
+                                    "status": "failed",
+                                    "node_id": None,
+                                    "duration_ms": 87.25,
+                                    "error": "Execution graph node notify_owner (notify) failed: notification provider unavailable",
+                                }
+                            ]
+                        }
+                    },
+                    error_message="Execution graph node notify_owner (notify) failed: notification provider unavailable",
+                    created_at=datetime(2026, 9, 19, 11, 0),
+                    finished_at=datetime(2026, 9, 19, 11, 0, 4),
+                ),
+            ]
+        )
+        db.commit()
+
+    result = api.customer_employee_routines(1, USER)
+    observed = next(
+        item for item in result["routines"]
+        if item["routine_id"] == "observed"
+    )
+
+    assert observed["operational_state"] == "needs_attention"
+    assert observed["last_run"]["status"] == "failed"
+    assert observed["last_run"]["duration_ms"] == 4000
+    assert observed["health"] == {
+        "window_size": 3,
+        "success_count": 1,
+        "failure_count": 2,
+        "rejected_count": 0,
+        "success_rate_percent": 33.3,
+        "consecutive_failures": 2,
+        "last_success_at": "2026-09-19T09:00:02Z",
+        "last_failure_at": "2026-09-19T11:00:04Z",
+    }
+    assert observed["failure"] == {
+        "step_index": 1,
+        "step_type": "graph",
+        "node_id": "notify_owner",
+        "phase": "resume",
+        "error": "Execution graph node notify_owner (notify) failed: notification provider unavailable",
+        "duration_ms": 87.25,
+    }
+    assert observed["retry"]["safe"] is False
+    assert "side-effect checkpointing" in observed["retry"]["reason"]

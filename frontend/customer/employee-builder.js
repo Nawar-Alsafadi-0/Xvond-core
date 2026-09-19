@@ -323,7 +323,9 @@
                                                 <strong>${escapeHtml(item.routine_name || routineId.replaceAll("_", " "))}</strong>
                                                 <div class="muted">${escapeHtml(item.trigger_type || "manual")} · ${escapeHtml(routineId)}</div>
                                                 <div class="muted" data-routine-operation="${escapeHtml(encodeURIComponent(routineId))}">Loading operational status...</div>
+                                                <div class="muted" data-routine-health="${escapeHtml(encodeURIComponent(routineId))}"></div>
                                                 <div class="muted" data-routine-next="${escapeHtml(encodeURIComponent(routineId))}"></div>
+                                                <div class="error" data-routine-failure="${escapeHtml(encodeURIComponent(routineId))}"></div>
                                             </div>
                                             ${badge(enabled ? "Running" : "Paused", enabled ? "ready" : "neutral")}
                                         </div>
@@ -991,6 +993,12 @@
                     const nextNode = document.querySelector(
                         `[data-routine-next="${encoded}"]`
                     );
+                    const healthNode = document.querySelector(
+                        `[data-routine-health="${encoded}"]`
+                    );
+                    const failureNode = document.querySelector(
+                        `[data-routine-failure="${encoded}"]`
+                    );
 
                     let detail = String(item.operational_state || "unknown").replaceAll("_", " ");
                     if (item.waiting?.type === "time" && item.waiting?.resume_at) {
@@ -1006,6 +1014,45 @@
                         detail += ` · last run #${Number(item.last_run.id)} ${String(item.last_run.status || "")}`;
                     }
                     if (statusNode) statusNode.textContent = detail;
+
+                    if (healthNode) {
+                        const health = item.health || {};
+                        const parts = [];
+                        if (Number(health.window_size || 0) > 0) {
+                            parts.push(
+                                `Last ${Number(health.window_size)} runs: ${Number(health.success_count || 0)} success · ${Number(health.failure_count || 0)} failed`
+                            );
+                        }
+                        if (health.success_rate_percent != null) {
+                            parts.push(`${Number(health.success_rate_percent)}% success`);
+                        }
+                        if (Number(health.consecutive_failures || 0) > 0) {
+                            parts.push(`${Number(health.consecutive_failures)} consecutive failures`);
+                        }
+                        if (item.last_run?.duration_ms != null) {
+                            parts.push(`last duration ${Number(item.last_run.duration_ms)} ms`);
+                        }
+                        healthNode.textContent = parts.join(" · ");
+                    }
+
+                    if (failureNode) {
+                        const failure = item.failure || null;
+                        if (failure) {
+                            const location = [
+                                failure.step_index != null ? `step ${Number(failure.step_index)}` : "",
+                                failure.node_id ? `node ${String(failure.node_id)}` : "",
+                                failure.phase ? String(failure.phase) : "",
+                            ].filter(Boolean).join(" · ");
+                            const message = String(
+                                failure.error || item.last_run?.error_message || "Execution failed"
+                            ).slice(0, 500);
+                            failureNode.textContent = location
+                                ? `Failure at ${location}: ${message}`
+                                : `Failure: ${message}`;
+                        } else {
+                            failureNode.textContent = "";
+                        }
+                    }
 
                     if (nextNode) {
                         if (item.next_scheduled_at) {

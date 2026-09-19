@@ -1,4 +1,5 @@
 from copy import deepcopy
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -4347,12 +4348,118 @@ def _runtime_datetime(value: datetime | None) -> str | None:
     )
 
 
+def _run_duration_ms(run: AutomationRun | None) -> int | None:
+    if run is None or run.created_at is None:
+        return None
+    end = run.finished_at
+    if end is None and run.status in {"queued", "running"}:
+        end = datetime.utcnow()
+    if end is None:
+        return None
+    start = run.created_at
+    if start.tzinfo is not None and end.tzinfo is None:
+        start = start.replace(tzinfo=None)
+    elif start.tzinfo is None and end.tzinfo is not None:
+        end = end.replace(tzinfo=None)
+    return max(0, int((end - start).total_seconds() * 1000))
+
+
+def _run_failure_detail(run: AutomationRun | None) -> dict | None:
+    if run is None or run.status != "failed":
+        return None
+
+    output = run.output_data if isinstance(run.output_data, dict) else {}
+    trace = output.get("trace") if isinstance(output.get("trace"), dict) else {}
+    spans = trace.get("spans") if isinstance(trace.get("spans"), list) else []
+    failed_span = next(
+        (
+            item
+            for item in reversed(spans)
+            if isinstance(item, dict)
+            and str(item.get("status") or "").lower() == "failed"
+        ),
+        None,
+    )
+    if isinstance(failed_span, dict):
+        error = str(failed_span.get("error") or run.error_message or "")
+        node_id = failed_span.get("node_id")
+        if not node_id and error:
+            match = re.search(
+                r"Execution graph (?:foreach )?node ([A-Za-z0-9_.:-]+)",
+                error,
+            )
+            if match:
+                node_id = match.group(1)
+        return {
+            "step_index": failed_span.get("step_index"),
+            "step_type": failed_span.get("step_type"),
+            "node_id": node_id,
+            "phase": failed_span.get("phase"),
+            "error": error or None,
+            "duration_ms": failed_span.get("duration_ms"),
+        }
+
+    error = str(run.error_message or "")
+    match = re.search(
+        r"Execution graph (?:foreach )?node ([A-Za-z0-9_.:-]+)",
+        error,
+    )
+    return {
+        "step_index": None,
+        "step_type": None,
+        "node_id": match.group(1) if match else None,
+        "phase": None,
+        "error": error or None,
+        "duration_ms": None,
+    }
+
+
+def _routine_health_summary(recent_runs: list[AutomationRun]) -> dict:
+    runs = list(recent_runs or [])
+    successes = [run for run in runs if run.status == "success"]
+    failures = [run for run in runs if run.status == "failed"]
+    rejected = [run for run in runs if run.status == "rejected"]
+    terminal_count = len(successes) + len(failures) + len(rejected)
+
+    consecutive_failures = 0
+    for run in runs:
+        if run.status == "failed":
+            consecutive_failures += 1
+            continue
+        if run.status in {"success", "rejected"}:
+            break
+
+    success_rate = (
+        round((len(successes) / terminal_count) * 100, 1)
+        if terminal_count
+        else None
+    )
+    last_success = successes[0] if successes else None
+    last_failure = failures[0] if failures else None
+
+    return {
+        "window_size": len(runs),
+        "success_count": len(successes),
+        "failure_count": len(failures),
+        "rejected_count": len(rejected),
+        "success_rate_percent": success_rate,
+        "consecutive_failures": consecutive_failures,
+        "last_success_at": _runtime_datetime(
+            last_success.finished_at or last_success.created_at
+        ) if last_success is not None else None,
+        "last_failure_at": _runtime_datetime(
+            last_failure.finished_at or last_failure.created_at
+        ) if last_failure is not None else None,
+    }
+
+
 def _routine_operational_state(
     *,
     workflow: AutomationWorkflow,
-    latest_run: AutomationRun | None,
+    recent_runs: list[AutomationRun],
     employee_enabled: bool,
 ) -> dict:
+    latest_run = recent_runs[0] if recent_runs else None
     trigger_config = (
         workflow.trigger_config
         if isinstance(workflow.trigger_config, dict)
@@ -4428,6 +4535,11 @@ def _routine_operational_state(
         )
         waiting = {
             "type": "approval",
+            "request_id": (
+                approval.get("request_id")
+                if isinstance(approval, dict)
+                else None
+            ),
             "action_type": (
                 approval.get("action_type")
                 if isinstance(approval, dict)
@@ -4435,16 +4547,31 @@ def _routine_operational_state(
             ),
         }
 
+    failure = _run_failure_detail(latest_run)
     return {
         "operational_state": state,
         "next_scheduled_at": next_scheduled_at,
         "waiting": waiting,
+        "health": _routine_health_summary(recent_runs),
+        "failure": failure,
+        "retry": (
+            {
+                "safe": False,
+                "reason": (
+                    "Automatic retry is disabled until node-level side-effect "
+                    "checkpointing can prove completed external actions will not replay."
+                ),
+            }
+            if latest_run is not None and latest_run.status == "failed"
+            else None
+        ),
         "last_run": (
             {
                 "id": latest_run.id,
                 "status": latest_run.status,
                 "created_at": _runtime_datetime(latest_run.created_at),
                 "finished_at": _runtime_datetime(latest_run.finished_at),
+                "duration_ms": _run_duration_ms(latest_run),
                 "error_message": latest_run.error_message,
             }
             if latest_run is not None
@@ -4539,19 +4666,18 @@ def customer_employee_routines(
             company_id=company_id,
             agent_id=agent.id,
         )
-        workflow_ids = [row.id for row in workflow_rows]
-        latest_runs: dict[int, AutomationRun] = {}
-        if workflow_ids:
-            for run in (
+        recent_runs_by_workflow: dict[int, list[AutomationRun]] = {}
+        for workflow in workflow_rows:
+            recent_runs_by_workflow[workflow.id] = (
                 db.query(AutomationRun)
                 .filter(
                     AutomationRun.company_id == company_id,
-                    AutomationRun.workflow_id.in_(workflow_ids),
+                    AutomationRun.workflow_id == workflow.id,
                 )
                 .order_by(AutomationRun.id.desc())
+                .limit(20)
                 .all()
-            ):
-                latest_runs.setdefault(run.workflow_id, run)
+            )
 
         routines = []
         for workflow in workflow_rows:
@@ -4562,7 +4688,7 @@ def customer_employee_routines(
             )
             operational = _routine_operational_state(
                 workflow=workflow,
-                latest_run=latest_runs.get(workflow.id),
+                recent_runs=recent_runs_by_workflow.get(workflow.id) or [],
                 employee_enabled=bool(agent.enabled),
             )
             routines.append(
