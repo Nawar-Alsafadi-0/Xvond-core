@@ -198,6 +198,13 @@ _OPENAPI_DISCOVERY_SUFFIXES = (
 )
 
 
+def _https_authority(value: str) -> tuple[str, int] | None:
+    parsed = urlparse(str(value or "").strip())
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        return None
+    return str(parsed.hostname).rstrip(".").lower(), int(parsed.port or 443)
+
+
 def openapi_discovery_urls(base_url: str) -> list[str]:
     """Return bounded same-host candidate documentation URLs for a configured API."""
 
@@ -232,8 +239,9 @@ def openapi_discovery_urls(base_url: str) -> list[str]:
 def discover_openapi_contract(base_url: str) -> dict:
     """Probe common OpenAPI locations on the configured host only."""
 
-    configured = urlparse(str(base_url or "").strip())
-    configured_host = str(configured.hostname or "").rstrip(".").lower()
+    configured_authority = _https_authority(base_url)
+    if configured_authority is None:
+        raise ValueError("API base URL must be a plain public HTTPS URL")
     attempts: list[str] = []
 
     for url in openapi_discovery_urls(base_url):
@@ -263,11 +271,9 @@ def discover_openapi_contract(base_url: str) -> dict:
 
         discovered_base = str(contract.get("base_url") or "").strip()
         if discovered_base:
-            discovered_host = str(
-                urlparse(discovered_base).hostname or ""
-            ).rstrip(".").lower()
-            if discovered_host != configured_host:
-                # Discovery must never silently move execution to another host.
+            if _https_authority(discovered_base) != configured_authority:
+                # Discovery must never silently move execution to another
+                # host or port.
                 contract["base_url"] = None
 
         return {
