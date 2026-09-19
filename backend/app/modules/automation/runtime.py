@@ -388,7 +388,7 @@ class AutomationEventRequired(RuntimeError):
             else {
                 "node_id": self.node_id,
                 "node_outputs": self.node_outputs,
-                "event_received": True,
+                "event_received": False,
                 "event_name": self.event_name,
             }
         )
@@ -1674,6 +1674,38 @@ class AutomationRuntime:
                         }
                     }
                     continue
+                elif node_type == "await_event":
+                    if is_resume_node and node_resume.get("event_received") is True:
+                        payload = node_resume.get("event_payload")
+                        if not isinstance(payload, dict):
+                            payload = {}
+                        node_outputs[node_id] = {
+                            "event": str(node_resume.get("event_name") or ""),
+                            "event_id": str(node_resume.get("event_id") or ""),
+                            "payload": deepcopy(payload),
+                            "received": True,
+                        }
+                        continue
+                    event_name = str(params.get("event") or "").strip().lower()
+                    if not event_name:
+                        raise ValueError(
+                            f"Execution graph await_event node {node_id} requires event"
+                        )
+                    raw_match = params.get("match")
+                    match = raw_match if isinstance(raw_match, dict) else {}
+                    raise AutomationEventRequired(
+                        event_name=event_name,
+                        match=match,
+                        workflow_step_index=step_index,
+                        node_id=node_id,
+                        node_outputs=node_outputs,
+                        graph_resume={
+                            "node_id": node_id,
+                            "node_outputs": deepcopy(node_outputs),
+                            "event_received": False,
+                            "event_name": event_name,
+                        },
+                    )
                 elif node_type == "wait":
                     if is_resume_node and node_resume.get("wait_completed") is True:
                         node_outputs[node_id] = {
@@ -1804,6 +1836,30 @@ class AutomationRuntime:
                                 run_id=run_id,
                                 step_index=nested_step_index,
                             )
+                        except AutomationEventRequired as event_wait:
+                            child_checkpoint = deepcopy(
+                                event_wait.graph_resume
+                                if isinstance(event_wait.graph_resume, dict)
+                                else {
+                                    "node_id": event_wait.node_id,
+                                    "node_outputs": event_wait.node_outputs,
+                                    "event_received": False,
+                                    "event_name": event_wait.event_name,
+                                }
+                            )
+                            event_wait.workflow_step_index = int(step_index)
+                            event_wait.node_outputs = deepcopy(node_outputs)
+                            event_wait.graph_resume = {
+                                "node_id": node_id,
+                                "node_outputs": deepcopy(node_outputs),
+                                "foreach": {
+                                    "loop_index": loop_index,
+                                    "items_fingerprint": _checkpoint_fingerprint(items),
+                                    "completed_results": deepcopy(results),
+                                    "child_resume": child_checkpoint,
+                                },
+                            }
+                            raise
                         except AutomationWaitRequired as wait:
                             child_checkpoint = deepcopy(
                                 wait.graph_resume
@@ -1881,6 +1937,17 @@ class AutomationRuntime:
                         run_id=run_id,
                         step_index=(step_index * 1000) + node_index + 1,
                     )
+                except AutomationEventRequired as event_wait:
+                    event_wait.workflow_step_index = int(step_index)
+                    event_wait.node_id = node_id
+                    event_wait.node_outputs = deepcopy(node_outputs)
+                    event_wait.graph_resume = {
+                        "node_id": node_id,
+                        "node_outputs": deepcopy(node_outputs),
+                        "event_received": False,
+                        "event_name": event_wait.event_name,
+                    }
+                    raise
                 except AutomationWaitRequired as wait:
                     wait.workflow_step_index = int(step_index)
                     wait.node_id = node_id
