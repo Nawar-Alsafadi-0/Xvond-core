@@ -988,3 +988,100 @@ def test_compiler_preserves_generic_correlated_event_wait():
     ]
     assert nodes[1]["params"]["event"] == "external.result.ready"
     assert nodes[1]["params"]["match"]["job_id"] == "$nodes.start.job_id"
+
+
+
+def test_compiler_drops_unrequested_time_wait():
+    job_brief = "جهز المسودة ثم راجع النتيجة"
+    response = """{
+      "role":"Worker",
+      "scope":"personal",
+      "summary":"Prepare and review.",
+      "tasks":[],
+      "requirements":[],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{"type":"manual"},
+        "nodes":[
+          {"id":"prepare","type":"transform","depends_on":[],"params":{"values":{"stage":"prepared"}}},
+          {"id":"pause","type":"wait","depends_on":["prepare"],"params":{"duration":2,"unit":"days","source_text":"انتظر يومين"}},
+          {"id":"continue","type":"ai","depends_on":["pause"],"params":{"prompt":"Review the result."}}
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+    nodes = spec["execution_graph"]["nodes"]
+
+    assert [node["type"] for node in nodes] == ["transform", "ai"]
+    assert nodes[1]["depends_on"] == []
+
+
+def test_compiler_drops_unrequested_event_wait():
+    job_brief = "أنشئ الطلب ثم أكمل معالجة البيانات"
+    response = """{
+      "role":"Worker",
+      "scope":"business",
+      "summary":"Create and process.",
+      "tasks":[],
+      "requirements":[],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{"type":"manual"},
+        "nodes":[
+          {"id":"create","type":"transform","depends_on":[],"params":{"values":{"status":"created"}}},
+          {"id":"pause","type":"await_event","depends_on":["create"],"params":{"event":"payment.confirmed","source_text":"انتظر تأكيد الدفع"}},
+          {"id":"continue","type":"ai","depends_on":["pause"],"params":{"prompt":"Continue processing."}}
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+    nodes = spec["execution_graph"]["nodes"]
+
+    assert [node["type"] for node in nodes] == ["transform", "ai"]
+    assert nodes[1]["depends_on"] == []
+
+
+def test_compiler_keeps_grounded_waits_inside_foreach():
+    job_brief = "لكل عنصر جهزه وانتظر ساعة ثم كمل"
+    response = """{
+      "role":"Batch worker",
+      "scope":"personal",
+      "summary":"Process items with a requested pause.",
+      "tasks":[],
+      "requirements":[],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{"type":"manual"},
+        "nodes":[
+          {
+            "id":"each",
+            "type":"foreach",
+            "depends_on":[],
+            "params":{
+              "items":"$input.items",
+              "graph":{
+                "version":1,
+                "nodes":[
+                  {"id":"pause","type":"wait","depends_on":[],"params":{"duration":1,"unit":"hours","source_text":"انتظر ساعة"}}
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+    nested = spec["execution_graph"]["nodes"][0]["params"]["graph"]["nodes"]
+
+    assert len(nested) == 1
+    assert nested[0]["type"] == "wait"
+    assert nested[0]["params"]["source_text"] == "انتظر ساعة"

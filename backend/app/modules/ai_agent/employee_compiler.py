@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 import re
@@ -264,7 +265,7 @@ Rules:
 - execution_graph.trigger describes what starts the graph. Use manual when the user starts it explicitly, schedule for recurring/time-based work, webhook for an incoming external JSON event, and event for an internal Xvond event. Never invent a webhook/event trigger when the user did not request event-driven behavior.
 - For type=event, set trigger.event to the stable internal event name the graph should consume. Event names are capabilities of the Xvond runtime, not provider-specific webhook URLs.
 - Use a wait node only when the Job Brief explicitly requests a pause inside the same job before later steps continue. A wait is not an initial schedule trigger. Put either params.duration plus params.unit (seconds|minutes|hours|days|weeks), or params.until as an ISO-8601 timestamp with timezone. Include params.source_text copied verbatim from the Job Brief words that authorize the wait. Never invent a wait, delay, follow-up period or deadline.
-- Use await_event when later steps in the same job must wait for a future Xvond/internal/provider event instead of starting a separate unrelated workflow. Put the stable event name in params.event. Use params.match for correlation when the workflow is waiting for an event belonging to a specific order, lead, payment, booking or other entity; match values may reference $input.* or previous node outputs. Do not use await_event when the event merely starts the job; use execution_graph.trigger type=event for that case.
+- Use await_event only when the Job Brief explicitly asks this same job to wait for a future Xvond/internal/provider event before continuing. Put the stable event name in params.event and include params.source_text copied verbatim from the Job Brief words that authorize the wait. Use params.match for correlation when the workflow is waiting for an event belonging to a specific order, lead, payment, booking or other entity; match values may reference $input.* or previous node outputs. Never invent an event wait. Do not use await_event when the event merely starts the job; use execution_graph.trigger type=event for that case.
 - Use generic node types, not use-case names. Examples: ai for reasoning/generation, media for generated visual media, action for a side effect through a requirement/connector, http_get_json for read-only JSON fetches, transform for data shaping, condition for branching gates, notify for an internal owner update.
 - ai and media nodes may use params.context to consume structured output from $input.* or $nodes.<id>.* while keeping the instruction itself in params.prompt. Prefer this over embedding raw upstream data inside prompt strings. Xvond bounds context before sending it to providers.
 - action nodes must reference a requirement key in params.action_type. Do not encode provider-specific logic in the graph.
@@ -505,6 +506,63 @@ def _grounded_runtime_inputs(value: Any, *, job_brief: str) -> dict:
         if len(result) >= 20:
             break
     return result
+
+
+def _ground_execution_graph(value: Any, *, job_brief: str) -> dict:
+    """Remove compiler-invented waits that are not authorized by the Job Brief."""
+
+    source = str(job_brief or "").casefold()
+
+    def visit(raw_graph: Any) -> dict:
+        graph = normalize_execution_graph(raw_graph)
+        kept: list[dict] = []
+        for raw_node in graph.get("nodes") or []:
+            if not isinstance(raw_node, dict):
+                continue
+
+            node = deepcopy(raw_node)
+            node_type = str(node.get("type") or "").strip().lower()
+            params = (
+                deepcopy(node.get("params"))
+                if isinstance(node.get("params"), dict)
+                else {}
+            )
+
+            if node_type == "wait":
+                source_text = _bounded_text(params.get("source_text"), limit=500)
+                if not source_text or source_text.casefold() not in source:
+                    continue
+                params["source_text"] = source_text
+                node["params"] = params
+            elif node_type == "await_event":
+                source_text = _bounded_text(params.get("source_text"), limit=500)
+                event_name = _bounded_text(params.get("event"), limit=120).lower()
+                grounded = bool(
+                    (source_text and source_text.casefold() in source)
+                    or (event_name and event_name.casefold() in source)
+                )
+                if not grounded:
+                    continue
+                if source_text:
+                    params["source_text"] = source_text
+                node["params"] = params
+            elif node_type == "foreach":
+                nested = params.get("graph")
+                if isinstance(nested, dict):
+                    params["graph"] = visit(nested)
+                    node["params"] = params
+
+            kept.append(node)
+
+        return normalize_execution_graph(
+            {
+                "version": graph.get("version") or 1,
+                "trigger": graph.get("trigger") or {"type": "manual"},
+                "nodes": kept,
+            }
+        )
+
+    return visit(value)
 
 
 def _normalize_smart_intake(value: Any, *, job_brief: str) -> dict:
@@ -813,7 +871,10 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         if len(setup_questions) >= 30:
             break
 
-    execution_graph = normalize_execution_graph(payload.get("execution_graph"))
+    execution_graph = _ground_execution_graph(
+        payload.get("execution_graph"),
+        job_brief=job_brief,
+    )
 
     return {
         "version": COMPILER_VERSION,

@@ -37,6 +37,7 @@ def test_notification_defaults_cover_business_and_runtime_attention():
         "handoff_pending",
         "operation_attention",
         "ai_failure",
+        "employee_update",
     }
 
 
