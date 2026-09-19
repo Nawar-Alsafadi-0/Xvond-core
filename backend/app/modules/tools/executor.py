@@ -29,7 +29,11 @@ def _enabled_actions(config: dict | None) -> dict:
     return {
         key: value
         for key, value in actions.items()
-        if isinstance(value, dict) and value.get("enabled", True)
+        if (
+            isinstance(value, dict)
+            and value.get("enabled", True)
+            and str(value.get("_xvond_permission_mode") or "").strip().lower() != "never"
+        )
     }
 
 
@@ -169,7 +173,11 @@ def _pending_request(
 
 def _action_module_enabled(db, company_id: int, config: dict, action_type: str) -> bool:
     action = ((config or {}).get("actions") or {}).get(action_type)
-    if not isinstance(action, dict) or not action.get("enabled", True):
+    if (
+        not isinstance(action, dict)
+        or not action.get("enabled", True)
+        or str(action.get("_xvond_permission_mode") or "").strip().lower() == "never"
+    ):
         return False
     module_name = str(action.get("module") or "").strip()
     if not module_name:
