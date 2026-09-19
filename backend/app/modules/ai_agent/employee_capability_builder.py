@@ -877,14 +877,17 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
     automation_plan = {}
     changed = False
     company, company_timezone = _company_context(db, agent_id)
-    normalized_graph = normalize_execution_graph(prepared.get("execution_graph") or {})
-    graph_trigger_type = str(
-        (normalized_graph.get("trigger") or {}).get("type") or "manual"
-    ).strip().lower()
-    graph_owns_schedule = bool(
-        graph_trigger_type == "schedule"
-        and normalized_graph.get("nodes")
-    )
+    execution_routines = _compiled_execution_routines(prepared)
+    scheduled_graph_action_types: set[str] = set()
+    for routine in execution_routines:
+        graph = routine.get("graph") if isinstance(routine, dict) else None
+        if not isinstance(graph, dict):
+            continue
+        trigger_type = str(
+            (graph.get("trigger") or {}).get("type") or "manual"
+        ).strip().lower()
+        if trigger_type == "schedule":
+            scheduled_graph_action_types.update(graph_action_types(graph))
     for item in requirements:
         if not isinstance(item, dict):
             continue
@@ -975,7 +978,7 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             company is not None
             and execution_status == "ready"
             and "scheduler" in (item.get("primitives") or [])
-            and not graph_owns_schedule
+            and key not in scheduled_graph_action_types
         ):
             schedule_status, schedule_workflow_id = _provision_self_service_schedule(
                 db,
@@ -984,7 +987,8 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                 agent_id=agent_id,
                 requirement=item,
                 action=action,
-                execution_graph=prepared.get("execution_graph"),
+                execution_graph=_routine_graph_for_action(execution_routines, key)
+                or prepared.get("execution_graph"),
             )
             if schedule_status not in {"ready", "not_required", "managed_delivery"}:
                 execution_status = "setup_required"
@@ -1015,24 +1019,52 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             "automation_workflow_id": schedule_workflow_id,
         }
 
-    graph_trigger_status = "not_required"
-    graph_trigger_workflow_id = None
     graph_runtime_inputs: dict = {}
     for requirement in requirements:
         if isinstance(requirement, dict):
             for key, value in (requirement.get("runtime_inputs") or {}).items():
                 graph_runtime_inputs.setdefault(str(key), value)
+
+    graph_triggers: list[dict] = []
     if company is not None:
-        graph_trigger_status, graph_trigger_workflow_id = _provision_self_service_graph_trigger(
-            db,
-            company=company,
-            timezone=company_timezone,
-            agent_id=agent_id,
-            execution_graph=prepared.get("execution_graph"),
-            actions=actions,
-            action_plan=action_plan,
-            runtime_inputs=graph_runtime_inputs,
-        )
+        for routine in execution_routines:
+            routine_id = str(routine.get("id") or "primary").strip() or "primary"
+            routine_name = str(routine.get("name") or routine_id).strip() or routine_id
+            graph = routine.get("graph") if isinstance(routine.get("graph"), dict) else {}
+            status, workflow_id = _provision_self_service_graph_trigger(
+                db,
+                company=company,
+                timezone=company_timezone,
+                agent_id=agent_id,
+                execution_graph=graph,
+                actions=actions,
+                action_plan=action_plan,
+                runtime_inputs=graph_runtime_inputs,
+                routine_id=routine_id,
+                routine_name=routine_name,
+            )
+            graph_triggers.append(
+                {
+                    "routine_id": routine_id,
+                    "routine_name": routine_name,
+                    "status": status,
+                    "workflow_id": workflow_id,
+                    "trigger_type": str(
+                        (graph.get("trigger") or {}).get("type") or "manual"
+                    ),
+                }
+            )
+
+    if graph_triggers:
+        primary_graph_trigger = dict(graph_triggers[0])
+    else:
+        primary_graph_trigger = {
+            "routine_id": "primary",
+            "routine_name": "Primary routine",
+            "status": "not_required",
+            "workflow_id": None,
+            "trigger_type": "manual",
+        }
 
     if changed:
         config["actions"] = actions
@@ -1049,17 +1081,12 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
 
     _refresh_delivery_fields(prepared)
     delivery = {
-        "provisioning_version": 1,
+        "provisioning_version": 2,
         "action_plan": action_plan,
         "automation_plan": automation_plan,
-        "graph_trigger": {
-            "status": graph_trigger_status,
-            "workflow_id": graph_trigger_workflow_id,
-            "trigger_type": str(
-                ((prepared.get("execution_graph") or {}).get("trigger") or {}).get("type")
-                or "manual"
-            ),
-        },
+        # Keep the singular field for old portal/API consumers.
+        "graph_trigger": primary_graph_trigger,
+        "graph_triggers": graph_triggers,
         "managed_capabilities": [
             item.get("key")
             for item in requirements
