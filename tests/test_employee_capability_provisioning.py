@@ -2992,4 +2992,164 @@ def test_routine_observability_exposes_health_duration_and_failed_step(database)
         "duration_ms": 87.25,
     }
     assert observed["retry"]["safe"] is False
-    assert "side-effect checkpointing" in observed["retry"]["reason"]
+    assert "no durable node checkpoint" in observed["retry"]["reason"]
+
+def test_retry_state_exposes_safe_durable_checkpoint():
+    run = SimpleNamespace(
+        id=77,
+        status="failed",
+        output_data={
+            "retry_attempts": 2,
+            "retry_checkpoint": {
+                "safe": True,
+                "reason": None,
+                "failed_node_id": "fetch_price",
+                "failed_node_type": "http_get_json",
+                "failed_node_scope": "daily/fetch_price",
+            },
+        },
+    )
+
+    retry = api._run_retry_state(run)
+
+    assert retry == {
+        "safe": True,
+        "run_id": 77,
+        "reason": (
+            "Retry will resume from the last durable node checkpoint without "
+            "replaying completed nodes."
+        ),
+        "node_id": "fetch_price",
+        "node_type": "http_get_json",
+        "node_scope": "daily/fetch_price",
+        "attempts": 2,
+    }
+
+
+def test_customer_retry_requires_latest_failed_safe_run(database, monkeypatch):
+    factory, _ = database
+    captured = {}
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live"
+        company.active = True
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+
+        workflow = AutomationWorkflow(
+            id=701,
+            company_id=1,
+            name="Retryable routine",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "retryable",
+                "_xvond_routine_name": "Retryable",
+            },
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "fetch",
+                                "type": "http_get_json",
+                                "depends_on": [],
+                                "params": {"url": "https://example.com/data"},
+                            }
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.flush()
+        failed = AutomationRun(
+            company_id=1,
+            workflow_id=workflow.id,
+            status="failed",
+            input_data={"_xvond_execution_key": "api-retry"},
+            output_data={
+                "retry_checkpoint": {
+                    "version": 1,
+                    "safe": True,
+                    "reason": None,
+                    "failed_node_id": "fetch",
+                    "failed_node_type": "http_get_json",
+                    "failed_node_scope": "fetch",
+                }
+            },
+            error_message="temporary failure",
+            finished_at=datetime(2026, 9, 19, 12, 0),
+        )
+        db.add(failed)
+        db.commit()
+        failed_id = failed.id
+
+    def fake_retry(db, *, company_id, workflow, run):
+        captured.update(
+            {
+                "company_id": company_id,
+                "workflow_id": workflow.id,
+                "run_id": run.id,
+            }
+        )
+        run.status = "success"
+        run.error_message = None
+        run.finished_at = datetime(2026, 9, 19, 12, 1)
+        run.output_data = {
+            **dict(run.output_data or {}),
+            "retry_attempts": 1,
+            "retry": {"status": "succeeded", "attempt": 1},
+        }
+        db.commit()
+        db.refresh(run)
+        return run
+
+    monkeypatch.setattr(api.automation_runtime, "retry_failed", fake_retry)
+
+    result = api.customer_employee_retry_routine(
+        1,
+        "retryable",
+        api.EmployeeBuilderRoutineRetryRequest(run_id=failed_id),
+        USER,
+    )
+
+    assert captured == {
+        "company_id": 1,
+        "workflow_id": 701,
+        "run_id": failed_id,
+    }
+    assert result["status"] == "success"
+    assert result["run_id"] == failed_id
+
+    with factory() as db:
+        newer = AutomationRun(
+            company_id=1,
+            workflow_id=701,
+            status="failed",
+            input_data={},
+            output_data={},
+            error_message="newer failure",
+        )
+        db.add(newer)
+        db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        api.customer_employee_retry_routine(
+            1,
+            "retryable",
+            api.EmployeeBuilderRoutineRetryRequest(run_id=failed_id),
+            USER,
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["message"] == "A newer routine run exists. Refresh before retrying."
+
