@@ -1691,6 +1691,16 @@ def _self_service_builder_journey(
                             {"key": "username", "label": "Username", "type": "text"},
                             {"key": "password", "label": "Password", "type": "password"},
                         ]
+                    elif auth_type == "oauth":
+                        flows = [
+                            item for item in (scheme.get("flows") or [])
+                            if isinstance(item, dict)
+                        ]
+                        if any(item.get("flow") == "client_credentials" for item in flows):
+                            fields = [
+                                {"key": "client_id", "label": "OAuth client ID", "type": "text"},
+                                {"key": "client_secret", "label": "OAuth client secret", "type": "password"},
+                            ]
                     elif auth_type in {"bearer", "api_key_header", "api_key_query"} or customer_access == "api_key":
                         fields = [{
                             "key": "api_key",
