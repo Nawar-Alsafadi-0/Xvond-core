@@ -2747,12 +2747,27 @@ def bind_self_service_integration(
                 "Booking needs a two-way API so Xvond can verify availability before creating the booking",
             )
 
+        compiled_operations = requirement.get("integration_operations")
+        compiled_operations = (
+            _bounded_connection_operations(compiled_operations)
+            if isinstance(compiled_operations, dict)
+            else {}
+        )
+        supplied_operations = _bounded_connection_operations(data.operations)
         execute_required = integration_requires_operation_endpoints(
             integration.integration_type
         )
+        # A generic connector is complete when the compiler/API docs already
+        # supplied one or more concrete operations; do not force a redundant
+        # legacy /execute endpoint.
+        legacy_execute_required = (
+            execute_required
+            and not compiled_operations
+            and not supplied_operations
+        )
         execute_endpoint = _relative_endpoint(
             data.execute_endpoint,
-            required=execute_required,
+            required=legacy_execute_required,
         )
         availability_endpoint = _relative_endpoint(data.availability_endpoint)
         cancel_endpoint = _relative_endpoint(data.cancel_endpoint)
@@ -2772,10 +2787,8 @@ def bind_self_service_integration(
         operations = integration_packaged_operations(
             integration.integration_type
         )
-        compiled_operations = requirement.get("integration_operations")
-        if isinstance(compiled_operations, dict):
-            operations.update(_bounded_connection_operations(compiled_operations))
-        operations.update(_bounded_connection_operations(data.operations))
+        operations.update(compiled_operations)
+        operations.update(supplied_operations)
         if execute_endpoint:
             operations["execute"] = {"method": "POST", "endpoint": execute_endpoint}
         if availability_endpoint:
