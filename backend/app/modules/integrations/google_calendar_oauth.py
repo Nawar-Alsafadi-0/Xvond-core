@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import hmac
 import json
 import secrets
 import time
 from urllib.parse import urlencode
 
 from backend.app.core.config.settings import settings
+from cryptography.fernet import Fernet, InvalidToken
+
 from backend.app.core.http_security import safe_http_request, validate_public_http_url
 
 
@@ -50,21 +51,16 @@ def _b64encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
-def _b64decode(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
-    try:
-        return base64.urlsafe_b64decode((value + padding).encode("ascii"))
-    except Exception as exc:
-        raise GoogleCalendarOAuthError("Invalid Google Calendar OAuth state") from exc
-
-
-def _sign(value: str) -> str:
-    digest = hmac.new(
-        settings.JWT_SECRET.encode("utf-8"),
-        value.encode("ascii"),
-        hashlib.sha256,
-    ).digest()
-    return _b64encode(digest)
+def _state_cipher() -> Fernet:
+    source = str(settings.CONFIG_ENCRYPTION_KEY or settings.JWT_SECRET or "").strip()
+    if not source:
+        raise GoogleCalendarOAuthError("Google Calendar OAuth state encryption is not configured")
+    key = base64.urlsafe_b64encode(
+        hashlib.sha256(
+            f"{source}:google-calendar-oauth-state:v1".encode("utf-8")
+        ).digest()
+    )
+    return Fernet(key)
 
 
 def _pkce_verifier() -> str:
@@ -105,10 +101,13 @@ def issue_google_calendar_oauth_state(
         "iat": issued_at,
         "exp": issued_at + STATE_TTL_SECONDS,
     }
-    encoded = _b64encode(
-        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    )
-    return f"{encoded}.{_sign(encoded)}", _pkce_challenge(verifier)
+    encoded = json.dumps(
+        payload,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    state = _state_cipher().encrypt(encoded).decode("ascii")
+    return state, _pkce_challenge(verifier)
 
 
 def verify_google_calendar_oauth_state(
@@ -116,17 +115,14 @@ def verify_google_calendar_oauth_state(
     *,
     now: int | None = None,
 ) -> dict:
-    parts = str(state or "").split(".")
-    if len(parts) != 2:
-        raise GoogleCalendarOAuthError("Invalid Google Calendar OAuth state")
-    encoded, signature = parts
-    if not hmac.compare_digest(signature, _sign(encoded)):
+    token = str(state or "").strip()
+    if not token:
         raise GoogleCalendarOAuthError("Invalid Google Calendar OAuth state")
     try:
-        payload = json.loads(_b64decode(encoded).decode("utf-8"))
-    except GoogleCalendarOAuthError:
-        raise
-    except Exception as exc:
+        payload = json.loads(
+            _state_cipher().decrypt(token.encode("ascii")).decode("utf-8")
+        )
+    except (InvalidToken, ValueError, UnicodeDecodeError) as exc:
         raise GoogleCalendarOAuthError("Invalid Google Calendar OAuth state") from exc
 
     current = int(time.time() if now is None else now)
