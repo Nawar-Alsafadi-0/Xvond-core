@@ -12,8 +12,10 @@ META_WORKFLOW_FILE="${META_WORKFLOW_FILE:-ops/n8n/xvond-meta-messaging-provider.
 META_WORKFLOW_ID="${META_WORKFLOW_ID:-xvond-meta-messaging-provider-v1}"
 SLACK_WORKFLOW_FILE="${SLACK_WORKFLOW_FILE:-ops/n8n/xvond-slack-provider.workflow.json}"
 SLACK_WORKFLOW_ID="${SLACK_WORKFLOW_ID:-xvond-slack-provider-v1}"
+CUSTOM_CHANNEL_WORKFLOW_FILE="${CUSTOM_CHANNEL_WORKFLOW_FILE:-ops/n8n/xvond-custom-channel-provider.workflow.json}"
+CUSTOM_CHANNEL_WORKFLOW_ID="${CUSTOM_CHANNEL_WORKFLOW_ID:-xvond-custom-channel-provider-v1}"
 
-for file in "$ACTION_WORKFLOW_FILE" "$CHANNEL_WORKFLOW_FILE" "$TELEGRAM_WORKFLOW_FILE" "$META_WORKFLOW_FILE" "$SLACK_WORKFLOW_FILE"; do
+for file in "$ACTION_WORKFLOW_FILE" "$CHANNEL_WORKFLOW_FILE" "$TELEGRAM_WORKFLOW_FILE" "$META_WORKFLOW_FILE" "$SLACK_WORKFLOW_FILE" "$CUSTOM_CHANNEL_WORKFLOW_FILE"; do
     if [ ! -f "$file" ]; then
         echo "Workflow sync failed: $file not found" >&2
         exit 1
@@ -192,6 +194,36 @@ fetch("http://127.0.0.1:5678/webhook/xvond-slack-provider", {
 }
 
 
+probe_custom_channel_gateway() {
+    docker exec xvond-workflow-engine node -e '
+fetch("http://127.0.0.1:5678/webhook/xvond-custom-channel-provider", {
+  method: "POST",
+  headers: {"content-type": "application/json"},
+  body: JSON.stringify({action: "health_probe"}),
+}).then(async response => {
+  const text = await response.text();
+  if (!response.ok) {
+    console.error(`http_${response.status}:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  let result;
+  try { result = JSON.parse(text); }
+  catch (_error) {
+    console.error(`invalid_json_response:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  if (!result || result.success !== false) {
+    console.error(`invalid_custom_channel_gateway_response:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  process.exit(0);
+}).catch(error => {
+  console.error(`fetch_failed:${String(error && error.message || "unknown")}`);
+  process.exit(2);
+});'
+}
+
+
 wait_for_runtime_webhooks() {
     attempts="${1:-90}"
     count=0
@@ -201,7 +233,8 @@ wait_for_runtime_webhooks() {
            channel_output="$(probe_channel_gateway 2>&1)" &&
            telegram_output="$(probe_telegram_gateway 2>&1)" &&
            meta_output="$(probe_meta_gateway 2>&1)" &&
-           slack_output="$(probe_slack_gateway 2>&1)"; then
+           slack_output="$(probe_slack_gateway 2>&1)" &&
+           custom_output="$(probe_custom_channel_gateway 2>&1)"; then
             return 0
         else
             code="$?"
@@ -209,7 +242,8 @@ wait_for_runtime_webhooks() {
 ${channel_output:-}
 ${telegram_output:-}
 ${meta_output:-}
-${slack_output:-}"
+${slack_output:-}
+${custom_output:-}"
             if [ "$code" -ne 2 ]; then
                 printf '%b\n' "$last_error" >&2
                 return "$code"
@@ -254,8 +288,9 @@ sync_one_workflow "$CHANNEL_WORKFLOW_FILE" "$CHANNEL_WORKFLOW_ID"
 sync_one_workflow "$TELEGRAM_WORKFLOW_FILE" "$TELEGRAM_WORKFLOW_ID"
 sync_one_workflow "$META_WORKFLOW_FILE" "$META_WORKFLOW_ID"
 sync_one_workflow "$SLACK_WORKFLOW_FILE" "$SLACK_WORKFLOW_ID"
+sync_one_workflow "$CUSTOM_CHANNEL_WORKFLOW_FILE" "$CUSTOM_CHANNEL_WORKFLOW_ID"
 
 compose_workflow up -d --no-deps workflow-engine
 wait_for_runtime_webhooks
 
-echo "Workflow engine synced from Git: $ACTION_WORKFLOW_ID, $CHANNEL_WORKFLOW_ID, $TELEGRAM_WORKFLOW_ID, $META_WORKFLOW_ID, $SLACK_WORKFLOW_ID"
+echo "Workflow engine synced from Git: $ACTION_WORKFLOW_ID, $CHANNEL_WORKFLOW_ID, $TELEGRAM_WORKFLOW_ID, $META_WORKFLOW_ID, $SLACK_WORKFLOW_ID, $CUSTOM_CHANNEL_WORKFLOW_ID"

@@ -177,13 +177,13 @@ CHANNEL_CATALOG = {
     },
     "custom": {
         "name": "Custom / API Channel",
-        "description": "Custom customer communication surface managed through Xvond",
+        "description": "Signed generic webhook/API channel using the packaged Xvond custom-channel protocol",
         "setup_mode": CHANNEL_SETUP_MANAGED,
         "runtime_state": CHANNEL_RUNTIME_LIVE,
         "runtime_adapter": N8N_CHANNEL_ADAPTER,
         "customer_selectable": True,
         "channel_slot": True,
-        "packaged_provider": False,
+        "packaged_provider": True,
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
 }
