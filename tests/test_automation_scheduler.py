@@ -3522,3 +3522,120 @@ def test_graph_preview_can_use_stateless_real_ai_executor():
         "context": {"value": 42},
         "node_scope": "think",
     }
+
+
+
+def test_graph_actions_use_distinct_stable_idempotency_keys_per_node(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    calls = []
+
+    def fake_capability(*args, **kwargs):
+        calls.append(
+            {
+                "action_type": kwargs["action_type"],
+                "idempotency_key": kwargs["idempotency_key"],
+            }
+        )
+        return {
+            "ok": True,
+            "action_type": kwargs["action_type"],
+            "idempotency_key": kwargs["idempotency_key"],
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "execute_generic_capability",
+        fake_capability,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Idempotency Co", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Worker",
+                system_prompt="work",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "action_a": {
+                            "enabled": True,
+                            "confirmation_required": False,
+                            "_xvond_permission_mode": "automatic",
+                            "destination": {
+                                "type": "xvond_internal",
+                                "adapter": "generic_capability",
+                            },
+                        },
+                        "action_b": {
+                            "enabled": True,
+                            "confirmation_required": False,
+                            "_xvond_permission_mode": "automatic",
+                            "destination": {
+                                "type": "xvond_internal",
+                                "adapter": "generic_capability",
+                            },
+                        },
+                    }
+                },
+            )
+        )
+        db.commit()
+
+        graph = {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "first",
+                    "type": "action",
+                    "depends_on": [],
+                    "params": {
+                        "action_type": "action_a",
+                        "arguments": {"value": 1},
+                    },
+                },
+                {
+                    "id": "second",
+                    "type": "action",
+                    "depends_on": ["first"],
+                    "params": {
+                        "action_type": "action_b",
+                        "arguments": {"value": 2},
+                    },
+                },
+            ],
+        }
+        runtime = automation_runtime_module.AutomationRuntime()
+        for _ in range(2):
+            result = runtime.execute_step(
+                db,
+                1,
+                {"type": "graph", "agent_id": 1, "graph": graph},
+                {"_xvond_execution_key": "stable-retry-key"},
+                run_id=1,
+                step_index=0,
+            )
+            assert result["graph_outputs"]["first"]["scheduled_action_result"]["ok"] is True
+            assert result["graph_outputs"]["second"]["scheduled_action_result"]["ok"] is True
+
+    assert len(calls) == 4
+    first_run = {item["action_type"]: item["idempotency_key"] for item in calls[:2]}
+    second_run = {item["action_type"]: item["idempotency_key"] for item in calls[2:]}
+
+    assert first_run["action_a"] != first_run["action_b"]
+    assert first_run == second_run
+    assert first_run["action_a"].startswith("stable-retry-key:0:graph:")
+    assert first_run["action_b"].startswith("stable-retry-key:0:graph:")
+    engine.dispose()
