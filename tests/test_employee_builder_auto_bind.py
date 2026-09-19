@@ -1,12 +1,22 @@
+from pathlib import Path
+from types import SimpleNamespace
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from backend.app.main import app  # noqa: F401 - register metadata
+from backend.app.api import customer_employee_builder as api
 from backend.app.api.customer_employee_builder import (
     _auto_bind_single_packaged_integrations,
 )
 from backend.app.core.database.base import Base
+from backend.app.models.company import Company
+from backend.app.modules.ai_agent.factory_models import AgentConfig
+from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.integrations.models import CompanyIntegration
+
+
+BUILDER_UI = Path("frontend/customer/employee-builder.js").read_text(encoding="utf-8")
 
 
 def _calendar(integration_id: int, *, validated: bool = True) -> CompanyIntegration:
@@ -179,3 +189,85 @@ def test_existing_binding_is_preserved_without_reselection():
     assert bound == []
     assert result["requirements"][0]["integration_id"] == 77
     engine.dispose()
+
+
+def test_auto_resolve_endpoint_reuses_new_connection_and_invalidates_preview(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = lambda: Session(engine, autoflush=False)
+    monkeypatch.setattr(api, "SessionLocal", factory)
+    monkeypatch.setattr(
+        api,
+        "provision_compiled_capabilities",
+        lambda db, *, agent_id, spec: (
+            {**spec, "delivery": {"provisioning_version": 1}},
+            {"provisioning_version": 1},
+        ),
+    )
+
+    with factory() as db:
+        db.add(
+            Company(
+                id=1,
+                name="Clinic",
+                active=False,
+                lifecycle_status="onboarding",
+                onboarding_source="self_service",
+            )
+        )
+        db.flush()
+        db.add(
+            AIAgent(
+                id=5,
+                company_id=1,
+                name="Receptionist",
+                description="Book clinic appointments.",
+                system_prompt="old",
+                provider="mock",
+                model="mock",
+                enabled=False,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=5,
+                agent_type="employee",
+                settings={
+                    "employee_builder": {
+                        "compiled_at": "2026-09-19T00:00:00Z",
+                        "last_tested_at": "2026-09-19T00:01:00Z",
+                        "last_tested_compiled_at": "2026-09-19T00:00:00Z",
+                        "compiled_spec": _booking_spec(),
+                    }
+                },
+                capabilities={"booking": True},
+                customer_controls={},
+            )
+        )
+        db.add(_calendar(10))
+        db.commit()
+
+    result = api.auto_resolve_self_service_integrations(
+        5,
+        SimpleNamespace(company_id=1),
+    )
+
+    assert result["status"] == "resolved"
+    assert result["bound_requirements"] == ["booking"]
+
+    with factory() as db:
+        config = db.query(AgentConfig).filter_by(agent_id=5).one()
+        builder = config.settings["employee_builder"]
+        requirement = builder["compiled_spec"]["requirements"][0]
+        assert requirement["integration_id"] == 10
+        assert "last_tested_at" not in builder
+        assert "last_tested_compiled_at" not in builder
+
+    engine.dispose()
+
+
+def test_builder_attempts_safe_auto_resolution_after_a_new_connection_exists():
+    assert "hasResolvableConnectionRequirement" in BUILDER_UI
+    assert "/connections/auto-resolve" in BUILDER_UI
+    assert "Automatic connection reuse skipped" in BUILDER_UI
