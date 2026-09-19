@@ -294,14 +294,33 @@
     },
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "INSERT INTO xvond_managed_channel_routes\n(company_id, connection_key, channel_id, agent_id, channel_type, provider_type, provider_url, provider_secret, provider_config, provider_account_label, active, updated_at)\nVALUES (\n  {{ $json.company_id }},\n  '{{ $json.connection_key.replace(/'/g, \"''\") }}',\n  {{ $json.channel_id }},\n  {{ $json.agent_id }},\n  '{{ $json.channel_type.replace(/'/g, \"''\") }}',\n  '{{ $json.provider_type.replace(/'/g, \"''\") }}',\n  '{{ $json.provider_url.replace(/'/g, \"''\") }}',\n  '{{ $json.provider_secret.replace(/'/g, \"''\") }}',\n  '{{ JSON.stringify($json.provider_config).replace(/'/g, \"''\") }}'::jsonb,\n  {{ $json.provider_account_label ? \"'\" + $json.provider_account_label.replace(/'/g, \"''\") + \"'\" : \"NULL\" }},\n  TRUE,\n  NOW()\n)\nON CONFLICT (company_id, connection_key) DO UPDATE SET\n channel_id=EXCLUDED.channel_id, agent_id=EXCLUDED.agent_id, channel_type=EXCLUDED.channel_type,\n provider_type=EXCLUDED.provider_type, provider_url=EXCLUDED.provider_url,\n provider_secret=EXCLUDED.provider_secret, provider_config=EXCLUDED.provider_config,\n provider_account_label=EXCLUDED.provider_account_label, active=TRUE, updated_at=NOW()\nRETURNING company_id, channel_id, connection_key, channel_type, provider_type, provider_account_label;",
-        "options": {}
+        "method": "POST",
+        "url": "={{ $env.XVOND_WORKFLOW_REGISTRY_URL + '/v1/routes' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Xvond-Registry-Secret",
+              "value": "={{ $env.XVOND_WORKFLOW_REGISTRY_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({company_id:$json.company_id,connection_key:$json.connection_key,channel_id:$json.channel_id,agent_id:$json.agent_id,channel_type:$json.channel_type,provider_type:$json.provider_type,provider_url:$json.provider_url,provider_secret:$json.provider_secret,provider_config:$json.provider_config,provider_account_label:$json.provider_account_label}) }}",
+        "options": {
+          "timeout": 10000
+        }
       },
       "id": "write-channel-route",
-      "name": "Write Channel Route",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "name": "Provision Channel Route",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         1010,
         650
@@ -309,7 +328,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const row=$input.first().json; const src=$('Validate and Dispatch').first().json; return [{json:{success:true,request_id:src.request_id,action:src.action,data:{configured:true,channel_id:Number(row.channel_id),connection_key:String(row.connection_key),channel_type:String(row.channel_type),provider_type:String(row.provider_type),provider_account_label:row.provider_account_label||null},error:null}}];"
+        "jsCode": "const response=$input.first().json; const src=$('Validate and Dispatch').first().json; if(!response?.success) return [{json:{success:false,request_id:src.request_id,action:src.action,data:null,error:'Managed channel provisioning failed'}}]; return [{json:{success:true,request_id:src.request_id,action:src.action,data:{configured:true,channel_id:src.channel_id,connection_key:src.connection_key,channel_type:src.channel_type,provider_type:src.provider_type,provider_account_label:src.provider_account_label||null},error:null}}];"
       },
       "id": "normalize-provision-result",
       "name": "Normalize Provision Result",
@@ -322,14 +341,25 @@
     },
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "SELECT company_id, connection_key, channel_id, agent_id, channel_type, provider_type, provider_url, provider_secret, provider_config, provider_account_label\nFROM xvond_managed_channel_routes\nWHERE company_id={{ $json.company_id }}\n  AND connection_key='{{ $json.connection_key.replace(/'/g, \"''\") }}'\n  AND channel_id={{ $json.channel_id }}\n  AND active=TRUE\nLIMIT 1;",
-        "options": {}
+        "method": "GET",
+        "url": "={{ $env.XVOND_WORKFLOW_REGISTRY_URL + '/v1/routes/' + $json.company_id + '/' + encodeURIComponent($json.connection_key) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Xvond-Registry-Secret",
+              "value": "={{ $env.XVOND_WORKFLOW_REGISTRY_SECRET }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
       },
       "id": "lookup-channel-route",
       "name": "Lookup Channel Route",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         1010,
         800
@@ -337,7 +367,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const src=$('Validate and Dispatch').first().json; const rows=$input.all().map(x=>x.json).filter(x=>x&&x.provider_url); if(!rows.length) return [{json:{success:false,request_id:src.request_id,action:src.action,data:{code:'provider_not_configured'},error:'Managed channel route is not configured'}}]; const r=rows[0]; if(src.action==='channel.check') return [{json:{success:true,request_id:src.request_id,action:src.action,data:{configured:true,channel_id:Number(r.channel_id),provider_type:String(r.provider_type),provider_account_label:r.provider_account_label||null},error:null}}]; const externalContactId=String(src.data?.external_contact_id||'').trim(); const message=String(src.data?.message||'').trim(); if(!externalContactId||!message) return [{json:{success:false,request_id:src.request_id,action:src.action,data:{code:'invalid_channel_send'},error:'Invalid channel send contract'}}]; return [{json:{_dispatch:'channel_provider',company_id:src.company_id,agent_id:src.agent_id,conversation_id:src.conversation_id||null,channel_id:src.channel_id,route_key:src.route_key,action:src.action,request_id:src.request_id,data:src.data,provider_url:String(r.provider_url),provider_secret:String(r.provider_secret)}}];"
+        "jsCode": "const src=$('Validate and Dispatch').first().json; const response=$input.first().json; const row=response?.route; if(!row || Number(row.channel_id)!==Number(src.channel_id)) return [{json:{success:false,request_id:src.request_id,action:src.action,data:{configured:false},error:'Managed channel provider route is not configured'}}]; if(src.action==='channel.check') return [{json:{success:true,request_id:src.request_id,action:src.action,data:{configured:true,channel_id:Number(row.channel_id),connection_key:String(row.connection_key),channel_type:String(row.channel_type),provider_type:String(row.provider_type),provider_account_label:row.provider_account_label||null},error:null}}]; return [{json:{...src,_dispatch:'channel_provider',provider_url:String(row.provider_url),provider_secret:String(row.provider_secret)}}];"
       },
       "id": "normalize-route-lookup",
       "name": "Normalize Channel Route Lookup",
@@ -464,7 +494,7 @@
       "main": [
         [
           {
-            "node": "Write Channel Route",
+            "node": "Provision Channel Route",
             "type": "main",
             "index": 0
           }
@@ -472,17 +502,6 @@
         [
           {
             "node": "Lookup Channel Route",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Write Channel Route": {
-      "main": [
-        [
-          {
-            "node": "Normalize Provision Result",
             "type": "main",
             "index": 0
           }
@@ -516,6 +535,17 @@
         [
           {
             "node": "Channel Provider?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Provision Channel Route": {
+      "main": [
+        [
+          {
+            "node": "Normalize Provision Result",
             "type": "main",
             "index": 0
           }
