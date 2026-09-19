@@ -2463,6 +2463,7 @@ class AutomationRuntime:
                         "type": "scheduled_action",
                         "agent_id": action_agent_id,
                         "action_type": action_type,
+                        "operation": str(params.get("operation") or "execute").strip().lower(),
                         "arguments": params.get("arguments") or {},
                         "approval_request_id": (
                             int(state.get("_xvond_approved_request_id") or 0) or None
@@ -3383,6 +3384,7 @@ class AutomationRuntime:
                         ),
                     )
 
+            operation = str(step.get("operation") or "execute").strip().lower()
             details = {
                 key: value
                 for key, value in state.items()
@@ -3426,7 +3428,7 @@ class AutomationRuntime:
                     action_type,
                     action,
                     {
-                        "operation": "execute",
+                        "operation": operation,
                         "action_type": action_type,
                         "details": details,
                         "summary": str(
@@ -3436,7 +3438,7 @@ class AutomationRuntime:
                             or action_type
                         )[:2000],
                     },
-                    "execute",
+                    operation,
                     idempotency_key=stable_key,
                 )
                 if not result.success:
