@@ -309,6 +309,8 @@
                                             <div>
                                                 <strong>${escapeHtml(item.routine_name || routineId.replaceAll("_", " "))}</strong>
                                                 <div class="muted">${escapeHtml(item.trigger_type || "manual")} · ${escapeHtml(routineId)}</div>
+                                                <div class="muted" data-routine-operation="${escapeHtml(encodeURIComponent(routineId))}">Loading operational status...</div>
+                                                <div class="muted" data-routine-next="${escapeHtml(encodeURIComponent(routineId))}"></div>
                                             </div>
                                             ${badge(enabled ? "Running" : "Paused", enabled ? "ready" : "neutral")}
                                         </div>
@@ -874,6 +876,56 @@
                 }
             });
         });
+
+        async function loadRoutineOperations() {
+            if (!controllableRoutines.length) return;
+            try {
+                const result = await api(
+                    `/customer/employee-builder/${Number(employee.agent_id)}/routines`
+                );
+                const routines = Array.isArray(result.routines) ? result.routines : [];
+                routines.forEach(item => {
+                    const routineId = String(item.routine_id || "primary");
+                    const encoded = encodeURIComponent(routineId);
+                    const statusNode = document.querySelector(
+                        `[data-routine-operation="${encoded}"]`
+                    );
+                    const nextNode = document.querySelector(
+                        `[data-routine-next="${encoded}"]`
+                    );
+
+                    let detail = String(item.operational_state || "unknown").replaceAll("_", " ");
+                    if (item.waiting?.type === "time" && item.waiting?.resume_at) {
+                        detail += ` · resumes ${item.waiting.resume_at}`;
+                    } else if (item.waiting?.type === "event" && item.waiting?.event_name) {
+                        detail += ` · waiting for ${item.waiting.event_name}`;
+                    } else if (item.waiting?.type === "approval") {
+                        detail += item.waiting?.action_type
+                            ? ` · approval for ${item.waiting.action_type}`
+                            : " · waiting for approval";
+                    }
+                    if (item.last_run?.id) {
+                        detail += ` · last run #${Number(item.last_run.id)} ${String(item.last_run.status || "")}`;
+                    }
+                    if (statusNode) statusNode.textContent = detail;
+
+                    if (nextNode) {
+                        if (item.next_scheduled_at) {
+                            nextNode.textContent = `Next scheduled run: ${item.next_scheduled_at}`;
+                        } else if (item.last_run?.error_message) {
+                            nextNode.textContent = `Last error: ${String(item.last_run.error_message).slice(0, 500)}`;
+                        } else {
+                            nextNode.textContent = "";
+                        }
+                    }
+                });
+            } catch (err) {
+                document.querySelectorAll("[data-routine-operation]").forEach(node => {
+                    node.textContent = "Operational status unavailable";
+                });
+            }
+        }
+        loadRoutineOperations();
 
         async function loadExecutionHistory() {
             const list = document.getElementById("employee-builder-runs-list");
