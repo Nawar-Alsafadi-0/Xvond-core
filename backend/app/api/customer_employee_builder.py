@@ -88,6 +88,7 @@ from backend.app.modules.integrations.catalog import (
     validate_integration_config,
 )
 from backend.app.modules.integrations.capability_discovery import (
+    api_connection_probe,
     discover_openapi_contract,
     public_api_probe,
 )
@@ -3231,6 +3232,283 @@ def discover_self_service_capability(
             "docs_url": result.get("docs_url"),
             "operation_count": len(operations),
             "unresolved_operations": unresolved,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/discover/{requirement_key}/access")
+def provide_discovered_capability_access(
+    agent_id: int,
+    requirement_key: str,
+    data: EmployeeBuilderDiscoveryAccessRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Provide only the credential missing from a discovered API capability."""
+
+    key = normalize_requirement_key(requirement_key)
+    if not key:
+        raise HTTPException(400, "Capability requirement key is invalid")
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Capability access setup is available only for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        if agent.enabled and pending is None:
+            raise HTTPException(409, "Stage a live revision before changing discovered connections")
+
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
+        if not isinstance(compiled_spec, dict):
+            raise HTTPException(409, "Build the employee before providing capability access")
+
+        updated = deepcopy(compiled_spec)
+        requirements = [
+            dict(item) if isinstance(item, dict) else item
+            for item in (updated.get("requirements") or [])
+        ]
+        requirement = next(
+            (
+                item for item in requirements
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HTTPException(404, "Capability requirement not found")
+
+        discovery = requirement.get("discovery")
+        if not isinstance(discovery, dict):
+            raise HTTPException(409, "This requirement has no discovered API contract")
+        if str(discovery.get("status") or "") not in {
+            "contract_found",
+            "operation_selection_required",
+        }:
+            raise HTTPException(409, "Discover the API contract before providing access")
+
+        base_url = str(discovery.get("base_url") or "").strip().rstrip("/")
+        operations = _bounded_connection_operations(
+            requirement.get("integration_operations")
+            if isinstance(requirement.get("integration_operations"), dict)
+            else {}
+        )
+        if not base_url or not operations:
+            raise HTTPException(409, "Discovered API contract is incomplete")
+
+        schemes = [
+            item
+            for item in (discovery.get("auth_schemes") or [])
+            if isinstance(item, dict)
+            and str(item.get("auth_type") or "") in {
+                "bearer", "api_key_header", "api_key_query", "basic"
+            }
+        ]
+        if len(schemes) > 1:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "auth_scheme_selection_required",
+                    "schemes": schemes,
+                    "message": "The API exposes multiple authentication schemes; choose the intended provider authorization method.",
+                },
+            )
+
+        access_mode = str(discovery.get("customer_access") or "unknown").strip().lower()
+        scheme = dict(schemes[0]) if schemes else {}
+        auth_type = str(scheme.get("auth_type") or "").strip().lower()
+        if not auth_type and access_mode == "api_key":
+            auth_type = "bearer"
+        if not auth_type:
+            raise HTTPException(
+                409,
+                "Xvond could not determine a safe generic authentication scheme from the API contract",
+            )
+
+        auth_config: dict = {"auth_type": auth_type}
+        if auth_type in {"bearer", "api_key_header", "api_key_query"}:
+            token = str(data.api_key or "").strip()
+            if not token:
+                raise HTTPException(400, "API key or token is required")
+            auth_config["api_key"] = token
+            if auth_type in {"api_key_header", "api_key_query"}:
+                name = str(scheme.get("api_key_name") or "").strip()
+                if not name:
+                    raise HTTPException(409, "API key location is missing from the discovered contract")
+                auth_config["api_key_name"] = name
+        elif auth_type == "basic":
+            username = str(data.username or "").strip()
+            password = str(data.password or "")
+            if not username or not password:
+                raise HTTPException(400, "Username and password are required")
+            auth_config["username"] = username
+            auth_config["password"] = password
+
+        contract = {
+            "base_url": base_url,
+            "operations": operations,
+        }
+        evidence = api_connection_probe(contract, auth_config=auth_config)
+        if not evidence:
+            raise HTTPException(
+                409,
+                "Xvond could not safely validate these credentials using a read-only API operation",
+            )
+
+        integration_config = {
+            "base_url": base_url,
+            "validation_endpoint": str(evidence.get("endpoint") or ""),
+            "operations": operations,
+            "_xvond_validation": evidence,
+            "_xvond_discovery": {
+                "source": discovery.get("source"),
+                "docs_url": discovery.get("docs_url"),
+                "requirement_key": key,
+            },
+            **auth_config,
+        }
+        validate_integration_config("custom_api", integration_config)
+
+        current = (
+            db.query(CompanyIntegration)
+            .filter(
+                CompanyIntegration.company_id == company.id,
+                CompanyIntegration.enabled.is_(True),
+            )
+            .count()
+        )
+        service_limits.check_current(
+            db,
+            company.id,
+            "ai_agents",
+            "integrations",
+            current,
+        )
+
+        integration = CompanyIntegration(
+            company_id=company.id,
+            integration_type="custom_api",
+            name=(
+                str(discovery.get("service_hint") or "").strip()
+                or str(discovery.get("contract_title") or "").strip()
+                or key.replace("_", " ").title()
+            )[:200],
+            config=integration_config,
+            enabled=True,
+        )
+        db.add(integration)
+        db.flush()
+
+        requirement["integration_id"] = integration.id
+        requirement["integration_type"] = "custom_api"
+        requirement["integration_operations"] = operations
+        requirement["fulfillment_mode"] = "external_connection"
+        requirement["validation_required"] = True
+        requirement["requires_connection"] = True
+        requirement["status"] = "xvond_build"
+        requirement["delivery_mode"] = "compose"
+        discovery = dict(discovery)
+        discovery["status"] = "resolved"
+        discovery["credential_configured"] = True
+        requirement["discovery"] = discovery
+
+        updated["requirements"] = requirements
+        updated["setup_required"] = [
+            item
+            for item in (updated.get("setup_required") or [])
+            if normalize_requirement_key(item) != key
+        ]
+        updated, unresolved = _resolve_bound_graph_operations(
+            updated,
+            requirement_key=key,
+            operations=operations,
+        )
+        if unresolved:
+            db.delete(integration)
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "api_operation_selection_required",
+                    "requirement_key": key,
+                    "unresolved": unresolved,
+                },
+            )
+
+        if isinstance(pending, dict):
+            pending["compiled_spec"] = updated
+            pending["status"] = "built"
+            pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            _invalidate_preview_evidence(pending)
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": "connected_to_pending_revision",
+                "agent_id": agent.id,
+                "requirement_key": key,
+                "credential_type": auth_type,
+                "live_employee_unchanged": True,
+            }
+
+        updated, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=agent.id,
+            spec=updated,
+        )
+        builder["compiled_spec"] = updated
+        builder["delivery"] = delivery
+        builder["missing_information"] = list(updated.get("setup_required") or [])
+        _invalidate_preview_evidence(builder)
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        agent.system_prompt = build_compiled_employee_system_prompt(
+            owner_name=company.name,
+            spec=updated,
+        )
+        db.commit()
+        return {
+            "status": "connected",
+            "agent_id": agent.id,
+            "requirement_key": key,
+            "credential_type": auth_type,
+            "integration_id": integration.id,
         }
     except HTTPException:
         db.rollback()
