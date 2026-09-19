@@ -1058,12 +1058,21 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                 if key and key in requirements_by_key
             ]
 
+            runtime_input_conflicts: list[str] = []
             if requirement_keys:
                 routine_runtime_inputs: dict = {}
                 for requirement_key in requirement_keys:
                     requirement = requirements_by_key[requirement_key]
-                    for key, value in (requirement.get("runtime_inputs") or {}).items():
-                        routine_runtime_inputs.setdefault(str(key), value)
+                    for raw_key, value in (requirement.get("runtime_inputs") or {}).items():
+                        key = str(raw_key)
+                        if (
+                            key in routine_runtime_inputs
+                            and routine_runtime_inputs[key] != value
+                        ):
+                            if key not in runtime_input_conflicts:
+                                runtime_input_conflicts.append(key)
+                            continue
+                        routine_runtime_inputs.setdefault(key, value)
             elif routine.get("requirement_scope_declared") is True:
                 # v10+ explicit empty scope means this routine intentionally
                 # consumes no requirement-owned runtime defaults.
@@ -1073,24 +1082,28 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                 # whose routines never had a requirement scope field.
                 routine_runtime_inputs = dict(shared_graph_runtime_inputs)
 
-            status, workflow_id = _provision_self_service_graph_trigger(
-                db,
-                company=company,
-                timezone=company_timezone,
-                agent_id=agent_id,
-                execution_graph=graph,
-                actions=actions,
-                action_plan=action_plan,
-                runtime_inputs=routine_runtime_inputs,
-                routine_id=routine_id,
-                routine_name=routine_name,
-                requirement_keys=requirement_keys,
-            )
+            if runtime_input_conflicts:
+                status, workflow_id = "runtime_input_conflict", None
+            else:
+                status, workflow_id = _provision_self_service_graph_trigger(
+                    db,
+                    company=company,
+                    timezone=company_timezone,
+                    agent_id=agent_id,
+                    execution_graph=graph,
+                    actions=actions,
+                    action_plan=action_plan,
+                    runtime_inputs=routine_runtime_inputs,
+                    routine_id=routine_id,
+                    routine_name=routine_name,
+                    requirement_keys=requirement_keys,
+                )
             graph_triggers.append(
                 {
                     "routine_id": routine_id,
                     "routine_name": routine_name,
                     "requirement_keys": requirement_keys,
+                    "runtime_input_conflicts": runtime_input_conflicts,
                     "status": status,
                     "workflow_id": workflow_id,
                     "trigger_type": str(
