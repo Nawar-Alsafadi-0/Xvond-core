@@ -63,16 +63,6 @@ def _state_cipher() -> Fernet:
     return Fernet(key)
 
 
-def _pkce_verifier() -> str:
-    # token_urlsafe uses RFC 3986 unreserved characters and provides ample entropy.
-    value = secrets.token_urlsafe(64)
-    return value[:128]
-
-
-def _pkce_challenge(verifier: str) -> str:
-    return _b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
-
-
 def issue_google_calendar_oauth_state(
     *,
     user_id: int,
@@ -81,9 +71,8 @@ def issue_google_calendar_oauth_state(
     name: str,
     config: dict,
     now: int | None = None,
-) -> tuple[str, str]:
+) -> str:
     issued_at = int(time.time() if now is None else now)
-    verifier = _pkce_verifier()
     payload = {
         "v": 1,
         "user_id": int(user_id),
@@ -97,7 +86,6 @@ def issue_google_calendar_oauth_state(
             "slot_minutes": int(config.get("slot_minutes") or 30),
         },
         "nonce": secrets.token_urlsafe(24),
-        "code_verifier": verifier,
         "iat": issued_at,
         "exp": issued_at + STATE_TTL_SECONDS,
     }
@@ -107,7 +95,7 @@ def issue_google_calendar_oauth_state(
         sort_keys=True,
     ).encode("utf-8")
     state = _state_cipher().encrypt(encoded).decode("ascii")
-    return state, _pkce_challenge(verifier)
+    return state
 
 
 def verify_google_calendar_oauth_state(
@@ -134,17 +122,10 @@ def verify_google_calendar_oauth_state(
         raise GoogleCalendarOAuthError("Google Calendar OAuth state has expired")
     if not str(payload.get("nonce") or "").strip():
         raise GoogleCalendarOAuthError("Google Calendar OAuth state is incomplete")
-    verifier = str(payload.get("code_verifier") or "")
-    if not 43 <= len(verifier) <= 128:
-        raise GoogleCalendarOAuthError("Google Calendar OAuth state is incomplete")
     return payload
 
 
-def build_google_calendar_authorization_url(
-    *,
-    state: str,
-    code_challenge: str,
-) -> str:
+def build_google_calendar_authorization_url(*, state: str) -> str:
     if not google_calendar_oauth_ready():
         raise GoogleCalendarOAuthError("Google Calendar OAuth is not configured")
     params = {
@@ -156,17 +137,11 @@ def build_google_calendar_authorization_url(
         "include_granted_scopes": "true",
         "prompt": "consent",
         "state": state,
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256",
     }
     return GOOGLE_AUTHORIZATION_URL + "?" + urlencode(params)
 
 
-def exchange_google_calendar_code(
-    *,
-    code: str,
-    code_verifier: str,
-) -> dict:
+def exchange_google_calendar_code(*, code: str) -> dict:
     if not google_calendar_oauth_ready():
         raise GoogleCalendarOAuthError("Google Calendar OAuth is not configured")
     try:
@@ -180,7 +155,6 @@ def exchange_google_calendar_code(
                 "client_secret": settings.GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET,
                 "redirect_uri": google_calendar_oauth_redirect_uri(),
                 "grant_type": "authorization_code",
-                "code_verifier": code_verifier,
             },
             timeout=15,
             max_response_bytes=128_000,
