@@ -397,7 +397,10 @@ def _persist_graph_retry_checkpoint(
 ) -> None:
     run = db.get(AutomationRun, int(run_id))
     if run is None:
-        raise ValueError("Automation run checkpoint is unavailable")
+        # execute_step is also used directly by isolated previews/tests. Durable
+        # retry is a full AutomationRun feature, so direct step execution stays
+        # side-effect compatible without manufacturing a fake run.
+        return
 
     safe, reason = _graph_retry_safety(
         db,
