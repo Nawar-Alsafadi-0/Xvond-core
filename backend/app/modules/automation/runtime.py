@@ -860,6 +860,218 @@ class AutomationRuntime:
             db.commit()
             raise
 
+    def resume_wait(
+        self,
+        db,
+        *,
+        company_id: int,
+        workflow: AutomationWorkflow,
+        run: AutomationRun,
+        now: datetime | None = None,
+    ) -> AutomationRun:
+        if run.company_id != company_id or workflow.company_id != company_id:
+            raise ValueError("Waiting run does not belong to company")
+        if run.workflow_id != workflow.id:
+            raise ValueError("Waiting run does not belong to workflow")
+        if run.status != "waiting_time":
+            raise ValueError("Automation run is not waiting for time")
+        if run.resume_at is None:
+            raise ValueError("Automation wait deadline is missing")
+
+        current = now or _utcnow_naive()
+        if current.tzinfo is not None:
+            current = current.astimezone(UTC).replace(tzinfo=None)
+        if run.resume_at > current:
+            raise ValueError("Automation wait is not due yet")
+
+        output = dict(run.output_data or {})
+        wait_checkpoint = output.get("wait")
+        if not isinstance(wait_checkpoint, dict):
+            raise ValueError("Automation wait checkpoint is missing")
+
+        saved_workflow_fingerprint = str(
+            wait_checkpoint.get("workflow_fingerprint") or ""
+        ).strip()
+        if (
+            saved_workflow_fingerprint
+            and saved_workflow_fingerprint
+            != _checkpoint_fingerprint(workflow.steps or [])
+        ):
+            raise ValueError("Automation workflow changed after the wait checkpoint")
+
+        step_index = int(wait_checkpoint.get("workflow_step_index") or 0)
+        if not 0 <= step_index < len(workflow.steps or []):
+            raise ValueError("Automation wait step is invalid")
+
+        state = dict(run.input_data or {})
+        saved_state = output.get("state")
+        if isinstance(saved_state, dict):
+            state.update(saved_state)
+        state.pop("_xvond_approved_request_id", None)
+        state.pop("_xvond_graph_resume", None)
+
+        saved_graph_resume = wait_checkpoint.get("graph_resume")
+        if isinstance(saved_graph_resume, dict):
+            state["_xvond_graph_resume"] = {
+                "workflow_step_index": step_index,
+                **deepcopy(saved_graph_resume),
+            }
+        else:
+            state["_xvond_graph_resume"] = {
+                "workflow_step_index": step_index,
+                "node_id": str(wait_checkpoint.get("node_id") or ""),
+                "node_outputs": deepcopy(wait_checkpoint.get("node_outputs") or {}),
+                "wait_completed": True,
+                "resume_at": str(wait_checkpoint.get("resume_at") or ""),
+            }
+
+        step_results = list(output.get("steps") or [])
+        execution_key = str(state.get("_xvond_execution_key") or "")
+        trace = deepcopy(output.get("trace") or {})
+        if not isinstance(trace, dict) or not trace.get("trace_id"):
+            trace = _new_trace(
+                company_id=company_id,
+                workflow=workflow,
+                execution_key=execution_key,
+            )
+        trace["status"] = "running"
+        trace["finished_at"] = None
+
+        run.status = "running"
+        run.resume_at = None
+        run.error_message = None
+        db.flush()
+
+        try:
+            for index in range(step_index, len(workflow.steps or [])):
+                step = (workflow.steps or [])[index]
+                span_started_at = _trace_iso()
+                span_started_perf = perf_counter()
+                try:
+                    result = self.execute_step(
+                        db,
+                        company_id,
+                        step,
+                        state,
+                        run_id=run.id,
+                        step_index=index,
+                    )
+                except AutomationWaitRequired as next_wait:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_time",
+                        phase="resume_wait",
+                        node_id=next_wait.node_id,
+                    )
+                    raise
+                except AutomationApprovalRequired as approval:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_approval",
+                        phase="resume_wait",
+                        node_id=approval.node_id,
+                    )
+                    raise
+                except Exception as exc:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="failed",
+                        phase="resume_wait",
+                        error=str(exc),
+                    )
+                    raise
+
+                _append_step_span(
+                    trace,
+                    index=index,
+                    step=step,
+                    started_at=span_started_at,
+                    started_perf=span_started_perf,
+                    status="success",
+                    phase="resume_wait",
+                )
+                step_results.append(
+                    {
+                        "index": index,
+                        "type": step.get("type"),
+                        "label": step.get("label"),
+                        "result": result,
+                    }
+                )
+                if isinstance(result, dict):
+                    state.update(result)
+                state.pop("_xvond_graph_resume", None)
+
+            run.status = "success"
+            run.resume_at = None
+            run.finished_at = _utcnow_naive()
+            trace["status"] = "success"
+            trace["finished_at"] = _trace_iso(run.finished_at)
+            run.output_data = {
+                "state": state,
+                "steps": step_results,
+                "trace": trace,
+                "wait": {
+                    **wait_checkpoint,
+                    "status": "resumed",
+                },
+            }
+            db.commit()
+            db.refresh(run)
+            return run
+        except AutomationWaitRequired as next_wait:
+            state.pop("_xvond_graph_resume", None)
+            return _store_wait_checkpoint(
+                db,
+                run=run,
+                workflow=workflow,
+                wait=next_wait,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+            )
+        except AutomationApprovalRequired as approval:
+            state.pop("_xvond_graph_resume", None)
+            return _store_approval_checkpoint(
+                db,
+                run=run,
+                workflow=workflow,
+                approval=approval,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+            )
+        except Exception as exc:
+            run.status = "failed"
+            run.resume_at = None
+            run.error_message = str(exc)[:2000]
+            run.finished_at = _utcnow_naive()
+            trace["status"] = "failed"
+            trace["finished_at"] = _trace_iso(run.finished_at)
+            run.output_data = {
+                "state": state,
+                "steps": step_results,
+                "trace": trace,
+                "wait": {
+                    **wait_checkpoint,
+                    "status": "resume_failed",
+                },
+            }
+            db.commit()
+            raise
+
     def execute_step(
         self,
         db,
