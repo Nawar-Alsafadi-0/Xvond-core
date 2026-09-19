@@ -677,6 +677,85 @@ def test_self_service_graph_schedule_owns_the_full_pipeline(database):
         ]
 
 
+
+def test_novel_graph_backed_capability_is_ready_without_legacy_execution_plan(database):
+    factory, _ = database
+    brief = (
+        "Every 60 minutes inspect a public specialist source, reason about the result, "
+        "and record the novel finding automatically."
+    )
+    payload = {
+        "role": "Novel specialist worker",
+        "scope": "personal",
+        "requirements": [{
+            "key": "never_seen_before_capability",
+            "kind": "custom",
+            "purpose": "Record the novel finding",
+            "primitives": ["web_research", "content_generation", "scheduler", "workflow_engine"],
+            "schedule": {
+                "kind": "interval",
+                "every_minutes": 60,
+                "source_text": "Every 60 minutes",
+            },
+        }],
+        "permissions": [{"action": "Record the novel finding", "mode": "automatic"}],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {
+                "type": "schedule",
+                "schedule": {
+                    "kind": "interval",
+                    "every_minutes": 60,
+                    "source_text": "Every 60 minutes",
+                },
+            },
+            "nodes": [
+                {
+                    "id": "inspect",
+                    "type": "ai",
+                    "depends_on": [],
+                    "params": {"prompt": "Inspect and reason about the supplied specialist source."},
+                },
+                {
+                    "id": "record",
+                    "type": "action",
+                    "depends_on": ["inspect"],
+                    "params": {
+                        "action_type": "never_seen_before_capability",
+                        "arguments": {"finding": "$nodes.inspect.ai_response"},
+                    },
+                },
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={"never_seen_before_capability": "automatic"},
+    )
+    result = api.compile_employee(1, USER)
+
+    requirement = result["spec"]["requirements"][0]
+    assert requirement["execution_status"] == "ready"
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "ready"
+
+    with factory() as db:
+        action = reveal_config(_assignment(db).config)["actions"]["never_seen_before_capability"]
+        destination = action["destination"]
+        assert destination["graph_backed"] is True
+        assert destination["delivery_mode"] == "graph"
+        assert destination["execution_plan"] == []
+        workflow = db.query(AutomationWorkflow).one()
+        assert [node["type"] for node in workflow.steps[0]["graph"]["nodes"]] == ["ai", "action"]
+
+
 def test_self_service_media_generation_schedule_builds_ai_media_then_action(database):
     factory, _ = database
     brief, payload = _scheduled_payload()

@@ -340,6 +340,17 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
     if fulfillment_mode == "external_connection" and requirement.get("integration_id"):
         return build_external_integration_action_config(requirement=requirement, spec=spec)
 
+    graph_backed = any(
+        key in graph_action_types(routine.get("graph") or {})
+        for routine in _compiled_execution_routines(spec)
+        if isinstance(routine, dict)
+    )
+    legacy_plan = [
+        dict(step)
+        for step in (requirement.get("execution_plan") or [])
+        if isinstance(step, dict)
+    ][:20]
+
     return {
         "enabled": True,
         "_xvond_permission_mode": _permission_mode(spec, requirement),
@@ -352,13 +363,14 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
             "type": "xvond_internal",
             "adapter": "generic_capability",
             "capability_key": key,
-            "delivery_mode": "compose",
+            "delivery_mode": "graph" if graph_backed else "legacy_plan",
+            "graph_backed": graph_backed,
             "primitives": primitives,
-            "execution_plan": [
-                dict(step)
-                for step in (requirement.get("execution_plan") or [])
-                if isinstance(step, dict)
-            ][:20],
+            # execution_plan is retained only for pre-graph/tiny legacy contracts.
+            # New universal employees execute their real work through the
+            # compiled execution graph and use this action as a bounded side-effect
+            # contract only when the graph explicitly references it.
+            "execution_plan": [] if graph_backed else legacy_plan,
             "allowed_hosts": _grounded_https_hosts(spec),
             "job_summary": str(spec.get("summary") or "")[:1000],
             "job_brief": str(spec.get("job_brief") or "")[:2000],
@@ -976,11 +988,18 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "business_record":
             execution_status = "ready"
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "generic_capability":
-            execution_status = (
-                "ready"
-                if generic_capability_readiness(action).get("ready") is True
-                else "setup_required"
-            )
+            # Graph-backed capabilities are executed by the universal graph
+            # runtime. Requiring the old four-op execution_plan here would make
+            # novel employees look unready even though their compiled graph is
+            # complete and runnable.
+            if destination.get("graph_backed") is True:
+                execution_status = "ready"
+            else:
+                execution_status = (
+                    "ready"
+                    if generic_capability_readiness(action).get("ready") is True
+                    else "setup_required"
+                )
         elif destination.get("type") == "workflow_engine":
             execution_status = "adapter_required"
         else:

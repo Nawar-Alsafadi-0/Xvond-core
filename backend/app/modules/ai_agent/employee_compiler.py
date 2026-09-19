@@ -17,7 +17,7 @@ from backend.app.modules.channels.catalog import (
 )
 
 
-COMPILER_VERSION = 10
+COMPILER_VERSION = 11
 
 GENERIC_PRIMITIVES = {
     "workflow_engine",
@@ -315,12 +315,13 @@ Rules:
 - runtime_inputs may contain only simple scalar values explicitly present in the customer's Job Brief and required by execution_plan. Never invent runtime input values.
 - If the job needs private data or an external account, include the relevant connection requirement and customer input.
 - Do not claim a system or account is already connected.
-- For xvond_build work, include execution_plan only when the job can be represented with the allowed runtime ops: http_get_json, extract, compare, notify.
-- execution_plan is declarative data, never code. Do not emit Python, JavaScript, shell commands, SQL, arbitrary HTTP methods, headers, credentials or secrets.
-- http_get_json reads an HTTPS JSON endpoint from a named customer/runtime detail field such as url.
-- extract reads a dot-separated path from a previous step.
-- compare evaluates a previous step against either a literal value or a named runtime detail field.
-- notify creates an idempotent Xvond notification/report; it is not an external email/social/message send.
+- execution_graph/execution_routines are the canonical executable program for every non-trivial employee. Always prefer the graph runtime over requirement.execution_plan. Never reduce a novel job to the legacy four-operation execution_plan when the graph can represent it.
+- requirement.execution_plan exists only for backward compatibility with older compiled employees. For newly compiled work, leave it empty unless the requested job is genuinely a tiny read-only fetch/extract/compare/internal-notify task and no richer graph behavior is required.
+- A novel capability must become executable graph composition, not merely a named requirement. If it needs reasoning, browsing, transformation, iteration, state, waiting, media, an external action, or multiple steps, represent those steps explicitly in execution_graph/execution_routines.
+- When the requested job needs a capability that cannot execute with native graph nodes alone, represent the missing side effect as an action requirement and make the graph depend on that action. Ask for a customer connection only when external account access/credentials are genuinely required.
+- execution_plan is declarative legacy data, never code. Do not emit Python, JavaScript, shell commands, SQL, arbitrary HTTP methods, headers, credentials or secrets.
+- http_get_json reads an HTTPS JSON endpoint; web_fetch/browser cover public web work; action nodes perform authorized side effects through requirement contracts.
+- The final compiled employee should be runnable end-to-end once its explicitly reported setup/connection requirements are satisfied; do not emit advisory-only capabilities for work the customer asked Xvond to perform.
 """.strip()
 
 
