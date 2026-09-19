@@ -132,6 +132,12 @@ class EmployeeBuilderIntegrationBindRequest(BaseModel):
     operation_map: dict[str, str] = Field(default_factory=dict)
 
 
+class EmployeeBuilderDiscoveryAccessRequest(BaseModel):
+    api_key: str | None = Field(default=None, min_length=1, max_length=8000)
+    username: str | None = Field(default=None, min_length=1, max_length=500)
+    password: str | None = Field(default=None, min_length=1, max_length=8000)
+
+
 class EmployeeBuilderSetupAnswerRequest(BaseModel):
     value: str | None = Field(default=None, max_length=8000)
     values: dict[str, str] = Field(default_factory=dict)
