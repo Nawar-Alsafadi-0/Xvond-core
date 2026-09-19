@@ -85,6 +85,11 @@ from backend.app.modules.integrations.catalog import (
     integration_packaged_operations,
     integration_requires_operation_endpoints,
     integration_validation_ready,
+    validate_integration_config,
+)
+from backend.app.modules.integrations.capability_discovery import (
+    discover_openapi_contract,
+    public_api_probe,
 )
 
 router = APIRouter(
@@ -124,6 +129,7 @@ class EmployeeBuilderIntegrationBindRequest(BaseModel):
     availability_endpoint: str | None = Field(default=None, max_length=500)
     cancel_endpoint: str | None = Field(default=None, max_length=500)
     operations: dict[str, dict] = Field(default_factory=dict)
+    operation_map: dict[str, str] = Field(default_factory=dict)
 
 
 class EmployeeBuilderSetupAnswerRequest(BaseModel):
@@ -656,6 +662,176 @@ def _compiled_discovery_summary(spec: dict | None) -> dict:
     }
 
 
+def _attempt_compiled_capability_discovery(
+    db,
+    *,
+    company: Company,
+    agent: AIAgent,
+    spec: dict,
+) -> tuple[dict, list[dict]]:
+    """Resolve pending discovery plans during Build without user intervention."""
+    updated = deepcopy(spec)
+    requirements = [
+        dict(item) if isinstance(item, dict) else item
+        for item in (updated.get("requirements") or [])
+    ]
+    outcomes: list[dict] = []
+
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        key = normalize_requirement_key(requirement.get("key"))
+        discovery = requirement.get("discovery")
+        if not key or not isinstance(discovery, dict) or discovery.get("needed") is not True:
+            continue
+        if str(discovery.get("status") or "pending_discovery") == "resolved":
+            continue
+
+        result = discover_openapi_contract(discovery)
+        if result.get("status") != "resolved" or not isinstance(result.get("contract"), dict):
+            discovery = dict(discovery)
+            discovery["status"] = "not_found"
+            discovery["attempted"] = list(result.get("attempted") or [])[:20]
+            requirement["discovery"] = discovery
+            outcomes.append({"requirement_key": key, "status": "not_found"})
+            continue
+
+        contract = dict(result["contract"])
+        operations = _bounded_connection_operations(contract.get("operations") or {})
+        if not operations:
+            outcomes.append({"requirement_key": key, "status": "no_operations"})
+            continue
+
+        discovery = dict(discovery)
+        discovery.update({
+            "status": "contract_found",
+            "source": result.get("source"),
+            "docs_url": result.get("docs_url"),
+            "contract_title": str(contract.get("title") or "")[:200],
+            "base_url": str(contract.get("base_url") or "")[:1200],
+            "operation_count": len(operations),
+            "attempted": list(result.get("attempted") or [])[:20],
+        })
+        requirement["discovery"] = discovery
+        requirement["integration_operations"] = operations
+        requirement["requires_connection"] = True
+        requirement["fulfillment_mode"] = "external_connection"
+        requirement["status"] = "connection_required"
+        requirement["delivery_mode"] = "connect_and_compose"
+
+        auto_provisioned = False
+        access_mode = str(discovery.get("customer_access") or "unknown").strip().lower()
+        if access_mode == "none":
+            evidence = public_api_probe(contract)
+            base_url = str(contract.get("base_url") or "").strip().rstrip("/")
+            if evidence and base_url:
+                integration_config = {
+                    "base_url": base_url,
+                    "validation_endpoint": str(evidence.get("endpoint") or ""),
+                    "auth_type": "none",
+                    "operations": operations,
+                    "_xvond_validation": evidence,
+                    "_xvond_discovery": {
+                        "source": result.get("source"),
+                        "docs_url": result.get("docs_url"),
+                        "requirement_key": key,
+                    },
+                }
+                validate_integration_config("custom_api", integration_config)
+                current = (
+                    db.query(CompanyIntegration)
+                    .filter(
+                        CompanyIntegration.company_id == company.id,
+                        CompanyIntegration.enabled.is_(True),
+                    )
+                    .count()
+                )
+                service_limits.check_current(
+                    db, company.id, "ai_agents", "integrations", current
+                )
+                integration = CompanyIntegration(
+                    company_id=company.id,
+                    integration_type="custom_api",
+                    name=(
+                        str(discovery.get("service_hint") or "").strip()
+                        or str(contract.get("title") or "").strip()
+                        or key.replace("_", " ").title()
+                    )[:200],
+                    config=integration_config,
+                    enabled=True,
+                )
+                db.add(integration)
+                db.flush()
+                requirement["integration_id"] = integration.id
+                requirement["integration_type"] = "custom_api"
+                requirement["validation_required"] = True
+                requirement["status"] = "xvond_build"
+                requirement["delivery_mode"] = "compose"
+                discovery["status"] = "resolved"
+                discovery["auto_provisioned"] = True
+                auto_provisioned = True
+
+        outcomes.append({
+            "requirement_key": key,
+            "status": "resolved" if auto_provisioned else "contract_found",
+            "customer_access": access_mode,
+            "operation_count": len(operations),
+            "_integration_id": requirement.get("integration_id") if auto_provisioned else None,
+        })
+
+    updated["requirements"] = requirements
+    for outcome in outcomes:
+        if outcome.get("status") == "resolved":
+            resolved_key = normalize_requirement_key(outcome.get("requirement_key"))
+            updated["setup_required"] = [
+                item
+                for item in (updated.get("setup_required") or [])
+                if normalize_requirement_key(item) != resolved_key
+            ]
+            matching = next(
+                (
+                    item for item in requirements
+                    if isinstance(item, dict)
+                    and normalize_requirement_key(item.get("key")) == resolved_key
+                ),
+                None,
+            )
+            if isinstance(matching, dict):
+                updated, unresolved = _resolve_bound_graph_operations(
+                    updated,
+                    requirement_key=resolved_key,
+                    operations=matching.get("integration_operations") or {},
+                )
+                if unresolved:
+                    matching = next(
+                        item for item in updated["requirements"]
+                        if isinstance(item, dict)
+                        and normalize_requirement_key(item.get("key")) == resolved_key
+                    )
+                    matching["status"] = "connection_required"
+                    matching["delivery_mode"] = "connect_and_compose"
+                    matching.pop("integration_id", None)
+                    matching.pop("integration_type", None)
+                    matching["discovery"]["status"] = "operation_selection_required"
+                    orphan_id = outcome.get("_integration_id")
+                    if orphan_id:
+                        orphan = (
+                            db.query(CompanyIntegration)
+                            .filter(
+                                CompanyIntegration.id == int(orphan_id),
+                                CompanyIntegration.company_id == company.id,
+                            )
+                            .first()
+                        )
+                        if orphan is not None:
+                            db.delete(orphan)
+                    outcome["status"] = "operation_selection_required"
+
+    for outcome in outcomes:
+        outcome.pop("_integration_id", None)
+    return updated, outcomes
+
+
 def _compiler_connection_context(db, *, company_id: int) -> list[dict]:
     """Expose validated connection capabilities to the compiler without secrets or IDs."""
     rows = (
@@ -1051,6 +1227,12 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
                 candidate_response.text,
                 job_brief=job_brief,
             )
+            candidate_spec, discovery_outcomes = _attempt_compiled_capability_discovery(
+                db,
+                company=company,
+                agent=agent,
+                spec=candidate_spec,
+            )
             response = candidate_response
             selected = candidate
             compiled_spec = candidate_spec
@@ -1175,6 +1357,13 @@ def _compile_staged_employee_spec(
                 tools=None,
             )
             spec = parse_compiler_response(response.text, job_brief=job_brief)
+            company = db.query(Company).filter(Company.id == company_id).first()
+            spec, discovery_outcomes = _attempt_compiled_capability_discovery(
+                db,
+                company=company,
+                agent=agent,
+                spec=spec,
+            )
             spec = _carry_forward_requirement_bindings(previous_spec, spec)
             spec, _auto_bound = _auto_bind_single_packaged_integrations(
                 db,
@@ -2657,6 +2846,134 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
     return result
 
 
+def _operation_match_tokens(value) -> set[str]:
+    stop = {
+        "a", "an", "the", "to", "for", "of", "and", "or", "api", "http",
+        "action", "operation", "request", "execute", "employee", "integration",
+        "system", "external", "data",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", str(value or "").lower())
+        if len(token) > 1 and token not in stop
+    }
+
+
+def _resolve_bound_graph_operations(
+    spec: dict,
+    *,
+    requirement_key: str,
+    operations: dict,
+    operation_map: dict | None = None,
+) -> tuple[dict, list[dict]]:
+    """Bind graph action nodes to real imported API operations, fail-closed if ambiguous."""
+    updated = deepcopy(spec)
+    available = {
+        normalize_requirement_key(key): dict(value)
+        for key, value in (operations or {}).items()
+        if normalize_requirement_key(key) and isinstance(value, dict)
+    }
+    explicit = {
+        str(node_id).strip(): normalize_requirement_key(operation)
+        for node_id, operation in (operation_map or {}).items()
+        if str(node_id).strip() and normalize_requirement_key(operation)
+    }
+    unresolved: list[dict] = []
+
+    def choose(node: dict, *, locator: str) -> str | None:
+        params = node.get("params") if isinstance(node.get("params"), dict) else {}
+        node_id = str(node.get("id") or "").strip()
+        requested = normalize_requirement_key(params.get("operation"))
+        if requested and requested in available:
+            return requested
+        forced = explicit.get(locator) or explicit.get(node_id)
+        if forced:
+            return forced if forced in available else None
+        if len(available) == 1:
+            return next(iter(available))
+        context_parts = [
+            node_id,
+            node.get("label"),
+            params.get("action_type"),
+            (params.get("arguments") or {}).keys()
+            if isinstance(params.get("arguments"), dict)
+            else "",
+        ]
+        context_tokens = _operation_match_tokens(" ".join(
+            " ".join(str(item) for item in part)
+            if not isinstance(part, str) and hasattr(part, "__iter__")
+            else str(part or "")
+            for part in context_parts
+        ))
+        ranked: list[tuple[int, str]] = []
+        for name, config in available.items():
+            name_tokens = _operation_match_tokens(name.replace("_", " "))
+            description_tokens = _operation_match_tokens(config.get("description"))
+            score = (4 * len(context_tokens & name_tokens)) + len(
+                context_tokens & description_tokens
+            )
+            ranked.append((score, name))
+        ranked.sort(reverse=True)
+        if ranked and ranked[0][0] > 0 and (
+            len(ranked) == 1 or ranked[0][0] > ranked[1][0]
+        ):
+            return ranked[0][1]
+        return None
+
+    def visit(graph: dict, *, prefix: str) -> None:
+        nodes = graph.get("nodes") if isinstance(graph, dict) else None
+        if not isinstance(nodes, list):
+            return
+        for index, raw in enumerate(nodes):
+            if not isinstance(raw, dict):
+                continue
+            node_id = str(raw.get("id") or f"node_{index + 1}").strip()
+            locator = f"{prefix}/{node_id}" if prefix else node_id
+            node_type = str(raw.get("type") or "").strip().lower()
+            params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
+            if (
+                node_type == "action"
+                and normalize_requirement_key(params.get("action_type"))
+                == requirement_key
+            ):
+                selected = choose(raw, locator=locator)
+                if selected:
+                    params = dict(params)
+                    params["operation"] = selected
+                    raw["params"] = params
+                else:
+                    unresolved.append({
+                        "node_id": node_id,
+                        "locator": locator,
+                        "label": str(raw.get("label") or "")[:200],
+                        "available_operations": sorted(available),
+                    })
+            elif node_type == "foreach":
+                nested = params.get("graph")
+                if isinstance(nested, dict):
+                    visit(nested, prefix=locator)
+
+    graph = updated.get("execution_graph")
+    if isinstance(graph, dict):
+        visit(graph, prefix="primary")
+    routines = updated.get("execution_routines")
+    if isinstance(routines, list):
+        for index, routine in enumerate(routines):
+            if not isinstance(routine, dict):
+                continue
+            routine_id = normalize_requirement_key(
+                routine.get("id") or routine.get("key") or f"routine_{index + 1}"
+            ) or f"routine_{index + 1}"
+            graph = (
+                routine.get("graph")
+                if isinstance(routine.get("graph"), dict)
+                else routine.get("execution_graph")
+            )
+            if isinstance(graph, dict):
+                visit(graph, prefix=routine_id)
+    return updated, unresolved
+
+
 def _relative_endpoint(value: str | None, *, required: bool = False) -> str | None:
     endpoint = str(value or "").strip()
     if not endpoint:
@@ -2668,6 +2985,256 @@ def _relative_endpoint(value: str | None, *, required: bool = False) -> str | No
     if ".." in endpoint.split("/"):
         raise HTTPException(400, "Integration operation endpoints cannot traverse parent paths")
     return "/" + endpoint.lstrip("/")
+
+
+@router.post("/{agent_id}/discover/{requirement_key}")
+def discover_self_service_capability(
+    agent_id: int,
+    requirement_key: str,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Resolve one unseen external capability into a verified executable API contract."""
+
+    key = normalize_requirement_key(requirement_key)
+    if not key:
+        raise HTTPException(400, "Capability requirement key is invalid")
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Capability discovery is available only for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        if agent.enabled and pending is None:
+            raise HTTPException(409, "Stage a live revision before discovering new capabilities")
+
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
+        if not isinstance(compiled_spec, dict):
+            raise HTTPException(409, "Build the employee before capability discovery")
+
+        updated = deepcopy(compiled_spec)
+        requirements = [
+            dict(item) if isinstance(item, dict) else item
+            for item in (updated.get("requirements") or [])
+        ]
+        requirement = next(
+            (
+                item for item in requirements
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HTTPException(404, "Capability requirement not found")
+
+        discovery = requirement.get("discovery")
+        if not isinstance(discovery, dict) or discovery.get("needed") is not True:
+            raise HTTPException(409, "This requirement does not have a pending discovery plan")
+
+        result = discover_openapi_contract(discovery)
+        if result.get("status") != "resolved" or not isinstance(result.get("contract"), dict):
+            discovery = dict(discovery)
+            discovery["status"] = "not_found"
+            discovery["attempted"] = list(result.get("attempted") or [])[:20]
+            requirement["discovery"] = discovery
+            updated["requirements"] = requirements
+            if isinstance(pending, dict):
+                pending["compiled_spec"] = updated
+                pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+                _invalidate_preview_evidence(pending)
+                builder["pending_revision"] = pending
+            else:
+                builder["compiled_spec"] = updated
+                _invalidate_preview_evidence(builder)
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": "not_found",
+                "agent_id": agent.id,
+                "requirement_key": key,
+                "attempted": discovery["attempted"],
+            }
+
+        contract = dict(result["contract"])
+        operations = _bounded_connection_operations(contract.get("operations") or {})
+        if not operations:
+            raise HTTPException(409, "Discovered API contract has no executable operations")
+
+        discovery = dict(discovery)
+        discovery.update(
+            {
+                "status": "contract_found",
+                "source": result.get("source"),
+                "docs_url": result.get("docs_url"),
+                "contract_title": str(contract.get("title") or "")[:200],
+                "base_url": str(contract.get("base_url") or "")[:1200],
+                "operation_count": len(operations),
+                "attempted": list(result.get("attempted") or [])[:20],
+            }
+        )
+        requirement["discovery"] = discovery
+        requirement["integration_operations"] = operations
+        requirement["requires_connection"] = True
+        requirement["fulfillment_mode"] = "external_connection"
+        requirement["status"] = "connection_required"
+        requirement["delivery_mode"] = "connect_and_compose"
+
+        auto_provisioned = False
+        access_mode = str(discovery.get("customer_access") or "unknown").strip().lower()
+        if access_mode == "none":
+            evidence = public_api_probe(contract)
+            base_url = str(contract.get("base_url") or "").strip().rstrip("/")
+            if evidence and base_url:
+                integration_config = {
+                    "base_url": base_url,
+                    "validation_endpoint": str(evidence.get("endpoint") or ""),
+                    "auth_type": "none",
+                    "operations": operations,
+                    "_xvond_validation": evidence,
+                    "_xvond_discovery": {
+                        "source": result.get("source"),
+                        "docs_url": result.get("docs_url"),
+                        "requirement_key": key,
+                    },
+                }
+                validate_integration_config("custom_api", integration_config)
+                current = (
+                    db.query(CompanyIntegration)
+                    .filter(
+                        CompanyIntegration.company_id == company.id,
+                        CompanyIntegration.enabled.is_(True),
+                    )
+                    .count()
+                )
+                service_limits.check_current(
+                    db,
+                    company.id,
+                    "ai_agents",
+                    "integrations",
+                    current,
+                )
+                integration = CompanyIntegration(
+                    company_id=company.id,
+                    integration_type="custom_api",
+                    name=(
+                        str(discovery.get("service_hint") or "").strip()
+                        or str(contract.get("title") or "").strip()
+                        or key.replace("_", " ").title()
+                    )[:200],
+                    config=integration_config,
+                    enabled=True,
+                )
+                db.add(integration)
+                db.flush()
+
+                requirement["integration_id"] = integration.id
+                requirement["integration_type"] = "custom_api"
+                requirement["validation_required"] = True
+                requirement["status"] = "xvond_build"
+                requirement["delivery_mode"] = "compose"
+                discovery["status"] = "resolved"
+                discovery["auto_provisioned"] = True
+                auto_provisioned = True
+
+        updated["requirements"] = requirements
+        if auto_provisioned:
+            updated["setup_required"] = [
+                item
+                for item in (updated.get("setup_required") or [])
+                if normalize_requirement_key(item) != key
+            ]
+        updated, unresolved = _resolve_bound_graph_operations(
+            updated,
+            requirement_key=key,
+            operations=operations,
+        )
+        if auto_provisioned and unresolved:
+            requirement = next(
+                item
+                for item in updated["requirements"]
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            )
+            requirement["status"] = "connection_required"
+            requirement["delivery_mode"] = "connect_and_compose"
+            requirement.pop("integration_id", None)
+            requirement.pop("integration_type", None)
+            requirement["discovery"]["status"] = "operation_selection_required"
+            auto_provisioned = False
+
+        if isinstance(pending, dict):
+            pending["compiled_spec"] = updated
+            pending["status"] = "built"
+            pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            _invalidate_preview_evidence(pending)
+            builder["pending_revision"] = pending
+        else:
+            if auto_provisioned:
+                updated, delivery = provision_compiled_capabilities(
+                    db,
+                    agent_id=agent.id,
+                    spec=updated,
+                )
+                builder["delivery"] = delivery
+                agent.system_prompt = build_compiled_employee_system_prompt(
+                    owner_name=company.name,
+                    spec=updated,
+                )
+            builder["compiled_spec"] = updated
+            builder["missing_information"] = list(updated.get("setup_required") or [])
+            _invalidate_preview_evidence(builder)
+
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.commit()
+        return {
+            "status": "resolved" if auto_provisioned else "contract_found",
+            "agent_id": agent.id,
+            "requirement_key": key,
+            "auto_provisioned": auto_provisioned,
+            "customer_access": access_mode,
+            "docs_url": result.get("docs_url"),
+            "operation_count": len(operations),
+            "unresolved_operations": unresolved,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 @router.post("/{agent_id}/connections/auto-resolve")
@@ -2978,6 +3545,25 @@ def bind_self_service_integration(
 
         compiled_value = dict(compiled_spec)
         compiled_value["requirements"] = requirements
+        compiled_value, unresolved_operations = _resolve_bound_graph_operations(
+            compiled_value,
+            requirement_key=key,
+            operations=operations,
+            operation_map=data.operation_map,
+        )
+        if unresolved_operations:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "api_operation_selection_required",
+                    "requirement_key": key,
+                    "message": (
+                        "Xvond found multiple API operations and could not safely "
+                        "choose one for every employee action."
+                    ),
+                    "unresolved": unresolved_operations,
+                },
+            )
 
         if isinstance(pending, dict):
             compiled_value["setup_required"] = [

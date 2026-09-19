@@ -3822,3 +3822,314 @@ def test_openapi_required_query_parameter_fails_before_http_request(database, mo
         )
         assert ok.success is True
         assert "q=shoes" in captured["url"]
+
+
+def test_build_auto_discovers_and_provisions_public_api(database, monkeypatch):
+    factory, _ = database
+    monkeypatch.setattr(
+        api,
+        "discover_openapi_contract",
+        lambda discovery: {
+            "status": "resolved",
+            "source": "public_docs_search",
+            "docs_url": "https://docs.vendor.example/openapi.json",
+            "attempted": ["https://docs.vendor.example/openapi.json"],
+            "contract": {
+                "title": "Vendor API",
+                "base_url": "https://api.vendor.example",
+                "operations": {
+                    "lookup": {
+                        "method": "GET",
+                        "endpoint": "/lookup",
+                        "input_mode": "query",
+                        "path_params": [],
+                        "required_query_params": [],
+                    }
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "public_api_probe",
+        lambda contract: {
+            "validated": True,
+            "validated_at": "2026-09-19T16:00:00Z",
+            "mode": "discovered_public_api_safe_get",
+            "operation": "lookup",
+            "endpoint": "/lookup",
+            "status_code": 200,
+        },
+    )
+    monkeypatch.setattr(api.service_limits, "check_current", lambda *args, **kwargs: None)
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        agent = db.query(AIAgent).filter(AIAgent.company_id == 1).first()
+        spec = {
+            "requirements": [{
+                "key": "novel_lookup",
+                "kind": "integration",
+                "status": "connection_required",
+                "requires_connection": True,
+                "fulfillment_mode": "external_connection",
+                "discovery": {
+                    "needed": True,
+                    "status": "pending_discovery",
+                    "capability": "Look up novel vendor data",
+                    "customer_access": "none",
+                },
+            }],
+            "setup_required": ["novel_lookup"],
+            "execution_graph": {
+                "version": 1,
+                "trigger": {"type": "manual"},
+                "nodes": [{
+                    "id": "lookup",
+                    "type": "action",
+                    "params": {"action_type": "novel_lookup"},
+                }],
+            },
+        }
+
+        resolved, outcomes = api._attempt_compiled_capability_discovery(
+            db,
+            company=company,
+            agent=agent,
+            spec=spec,
+        )
+
+        requirement = resolved["requirements"][0]
+        assert outcomes[0]["status"] == "resolved"
+        assert requirement["status"] == "xvond_build"
+        assert requirement["integration_type"] == "custom_api"
+        assert requirement["discovery"]["status"] == "resolved"
+        assert resolved["setup_required"] == []
+        assert resolved["execution_graph"]["nodes"][0]["params"]["operation"] == "lookup"
+        integration = db.get(CompanyIntegration, requirement["integration_id"])
+        assert integration is not None
+        assert integration.integration_type == "custom_api"
+
+
+def test_build_discovery_prepares_private_api_but_requests_only_access(database, monkeypatch):
+    factory, _ = database
+    monkeypatch.setattr(
+        api,
+        "discover_openapi_contract",
+        lambda discovery: {
+            "status": "resolved",
+            "source": "grounded_docs_url",
+            "docs_url": "https://docs.private.example/openapi.json",
+            "attempted": ["https://docs.private.example/openapi.json"],
+            "contract": {
+                "title": "Private API",
+                "base_url": "https://api.private.example",
+                "operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                        "path_params": [],
+                        "required_query_params": [],
+                    }
+                },
+            },
+        },
+    )
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        agent = db.query(AIAgent).filter(AIAgent.company_id == 1).first()
+        spec = {
+            "requirements": [{
+                "key": "private_order_api",
+                "kind": "integration",
+                "status": "connection_required",
+                "requires_connection": True,
+                "fulfillment_mode": "external_connection",
+                "discovery": {
+                    "needed": True,
+                    "status": "pending_discovery",
+                    "capability": "Create private orders",
+                    "customer_access": "api_key",
+                },
+            }],
+            "setup_required": ["private_order_api"],
+        }
+
+        resolved, outcomes = api._attempt_compiled_capability_discovery(
+            db,
+            company=company,
+            agent=agent,
+            spec=spec,
+        )
+
+    requirement = resolved["requirements"][0]
+    assert outcomes[0]["status"] == "contract_found"
+    assert outcomes[0]["customer_access"] == "api_key"
+    assert requirement["integration_operations"]["create_order"]["endpoint"] == "/orders"
+    assert requirement["status"] == "connection_required"
+    assert requirement["discovery"]["status"] == "contract_found"
+    assert "integration_id" not in requirement
+
+
+def test_bound_api_operations_are_resolved_into_graph_actions():
+    spec = {
+        "requirements": [{"key": "orders"}],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "create_order",
+                    "type": "action",
+                    "params": {
+                        "action_type": "orders",
+                        "arguments": {"customer": "$input.customer"},
+                    },
+                },
+                {
+                    "id": "cancel_order",
+                    "type": "action",
+                    "depends_on": ["create_order"],
+                    "params": {
+                        "action_type": "orders",
+                        "arguments": {"order_id": "$input.order_id"},
+                    },
+                },
+            ],
+        },
+    }
+    operations = {
+        "create_order": {
+            "method": "POST",
+            "endpoint": "/orders",
+            "description": "Create a new order",
+        },
+        "cancel_order": {
+            "method": "DELETE",
+            "endpoint": "/orders/{order_id}",
+            "description": "Cancel an order",
+        },
+    }
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="orders",
+        operations=operations,
+    )
+
+    assert unresolved == []
+    nodes = resolved["execution_graph"]["nodes"]
+    assert nodes[0]["params"]["operation"] == "create_order"
+    assert nodes[1]["params"]["operation"] == "cancel_order"
+
+
+def test_single_bound_api_operation_is_selected_automatically():
+    spec = {
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [{
+                "id": "sync_vendor",
+                "type": "action",
+                "params": {"action_type": "vendor_sync"},
+            }],
+        }
+    }
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="vendor_sync",
+        operations={
+            "sync": {
+                "method": "POST",
+                "endpoint": "/sync",
+            }
+        },
+    )
+
+    assert unresolved == []
+    assert resolved["execution_graph"]["nodes"][0]["params"]["operation"] == "sync"
+
+
+def test_ambiguous_bound_api_operation_fails_closed_until_resolved():
+    spec = {
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [{
+                "id": "do_vendor_work",
+                "type": "action",
+                "params": {"action_type": "vendor"},
+            }],
+        }
+    }
+    operations = {
+        "alpha": {"method": "POST", "endpoint": "/alpha"},
+        "beta": {"method": "POST", "endpoint": "/beta"},
+    }
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="vendor",
+        operations=operations,
+    )
+    assert resolved["execution_graph"]["nodes"][0]["params"].get("operation") is None
+    assert unresolved[0]["node_id"] == "do_vendor_work"
+    assert unresolved[0]["available_operations"] == ["alpha", "beta"]
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="vendor",
+        operations=operations,
+        operation_map={"primary/do_vendor_work": "beta"},
+    )
+    assert unresolved == []
+    assert resolved["execution_graph"]["nodes"][0]["params"]["operation"] == "beta"
+
+
+def test_bound_api_operation_resolution_reaches_nested_foreach_graph():
+    spec = {
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [{
+                "id": "each_order",
+                "type": "foreach",
+                "params": {
+                    "items": "$input.orders",
+                    "graph": {
+                        "version": 1,
+                        "trigger": {"type": "manual"},
+                        "nodes": [{
+                            "id": "create_order",
+                            "type": "action",
+                            "params": {"action_type": "orders"},
+                        }],
+                    },
+                },
+            }],
+        }
+    }
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="orders",
+        operations={
+            "create_order": {
+                "method": "POST",
+                "endpoint": "/orders",
+                "description": "Create order",
+            },
+            "cancel_order": {
+                "method": "DELETE",
+                "endpoint": "/orders/{order_id}",
+                "description": "Cancel order",
+            },
+        },
+    )
+
+    assert unresolved == []
+    nested = resolved["execution_graph"]["nodes"][0]["params"]["graph"]
+    assert nested["nodes"][0]["params"]["operation"] == "create_order"
