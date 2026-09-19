@@ -457,12 +457,85 @@ def _generated_schedule_workflow(
     return None
 
 
+MAX_EXECUTION_ROUTINES = 20
+
+
+def _compiled_execution_routines(spec: dict) -> list[dict]:
+    """Return the employee's independent executable routines.
+
+    execution_routines is the multi-routine contract. The legacy execution_graph
+    remains a supported single-routine contract and is exposed as routine
+    "primary" so old employees keep working unchanged.
+    """
+
+    raw_routines = spec.get("execution_routines")
+    result: list[dict] = []
+    used_ids: set[str] = set()
+
+    if isinstance(raw_routines, list):
+        for index, raw in enumerate(raw_routines):
+            if not isinstance(raw, dict):
+                continue
+            graph = normalize_execution_graph(
+                raw.get("graph")
+                if isinstance(raw.get("graph"), dict)
+                else raw.get("execution_graph")
+            )
+            if not graph.get("nodes"):
+                continue
+
+            base_id = normalize_requirement_key(
+                raw.get("id") or raw.get("key") or raw.get("name") or f"routine_{index + 1}"
+            )[:80] or f"routine_{index + 1}"
+            routine_id = base_id
+            suffix = 2
+            while routine_id in used_ids:
+                routine_id = f"{base_id[:70]}_{suffix}"
+                suffix += 1
+            used_ids.add(routine_id)
+
+            name = str(raw.get("name") or routine_id.replace("_", " ")).strip()[:200]
+            result.append(
+                {
+                    "id": routine_id,
+                    "name": name or routine_id,
+                    "graph": graph,
+                }
+            )
+            if len(result) >= MAX_EXECUTION_ROUTINES:
+                break
+
+    if result:
+        return result
+
+    legacy_graph = normalize_execution_graph(spec.get("execution_graph") or {})
+    if legacy_graph.get("nodes"):
+        return [
+            {
+                "id": "primary",
+                "name": "Primary routine",
+                "graph": legacy_graph,
+            }
+        ]
+    return []
+
+
+def _routine_graph_for_action(routines: list[dict], action_type: str) -> dict | None:
+    target = str(action_type or "").strip()
+    for routine in routines:
+        graph = routine.get("graph")
+        if isinstance(graph, dict) and target in graph_action_types(graph):
+            return graph
+    return None
+
+
 def _generated_graph_trigger_workflow(
     db,
     *,
     company_id: int,
     agent_id: int,
     trigger_type: str,
+    routine_id: str = "primary",
 ) -> AutomationWorkflow | None:
     rows = (
         db.query(AutomationWorkflow)
@@ -474,10 +547,16 @@ def _generated_graph_trigger_workflow(
     )
     for row in rows:
         config = row.trigger_config if isinstance(row.trigger_config, dict) else {}
+        stored_routine_id = str(config.get("_xvond_routine_id") or "").strip()
+        routine_matches = (
+            stored_routine_id == routine_id
+            or (routine_id == "primary" and not stored_routine_id)
+        )
         if (
             config.get("_xvond_source") == "self_service_employee"
             and int(config.get("_xvond_agent_id") or 0) == int(agent_id)
             and config.get("_xvond_graph_trigger") is True
+            and routine_matches
         ):
             return row
     return None
@@ -493,6 +572,8 @@ def _provision_self_service_graph_trigger(
     actions: dict,
     action_plan: dict,
     runtime_inputs: dict | None = None,
+    routine_id: str = "primary",
+    routine_name: str | None = None,
 ) -> tuple[str, int | None]:
     if str(company.onboarding_source or "").strip().lower() != "self_service":
         return "managed_delivery", None
@@ -539,18 +620,21 @@ def _provision_self_service_graph_trigger(
         company_id=company.id,
         agent_id=agent_id,
         trigger_type=trigger_type,
+        routine_id=routine_id,
     )
     if workflow is not None and not workflow.enabled:
         return "disabled", workflow.id
     if workflow is None:
         workflow = AutomationWorkflow(
             company_id=company.id,
-            name="AI Employee Webhook Trigger",
+            name=(routine_name or f"AI Employee {trigger_type} routine")[:200],
             trigger_type=trigger_type,
             trigger_config={
                 "_xvond_source": "self_service_employee",
                 "_xvond_agent_id": agent_id,
                 "_xvond_graph_trigger": True,
+                "_xvond_routine_id": routine_id,
+                "_xvond_routine_name": (routine_name or routine_id)[:200],
                 "_xvond_generated": True,
                 **(
                     {"event_name": str(trigger.get("event") or "").strip()[:120]}
