@@ -243,14 +243,14 @@ Use this shape:
       "name": "short human-readable routine name",
       "graph": {
         "version": 1,
-        "trigger": {"type":"manual|schedule|webhook|event","event":"internal event name when type=event"},
+        "trigger": {"type":"manual|schedule|webhook|event","event":"internal event name when type=event","schedule":{"kind":"interval|once|daily|weekly|monthly","source_text":"exact cadence/time words copied from the Job Brief"}},
         "nodes": []
       }
     }
   ],
   "execution_graph": {
     "version": 1,
-    "trigger": {"type":"manual|schedule|webhook|event","event":"internal event name when type=event"},
+    "trigger": {"type":"manual|schedule|webhook|event","event":"internal event name when type=event","schedule":{"kind":"interval|once|daily|weekly|monthly","source_text":"exact cadence/time words copied from the Job Brief"}},
     "nodes": [
       {
         "id": "stable_node_id",
@@ -278,6 +278,7 @@ Rules:
 - For a single executable routine, execution_graph remains valid for backward compatibility. For multiple independent routines, prefer execution_routines and let Xvond derive the legacy primary execution_graph from the first routine.
 - Limit execution_routines to the smallest set that faithfully represents the requested job; never invent extra routines.
 - execution_graph.trigger describes what starts the graph. Use manual when the user starts it explicitly, schedule for recurring/time-based work, webhook for an incoming external JSON event, and event for an internal Xvond event. Never invent a webhook/event trigger when the user did not request event-driven behavior.
+- For a schedule trigger, include trigger.schedule.source_text copied verbatim from the Job Brief words that authorize the cadence/time. Xvond will fail the schedule closed when this grounding is missing or does not occur in the Job Brief.
 - For type=event, set trigger.event to the stable internal event name the graph should consume. Event names are capabilities of the Xvond runtime, not provider-specific webhook URLs.
 - Use a wait node only when the Job Brief explicitly requests a pause inside the same job before later steps continue. A wait is not an initial schedule trigger. Put either params.duration plus params.unit (seconds|minutes|hours|days|weeks), or params.until as an ISO-8601 timestamp with timezone. Include params.source_text copied verbatim from the Job Brief words that authorize the wait. Never invent a wait, delay, follow-up period or deadline.
 - Use await_event only when the Job Brief explicitly asks this same job to wait for a future Xvond/internal/provider event before continuing. Put the stable event name in params.event and include params.source_text copied verbatim from the Job Brief words that authorize the wait. Use params.match for correlation when the workflow is waiting for an event belonging to a specific order, lead, payment, booking or other entity; match values may reference $input.* or previous node outputs. Never invent an event wait. Do not use await_event when the event merely starts the job; use execution_graph.trigger type=event for that case.
@@ -569,10 +570,27 @@ def _ground_execution_graph(value: Any, *, job_brief: str) -> dict:
 
             kept.append(node)
 
+        trigger = deepcopy(graph.get("trigger") or {"type": "manual"})
+        if str(trigger.get("type") or "").strip().lower() == "schedule":
+            raw_schedule = (
+                deepcopy(trigger.get("schedule"))
+                if isinstance(trigger.get("schedule"), dict)
+                else {}
+            )
+            source_text = _bounded_text(raw_schedule.get("source_text"), limit=500)
+            if not source_text or source_text.casefold() not in source:
+                # Preserve the fact that this is intended to be scheduled, but
+                # remove ungrounded timing so provisioning/readiness fails closed
+                # instead of silently inventing autonomous execution.
+                trigger = {"type": "schedule"}
+            else:
+                raw_schedule["source_text"] = source_text
+                trigger["schedule"] = raw_schedule
+
         return normalize_execution_graph(
             {
                 "version": graph.get("version") or 1,
-                "trigger": graph.get("trigger") or {"type": "manual"},
+                "trigger": trigger,
                 "nodes": kept,
             }
         )
