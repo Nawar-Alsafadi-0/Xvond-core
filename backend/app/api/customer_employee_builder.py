@@ -2100,6 +2100,130 @@ def _relative_endpoint(value: str | None, *, required: bool = False) -> str | No
     return "/" + endpoint.lstrip("/")
 
 
+@router.post("/{agent_id}/connections/auto-resolve")
+def auto_resolve_self_service_integrations(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Reuse unambiguous validated packaged connections after they are added."""
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Automatic connection resolution is available only for Self-Service employees",
+            )
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        if agent.enabled and pending is None:
+            return {
+                "status": "unchanged",
+                "agent_id": agent.id,
+                "bound_requirements": [],
+                "live_employee_unchanged": True,
+            }
+
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
+        if not isinstance(compiled_spec, dict):
+            return {
+                "status": "unchanged",
+                "agent_id": agent.id,
+                "bound_requirements": [],
+                "live_employee_unchanged": bool(agent.enabled),
+            }
+
+        resolved_spec, bound = _auto_bind_single_packaged_integrations(
+            db,
+            company_id=company.id,
+            spec=compiled_spec,
+        )
+        if not bound:
+            return {
+                "status": "unchanged",
+                "agent_id": agent.id,
+                "bound_requirements": [],
+                "live_employee_unchanged": bool(agent.enabled),
+            }
+
+        if isinstance(pending, dict):
+            pending["compiled_spec"] = resolved_spec
+            pending["status"] = "built"
+            pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            pending.pop("last_tested_at", None)
+            pending.pop("last_tested_compiled_at", None)
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": "resolved_pending_revision",
+                "agent_id": agent.id,
+                "bound_requirements": bound,
+                "live_employee_unchanged": True,
+            }
+
+        resolved_spec, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=agent.id,
+            spec=resolved_spec,
+        )
+        builder["compiled_spec"] = resolved_spec
+        builder["delivery"] = delivery
+        builder["missing_information"] = list(
+            resolved_spec.get("setup_required") or []
+        )
+        builder.pop("last_tested_at", None)
+        builder.pop("last_tested_compiled_at", None)
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        agent.system_prompt = build_compiled_employee_system_prompt(
+            owner_name=company.name,
+            spec=resolved_spec,
+        )
+        db.commit()
+        return {
+            "status": "resolved",
+            "agent_id": agent.id,
+            "bound_requirements": bound,
+            "live_employee_unchanged": False,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @router.post("/{agent_id}/connections/{requirement_key}")
 def bind_self_service_integration(
     agent_id: int,
