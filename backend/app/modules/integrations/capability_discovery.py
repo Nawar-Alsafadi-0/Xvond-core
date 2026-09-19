@@ -194,3 +194,55 @@ def discover_openapi_contract(discovery: dict) -> dict:
         "contract": None,
         "attempted": attempted[:20],
     }
+
+
+def public_api_probe(contract: dict) -> dict | None:
+    """Return validation evidence for a discovered unauthenticated API.
+
+    Only a GET operation with no path variables and no required query
+    parameters may be used. Discovery never probes write endpoints.
+    """
+    if not isinstance(contract, dict):
+        return None
+    base_url = str(contract.get("base_url") or "").strip().rstrip("/")
+    operations = contract.get("operations")
+    if not base_url or not isinstance(operations, dict):
+        return None
+
+    for name, operation in operations.items():
+        if not isinstance(operation, dict):
+            continue
+        if str(operation.get("method") or "").upper() != "GET":
+            continue
+        if operation.get("path_params"):
+            continue
+        if operation.get("required_query_params"):
+            continue
+        endpoint = str(operation.get("endpoint") or "").strip()
+        if not endpoint or endpoint.startswith("//") or endpoint.lower().startswith(("http://", "https://")):
+            continue
+        url = base_url + "/" + endpoint.lstrip("/")
+        try:
+            result = safe_http_request(
+                url=url,
+                method="GET",
+                headers={
+                    "Accept": "application/json,text/plain,*/*;q=0.1",
+                    "User-Agent": "Xvond-Capability-Discovery/1.0",
+                },
+                timeout=10,
+                max_response_bytes=64_000,
+            )
+        except Exception:
+            continue
+        status = int(result.get("status_code") or 0)
+        if 200 <= status < 300:
+            return {
+                "validated": True,
+                "validated_at": __import__("datetime").datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "mode": "discovered_public_api_safe_get",
+                "operation": str(name),
+                "endpoint": "/" + endpoint.lstrip("/"),
+                "status_code": status,
+            }
+    return None
