@@ -3826,8 +3826,8 @@ def apply_pending_live_revision(
 @router.get("/{agent_id}/webhook")
 def customer_employee_webhook(
     agent_id: int,
-    routine_id: str | None = None,
     current_user: User = Depends(require_customer_manager),
+    routine_id: str | None = None,
 ):
     db = SessionLocal()
     try:
