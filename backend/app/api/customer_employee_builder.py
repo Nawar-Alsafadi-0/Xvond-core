@@ -1508,6 +1508,18 @@ def _self_service_builder_journey(
         compiled_at
         and str(builder.get("last_tested_compiled_at") or "").strip() == compiled_at
     )
+    routine_required, routine_tested, _ = _routine_preview_evidence(
+        builder,
+        spec=compiled_spec or {},
+    )
+    routine_names = {
+        str(item.get("id") or ""): str(item.get("name") or item.get("id") or "")
+        for item in _compiled_execution_routines(compiled_spec or {})
+    }
+    untested_routines = [
+        item for item in routine_required if item not in routine_tested
+    ]
+
     setup_stage = next((item for item in stages if item.get("id") == "setup"), {})
     setup_complete = setup_stage.get("status") == "complete"
     if tested_build and setup_complete:
@@ -1515,16 +1527,43 @@ def _self_service_builder_journey(
             "test",
             "Preview & Test",
             "complete",
-            "The current employee build has been tested safely without live channels or business actions.",
+            (
+                "Every executable routine in the current build passed a side-effect-free preview."
+                if routine_required
+                else "The current conversational employee build has been preview-tested safely."
+            ),
         )
     elif provisioned and has_entitlement and setup_complete:
-        add_stage(
-            "test",
-            "Preview & Test",
-            "action_required",
-            "Chat with this exact draft before launch. Preview testing never sends through live channels or executes business actions.",
-            [_builder_action("test_employee", "Test employee", target="builder")],
-        )
+        if routine_required:
+            preview_actions = [
+                _builder_action(
+                    "preview_routine",
+                    f"Preview {routine_names.get(routine_id) or routine_id}",
+                    target="builder",
+                    key=routine_id,
+                    detail="Run this routine safely without sending, publishing, booking, writing state or other business side effects.",
+                )
+                for routine_id in untested_routines
+            ]
+            add_stage(
+                "test",
+                "Preview & Test",
+                "action_required",
+                (
+                    f"Preview every executable routine before launch "
+                    f"({len(routine_tested)}/{len(routine_required)} tested). "
+                    "Live business side effects are simulated."
+                ),
+                preview_actions,
+            )
+        else:
+            add_stage(
+                "test",
+                "Preview & Test",
+                "action_required",
+                "Chat with this exact draft before launch. Preview testing never sends through live channels or executes business actions.",
+                [_builder_action("test_employee", "Test employee", target="builder")],
+            )
     elif provisioned and not setup_complete:
         add_stage(
             "test",
@@ -1568,7 +1607,11 @@ def _self_service_builder_journey(
             "launch",
             "Launch",
             "blocked",
-            "Test the current employee build once before launch.",
+            (
+                "Preview every current routine before launch."
+                if routine_required
+                else "Test the current employee build once before launch."
+            ),
         )
     else:
         add_stage(
@@ -1593,6 +1636,8 @@ def _self_service_builder_journey(
         "complete_count": complete_count,
         "total_count": len(stages),
         "live": bool(agent.enabled),
+        "required_routines": routine_required,
+        "tested_routines": routine_tested,
     }
 
 
