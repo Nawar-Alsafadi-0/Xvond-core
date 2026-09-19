@@ -40,7 +40,7 @@ def google_calendar_oauth_redirect_uri() -> str:
         return configured
     base = str(settings.PUBLIC_BASE_URL or "").strip().rstrip("/")
     return (
-        f"{base}/manage/integrations/google-calendar/oauth/callback"
+        f"{base}/customer/agents/manage/integrations/google-calendar/oauth/callback"
         if base
         else ""
     )
