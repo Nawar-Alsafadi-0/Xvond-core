@@ -91,9 +91,10 @@ function renderAdminAttention(data){
 
 async function loadDashboard(){
   try{
-    const [data,worker]=await Promise.all([
+    const [data,worker,managedChannels]=await Promise.all([
       api("/admin/dashboard/summary"),
-      api("/admin/operations/workers/whatsapp").catch(()=>({configured:false,worker_active:false,worker_lease_ttl_seconds:0,queued:0,processing:0,retrying:0,dead:0}))
+      api("/admin/operations/workers/whatsapp").catch(()=>({configured:false,worker_active:false,worker_lease_ttl_seconds:0,queued:0,processing:0,retrying:0,dead:0})),
+      api("/admin/channels/managed/requests").catch(()=>({count:0,requests:[]}))
     ]);
     const workerState=!worker.configured?"Not configured":worker.worker_active?"Online":"Offline";
     const lifecycle=data.lifecycle_counts||{};
@@ -113,11 +114,28 @@ async function loadDashboard(){
       ["AI Requests · 24h",adminNumber(data.ai_requests_24h)],
       ["AI Failures · 24h",adminNumber(data.failed_ai_requests_24h)],
       ["External Ops Pending",adminNumber(data.unresolved_external_operations)],
+      ["Managed Channel Requests",adminNumber(managedChannels.count)],
       ["WhatsApp Worker",workerState],
       ["WhatsApp Queue",`${adminNumber(worker.queued)} queued · ${adminNumber(worker.retrying)} retrying`],
       ["Provider Cost · 30d",adminMoney(data.provider_cost_30d)]
     ];
     document.getElementById("dashboard-cards").innerHTML=cards.map(([label,value])=>`<div class="card"><div class="card-label">${escapeAdmin(label)}</div><div class="card-value">${escapeAdmin(value)}</div></div>`).join("");
+    const managedByCompany=new Map();
+    for(const item of managedChannels.requests||[]){
+      const companyId=Number(item.company_id||0);if(!companyId)continue;
+      const existing=managedByCompany.get(companyId)||{company_id:companyId,company_name:item.company_name||`Company #${companyId}`,count:0};
+      existing.count+=1;managedByCompany.set(companyId,existing);
+    }
+    data.attention_items=[
+      ...(data.attention_items||[]),
+      ...Array.from(managedByCompany.values()).map(item=>({
+        ...item,
+        type:"managed_channel_request",
+        title:"Managed channel setup",
+        severity:"review",
+        tab:"channels"
+      }))
+    ];
     renderAdminAttention(data);
   }catch(e){
     console.error(e);
