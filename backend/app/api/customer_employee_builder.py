@@ -2807,6 +2807,22 @@ def bind_self_service_integration(
         if cancel_endpoint:
             operations["cancel"] = {"method": "POST", "endpoint": cancel_endpoint}
 
+        # Keep default graph actions runnable without guessing across ambiguous
+        # API docs. Exact requirement matches and a single imported operation
+        # are deterministic enough to alias as the conventional execute action.
+        if "execute" not in operations:
+            alias_key = key if isinstance(operations.get(key), dict) else None
+            if alias_key is None:
+                concrete = [
+                    operation_key
+                    for operation_key, operation_value in operations.items()
+                    if isinstance(operation_value, dict)
+                ]
+                if len(concrete) == 1:
+                    alias_key = concrete[0]
+            if alias_key:
+                operations["execute"] = dict(operations[alias_key])
+
         if key == "booking" and execute_required:
             if not isinstance(operations.get("availability"), dict):
                 raise HTTPException(
