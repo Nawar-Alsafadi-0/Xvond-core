@@ -627,8 +627,6 @@ def _execution_blockers(
             blockers.append("Execution graph: valid workspace timezone or schedule setup required")
         elif graph_status == "disabled":
             blockers.append("Execution graph: generated workflow is disabled")
-        elif graph_status == "nested_approval_not_ready":
-            blockers.append("Execution graph: nested approval resume is not ready")
         else:
             blockers.append("Execution graph: trigger setup required")
     return blockers
