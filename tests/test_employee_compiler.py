@@ -1557,6 +1557,7 @@ def test_compiler_preserves_safe_dynamic_api_operations_and_drops_secrets():
         "create_object": {
             "method": "POST",
             "endpoint": "/v7/objects",
+            "input_mode": "json",
             "timeout": 12.0,
         }
     }
