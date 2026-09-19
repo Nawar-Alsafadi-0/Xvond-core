@@ -1061,6 +1061,15 @@
                         detail += item.waiting?.action_type
                             ? ` · approval for ${item.waiting.action_type}`
                             : " · waiting for approval";
+                    } else if (item.waiting?.type === "retry") {
+                        const attempt = Number(item.waiting?.attempt || 0);
+                        const maximum = Number(item.waiting?.max_attempts || 0);
+                        const retryLabel = attempt && maximum
+                            ? `automatic retry ${attempt}/${maximum}`
+                            : "automatic retry";
+                        detail += item.waiting?.resume_at
+                            ? ` · ${retryLabel} at ${item.waiting.resume_at}`
+                            : ` · ${retryLabel} scheduled`;
                     }
                     if (item.last_run?.id) {
                         detail += ` · last run #${Number(item.last_run.id)} ${String(item.last_run.status || "")}`;
