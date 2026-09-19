@@ -471,6 +471,11 @@ def _compiled_execution_routines(spec: dict) -> list[dict]:
     raw_routines = spec.get("execution_routines")
     result: list[dict] = []
     used_ids: set[str] = set()
+    valid_requirement_keys = {
+        normalize_requirement_key(item.get("key"))
+        for item in (spec.get("requirements") or [])
+        if isinstance(item, dict) and normalize_requirement_key(item.get("key"))
+    }
 
     if isinstance(raw_routines, list):
         for index, raw in enumerate(raw_routines):
@@ -495,10 +500,22 @@ def _compiled_execution_routines(spec: dict) -> list[dict]:
             used_ids.add(routine_id)
 
             name = str(raw.get("name") or routine_id.replace("_", " ")).strip()[:200]
+            requirement_keys: list[str] = []
+            for raw_key in raw.get("requirement_keys") or []:
+                key = normalize_requirement_key(raw_key)
+                if (
+                    key
+                    and key in valid_requirement_keys
+                    and key not in requirement_keys
+                ):
+                    requirement_keys.append(key)
+                if len(requirement_keys) >= 50:
+                    break
             result.append(
                 {
                     "id": routine_id,
                     "name": name or routine_id,
+                    "requirement_keys": requirement_keys,
                     "graph": graph,
                 }
             )
@@ -514,10 +531,94 @@ def _compiled_execution_routines(spec: dict) -> list[dict]:
             {
                 "id": "primary",
                 "name": "Primary routine",
+                "requirement_keys": [],
                 "graph": legacy_graph,
             }
         ]
     return []
+
+
+def _graph_input_keys(value) -> tuple[set[str], bool]:
+    keys: set[str] = set()
+    uses_root_input = False
+
+    def visit(current) -> None:
+        nonlocal uses_root_input
+        if isinstance(current, str):
+            if current == "$input":
+                uses_root_input = True
+                return
+            if current.startswith("$input."):
+                parts = current.split(".")
+                if len(parts) >= 2 and parts[1]:
+                    keys.add(parts[1])
+            return
+        if isinstance(current, dict):
+            for item in current.values():
+                visit(item)
+        elif isinstance(current, list):
+            for item in current:
+                visit(item)
+
+    visit(value)
+    return keys, uses_root_input
+
+
+def _routine_runtime_inputs(
+    routine: dict,
+    *,
+    requirements: list,
+    single_routine_legacy_fallback: bool,
+) -> dict:
+    graph = routine.get("graph") if isinstance(routine.get("graph"), dict) else {}
+    declared_requirements = {
+        normalize_requirement_key(key)
+        for key in (routine.get("requirement_keys") or [])
+        if normalize_requirement_key(key)
+    }
+    action_requirements = set(graph_action_types(graph))
+    referenced_input_keys, uses_root_input = _graph_input_keys(graph)
+
+    result: dict = {}
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        requirement_key = normalize_requirement_key(requirement.get("key"))
+        runtime_inputs = (
+            requirement.get("runtime_inputs")
+            if isinstance(requirement.get("runtime_inputs"), dict)
+            else {}
+        )
+        if not runtime_inputs:
+            continue
+
+        owns_requirement = bool(
+            requirement_key
+            and (
+                requirement_key in declared_requirements
+                or requirement_key in action_requirements
+            )
+        )
+        if owns_requirement or (
+            single_routine_legacy_fallback
+            and not declared_requirements
+        ):
+            for key, value in runtime_inputs.items():
+                result.setdefault(str(key), value)
+            continue
+
+        for key, value in runtime_inputs.items():
+            if str(key) in referenced_input_keys:
+                result.setdefault(str(key), value)
+
+        # A routine that explicitly owns a requirement may intentionally pass the
+        # whole trigger input into AI/transform nodes. Root input never grants
+        # access to unrelated requirements in a multi-routine employee.
+        if uses_root_input and requirement_key in declared_requirements:
+            for key, value in runtime_inputs.items():
+                result.setdefault(str(key), value)
+
+    return result
 
 
 def _routine_graph_for_action(routines: list[dict], action_type: str) -> dict | None:
@@ -1019,18 +1120,17 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             "automation_workflow_id": schedule_workflow_id,
         }
 
-    graph_runtime_inputs: dict = {}
-    for requirement in requirements:
-        if isinstance(requirement, dict):
-            for key, value in (requirement.get("runtime_inputs") or {}).items():
-                graph_runtime_inputs.setdefault(str(key), value)
-
     graph_triggers: list[dict] = []
     if company is not None:
         for routine in execution_routines:
             routine_id = str(routine.get("id") or "primary").strip() or "primary"
             routine_name = str(routine.get("name") or routine_id).strip() or routine_id
             graph = routine.get("graph") if isinstance(routine.get("graph"), dict) else {}
+            routine_runtime_inputs = _routine_runtime_inputs(
+                routine,
+                requirements=requirements,
+                single_routine_legacy_fallback=len(execution_routines) == 1,
+            )
             status, workflow_id = _provision_self_service_graph_trigger(
                 db,
                 company=company,
@@ -1039,7 +1139,7 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                 execution_graph=graph,
                 actions=actions,
                 action_plan=action_plan,
-                runtime_inputs=graph_runtime_inputs,
+                runtime_inputs=routine_runtime_inputs,
                 routine_id=routine_id,
                 routine_name=routine_name,
             )
@@ -1047,6 +1147,7 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                 {
                     "routine_id": routine_id,
                     "routine_name": routine_name,
+                    "requirement_keys": list(routine.get("requirement_keys") or []),
                     "status": status,
                     "workflow_id": workflow_id,
                     "trigger_type": str(
