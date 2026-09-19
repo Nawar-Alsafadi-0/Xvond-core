@@ -3,6 +3,8 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from time import perf_counter
 
+from sqlalchemy.exc import IntegrityError
+
 from backend.app.core.agent_runtime import agent_runtime
 from backend.app.core.config_secrets import reveal_config
 from backend.app.core.http_security import safe_http_request
@@ -23,6 +25,7 @@ from backend.app.modules.automation.execution_graph import (
     resolve_graph_value,
 )
 from backend.app.modules.billing.service_limits import service_limits
+from backend.app.modules.customer_ops.models import NotificationEvent
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.media.generated_media import generate_image_asset
 from backend.app.modules.tools.executor import tool_executor
@@ -145,6 +148,76 @@ def _append_step_span(
             "error": str(error or "")[:2000] or None,
         }
     )
+
+
+def _employee_notification_event(
+    db,
+    *,
+    company_id: int,
+    agent_id: int | None,
+    run_id: int,
+    execution_key: str,
+    node_scope: str,
+    title: str,
+    message: str,
+    severity: str = "info",
+) -> tuple[NotificationEvent, bool]:
+    """Persist one idempotent owner-visible notification for a graph node."""
+
+    stable_execution = str(execution_key or f"run:{int(run_id)}").strip()
+    stable_scope = str(node_scope or "notify").strip()
+    digest = sha256(
+        f"{int(company_id)}:{stable_execution}:{stable_scope}".encode("utf-8")
+    ).hexdigest()
+    event_key = f"employee-runtime:{digest}"
+
+    existing = (
+        db.query(NotificationEvent)
+        .filter(
+            NotificationEvent.company_id == int(company_id),
+            NotificationEvent.event_key == event_key,
+        )
+        .first()
+    )
+    if existing is not None:
+        return existing, True
+
+    safe_severity = str(severity or "info").strip().lower()
+    if safe_severity not in {"info", "warning", "critical"}:
+        safe_severity = "info"
+
+    event = NotificationEvent(
+        company_id=int(company_id),
+        event_key=event_key,
+        event_type="employee_update",
+        severity=safe_severity,
+        title=str(title or "Employee update").strip()[:255] or "Employee update",
+        message=str(message or "").strip()[:4000] or None,
+        payload={
+            "agent_id": int(agent_id) if agent_id else None,
+            "automation_run_id": int(run_id),
+            "node_scope": stable_scope,
+            "execution_key": stable_execution[:500],
+        },
+        read=False,
+    )
+    try:
+        with db.begin_nested():
+            db.add(event)
+            db.flush()
+        return event, False
+    except IntegrityError:
+        existing = (
+            db.query(NotificationEvent)
+            .filter(
+                NotificationEvent.company_id == int(company_id),
+                NotificationEvent.event_key == event_key,
+            )
+            .first()
+        )
+        if existing is None:
+            raise
+        return existing, True
 
 
 def _checkpoint_fingerprint(value) -> str:
@@ -1954,10 +2027,25 @@ class AutomationRuntime:
                         raise ValueError(
                             f"Execution graph notify node {node_id} requires message"
                         )
+                    title = str(params.get("title") or "Employee update").strip()[:255]
+                    event, duplicate = _employee_notification_event(
+                        db,
+                        company_id=company_id,
+                        agent_id=int(graph_agent_id or 0) or None,
+                        run_id=run_id,
+                        execution_key=str(state.get("_xvond_execution_key") or ""),
+                        node_scope=node_scope,
+                        title=title,
+                        message=message,
+                        severity=str(params.get("severity") or "info"),
+                    )
                     node_outputs[node_id] = {
                         "notification": {
-                            "title": str(params.get("title") or "Employee update")[:200],
-                            "message": message[:2000],
+                            "title": event.title,
+                            "message": event.message,
+                            "severity": event.severity,
+                            "event_id": event.id,
+                            "duplicate": duplicate,
                         }
                     }
                     continue
