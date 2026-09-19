@@ -1,0 +1,221 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import secrets
+import time
+from urllib.parse import urlencode
+
+from backend.app.core.config.settings import settings
+from backend.app.core.http_security import safe_http_request, validate_public_http_url
+
+
+GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_CALENDAR_SCOPES = (
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.events.freebusy",
+    "https://www.googleapis.com/auth/calendar.calendars.readonly",
+)
+STATE_TTL_SECONDS = 600
+
+
+class GoogleCalendarOAuthError(ValueError):
+    pass
+
+
+def google_calendar_oauth_ready() -> bool:
+    return bool(
+        str(settings.GOOGLE_CALENDAR_OAUTH_CLIENT_ID or "").strip()
+        and str(settings.GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET or "").strip()
+        and google_calendar_oauth_redirect_uri()
+    )
+
+
+def google_calendar_oauth_redirect_uri() -> str:
+    configured = str(settings.GOOGLE_CALENDAR_OAUTH_REDIRECT_URI or "").strip()
+    if configured:
+        return configured
+    base = str(settings.PUBLIC_BASE_URL or "").strip().rstrip("/")
+    return (
+        f"{base}/manage/integrations/google-calendar/oauth/callback"
+        if base
+        else ""
+    )
+
+
+def _b64encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _b64decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    try:
+        return base64.urlsafe_b64decode((value + padding).encode("ascii"))
+    except Exception as exc:
+        raise GoogleCalendarOAuthError("Invalid Google Calendar OAuth state") from exc
+
+
+def _sign(value: str) -> str:
+    digest = hmac.new(
+        settings.JWT_SECRET.encode("utf-8"),
+        value.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return _b64encode(digest)
+
+
+def _pkce_verifier() -> str:
+    # token_urlsafe uses RFC 3986 unreserved characters and provides ample entropy.
+    value = secrets.token_urlsafe(64)
+    return value[:128]
+
+
+def _pkce_challenge(verifier: str) -> str:
+    return _b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
+
+
+def issue_google_calendar_oauth_state(
+    *,
+    user_id: int,
+    company_id: int,
+    integration_id: int | None,
+    name: str,
+    config: dict,
+    now: int | None = None,
+) -> tuple[str, str]:
+    issued_at = int(time.time() if now is None else now)
+    verifier = _pkce_verifier()
+    payload = {
+        "v": 1,
+        "user_id": int(user_id),
+        "company_id": int(company_id),
+        "integration_id": int(integration_id) if integration_id is not None else None,
+        "name": str(name or "").strip()[:200],
+        "config": {
+            "provider": "google",
+            "calendar_id": str(config.get("calendar_id") or "primary").strip()[:1024],
+            "timezone": str(config.get("timezone") or "").strip()[:100],
+            "slot_minutes": int(config.get("slot_minutes") or 30),
+        },
+        "nonce": secrets.token_urlsafe(24),
+        "code_verifier": verifier,
+        "iat": issued_at,
+        "exp": issued_at + STATE_TTL_SECONDS,
+    }
+    encoded = _b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    return f"{encoded}.{_sign(encoded)}", _pkce_challenge(verifier)
+
+
+def verify_google_calendar_oauth_state(
+    state: str | None,
+    *,
+    now: int | None = None,
+) -> dict:
+    parts = str(state or "").split(".")
+    if len(parts) != 2:
+        raise GoogleCalendarOAuthError("Invalid Google Calendar OAuth state")
+    encoded, signature = parts
+    if not hmac.compare_digest(signature, _sign(encoded)):
+        raise GoogleCalendarOAuthError("Invalid Google Calendar OAuth state")
+    try:
+        payload = json.loads(_b64decode(encoded).decode("utf-8"))
+    except GoogleCalendarOAuthError:
+        raise
+    except Exception as exc:
+        raise GoogleCalendarOAuthError("Invalid Google Calendar OAuth state") from exc
+
+    current = int(time.time() if now is None else now)
+    if payload.get("v") != 1:
+        raise GoogleCalendarOAuthError("Unsupported Google Calendar OAuth state")
+    if int(payload.get("iat") or 0) > current + 60:
+        raise GoogleCalendarOAuthError("Invalid Google Calendar OAuth state issue time")
+    if int(payload.get("exp") or 0) <= current:
+        raise GoogleCalendarOAuthError("Google Calendar OAuth state has expired")
+    if not str(payload.get("nonce") or "").strip():
+        raise GoogleCalendarOAuthError("Google Calendar OAuth state is incomplete")
+    verifier = str(payload.get("code_verifier") or "")
+    if not 43 <= len(verifier) <= 128:
+        raise GoogleCalendarOAuthError("Google Calendar OAuth state is incomplete")
+    return payload
+
+
+def build_google_calendar_authorization_url(
+    *,
+    state: str,
+    code_challenge: str,
+) -> str:
+    if not google_calendar_oauth_ready():
+        raise GoogleCalendarOAuthError("Google Calendar OAuth is not configured")
+    params = {
+        "client_id": settings.GOOGLE_CALENDAR_OAUTH_CLIENT_ID,
+        "redirect_uri": google_calendar_oauth_redirect_uri(),
+        "response_type": "code",
+        "scope": " ".join(GOOGLE_CALENDAR_SCOPES),
+        "access_type": "offline",
+        "include_granted_scopes": "true",
+        "prompt": "consent",
+        "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+    }
+    return GOOGLE_AUTHORIZATION_URL + "?" + urlencode(params)
+
+
+def exchange_google_calendar_code(
+    *,
+    code: str,
+    code_verifier: str,
+) -> dict:
+    if not google_calendar_oauth_ready():
+        raise GoogleCalendarOAuthError("Google Calendar OAuth is not configured")
+    try:
+        result = safe_http_request(
+            url=validate_public_http_url(GOOGLE_TOKEN_URL),
+            method="POST",
+            headers={"Accept": "application/json"},
+            form_data={
+                "code": str(code or "").strip(),
+                "client_id": settings.GOOGLE_CALENDAR_OAUTH_CLIENT_ID,
+                "client_secret": settings.GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET,
+                "redirect_uri": google_calendar_oauth_redirect_uri(),
+                "grant_type": "authorization_code",
+                "code_verifier": code_verifier,
+            },
+            timeout=15,
+            max_response_bytes=128_000,
+        )
+    except Exception as exc:
+        raise GoogleCalendarOAuthError("Google OAuth token exchange failed") from exc
+
+    status = int(result.get("status_code") or 0)
+    if not 200 <= status < 300:
+        raise GoogleCalendarOAuthError(
+            f"Google OAuth token exchange returned HTTP {status}"
+        )
+    try:
+        body = json.loads(result.get("response") or "{}")
+    except ValueError as exc:
+        raise GoogleCalendarOAuthError(
+            "Google OAuth token exchange returned invalid JSON"
+        ) from exc
+    if not isinstance(body, dict):
+        raise GoogleCalendarOAuthError(
+            "Google OAuth token exchange returned invalid JSON"
+        )
+    access_token = str(body.get("access_token") or "").strip()
+    if not access_token:
+        raise GoogleCalendarOAuthError(
+            "Google OAuth token exchange did not return an access token"
+        )
+    return {
+        "access_token": access_token,
+        "refresh_token": str(body.get("refresh_token") or "").strip() or None,
+        "scope": str(body.get("scope") or "").strip(),
+        "token_type": str(body.get("token_type") or "").strip(),
+        "expires_in": body.get("expires_in"),
+    }
