@@ -754,11 +754,22 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         if not isinstance(item, dict):
             continue
         action = _bounded_text(item.get("action"), limit=500)
-        mode = str(item.get("mode") or "ask_before").strip().lower()
-        if mode not in _ALLOWED_PERMISSION_MODES:
-            mode = "ask_before"
+        suggested_mode = str(item.get("mode") or "ask_before").strip().lower()
+        if suggested_mode not in _ALLOWED_PERMISSION_MODES:
+            suggested_mode = "ask_before"
+        # Compiler output may recommend autonomy, but an LLM-generated field is
+        # not an owner grant. Consequential actions remain approval-gated until
+        # a company owner/admin explicitly changes the effective permission.
+        effective_mode = "never" if suggested_mode == "never" else "ask_before"
         if action:
-            permissions.append({"action": action, "mode": mode})
+            permissions.append(
+                {
+                    "action": action,
+                    "mode": effective_mode,
+                    "suggested_mode": suggested_mode,
+                    "source": "compiler_suggestion",
+                }
+            )
         if len(permissions) >= 50:
             break
 
