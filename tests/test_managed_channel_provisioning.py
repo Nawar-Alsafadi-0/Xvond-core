@@ -171,6 +171,33 @@ def test_managed_connect_fails_closed_when_provider_route_is_not_configured(
         assert "connection_key" not in row.config
 
 
+def test_live_managed_channel_route_cannot_be_changed_in_place(
+    managed_channel_db,
+    monkeypatch,
+):
+    monkeypatch.setattr(api.n8n_gateway, "configured", lambda: True)
+    monkeypatch.setattr(
+        api.n8n_gateway,
+        "execute",
+        lambda **kwargs: pytest.fail("Live route must fail before gateway mutation"),
+    )
+
+    with managed_channel_db() as db:
+        row = db.get(AgentChannel, 101)
+        row.enabled = True
+        db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        api.connect_managed_channel(
+            101,
+            api.ManagedChannelConnect(connection_key="replacement-route"),
+            SimpleNamespace(id=99, role="xvond_admin"),
+        )
+
+    assert exc.value.status_code == 409
+    assert "cannot be changed in place" in str(exc.value.detail)
+
+
 def test_managed_connect_rejects_native_or_non_gateway_channels(
     managed_channel_db,
 ):
