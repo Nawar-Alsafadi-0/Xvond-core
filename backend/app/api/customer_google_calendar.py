@@ -105,7 +105,7 @@ def google_calendar_oauth_status(
         "redirect_uri": (
             settings.GOOGLE_CALENDAR_OAUTH_REDIRECT_URI
             or (
-                f"{str(settings.PUBLIC_BASE_URL).rstrip('/')}/manage/integrations/google-calendar/oauth/callback"
+                f"{str(settings.PUBLIC_BASE_URL).rstrip('/')}/customer/agents/manage/integrations/google-calendar/oauth/callback"
                 if settings.PUBLIC_BASE_URL
                 else None
             )
