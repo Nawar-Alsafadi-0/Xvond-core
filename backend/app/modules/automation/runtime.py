@@ -395,6 +395,11 @@ def _persist_graph_retry_checkpoint(
     params: dict,
     resolved: bool,
 ) -> None:
+    if not callable(getattr(db, "get", None)):
+        # execute_step is also used directly with lightweight test doubles.
+        # Durable retry belongs to a persisted AutomationRun, so an isolated
+        # step invocation must not require Session semantics.
+        return
     run = db.get(AutomationRun, int(run_id))
     if run is None or not isinstance(run, AutomationRun):
         # execute_step is also used directly by isolated previews/tests. Durable
