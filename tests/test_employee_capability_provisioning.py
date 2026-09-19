@@ -2455,3 +2455,67 @@ def test_pre_v10_routine_without_scope_keeps_shared_runtime_inputs(database):
             delivery["graph_triggers"][0]["workflow_id"],
         )
         assert workflow.trigger_config["input_data"] == {"one": 1, "two": 2}
+
+
+
+def test_v10_explicit_empty_routine_scope_does_not_inherit_shared_inputs(database):
+    factory, _ = database
+    spec = {
+        "version": 10,
+        "role": "Explicitly unscoped routine",
+        "scope": "personal",
+        "requirements": [
+            {
+                "key": "other_requirement",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {"should_not_leak": "secret-value"},
+            }
+        ],
+        "permissions": [],
+        "execution_routines": [
+            {
+                "id": "manual_only",
+                "name": "Manual only",
+                "requirement_keys": [],
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 10,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Done"},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        _, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=1,
+            spec=spec,
+        )
+        db.commit()
+
+        workflow = db.get(
+            AutomationWorkflow,
+            delivery["graph_triggers"][0]["workflow_id"],
+        )
+        assert workflow.trigger_config["input_data"] == {}
+        assert workflow.trigger_config["_xvond_runtime_inputs"] == {}
+        assert workflow.trigger_config["_xvond_requirement_keys"] == []
