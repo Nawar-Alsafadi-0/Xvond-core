@@ -1494,6 +1494,13 @@ class AutomationRuntime:
                     state.update(result)
                 state.pop("_xvond_graph_resume", None)
                 state.pop("_xvond_approved_request_id", None)
+                run.output_data = {
+                    "state": deepcopy(state),
+                    "steps": deepcopy(step_results),
+                    "trace": deepcopy(trace),
+                    "workflow_fingerprint": _checkpoint_fingerprint(workflow.steps or []),
+                }
+                db.commit()
 
             run.status = "success"
             run.resume_at = None
@@ -1505,6 +1512,7 @@ class AutomationRuntime:
                 "state": state,
                 "steps": step_results,
                 "trace": trace,
+                "workflow_fingerprint": _checkpoint_fingerprint(workflow.steps or []),
                 "approval": {
                     **approval,
                     "status": "approved",
@@ -1593,21 +1601,20 @@ class AutomationRuntime:
             db.refresh(run)
             return run
         except Exception as exc:
-            run.status = "failed"
-            run.error_message = str(exc)[:2000]
-            run.finished_at = _utcnow_naive()
-            trace["status"] = "failed"
-            trace["finished_at"] = _trace_iso(run.finished_at)
-            run.output_data = {
-                "state": state,
-                "steps": step_results,
-                "trace": trace,
-                "approval": {
-                    **approval,
-                    "status": "approved_execution_failed",
+            _store_failed_run(
+                db,
+                run_id=run.id,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+                error=exc,
+                extra_output={
+                    "approval": {
+                        **approval,
+                        "status": "approved_execution_failed",
+                    },
                 },
-            }
-            db.commit()
+            )
             raise
 
     def resume_wait(
@@ -1776,6 +1783,13 @@ class AutomationRuntime:
                 if isinstance(result, dict):
                     state.update(result)
                 state.pop("_xvond_graph_resume", None)
+                run.output_data = {
+                    "state": deepcopy(state),
+                    "steps": deepcopy(step_results),
+                    "trace": deepcopy(trace),
+                    "workflow_fingerprint": _checkpoint_fingerprint(workflow.steps or []),
+                }
+                db.commit()
 
             run.status = "success"
             run.resume_at = None
@@ -1787,6 +1801,7 @@ class AutomationRuntime:
                 "state": state,
                 "steps": step_results,
                 "trace": trace,
+                "workflow_fingerprint": _checkpoint_fingerprint(workflow.steps or []),
                 "wait": {
                     **wait_checkpoint,
                     "status": "resumed",
@@ -1829,22 +1844,20 @@ class AutomationRuntime:
                 trace=trace,
             )
         except Exception as exc:
-            run.status = "failed"
-            run.resume_at = None
-            run.error_message = str(exc)[:2000]
-            run.finished_at = _utcnow_naive()
-            trace["status"] = "failed"
-            trace["finished_at"] = _trace_iso(run.finished_at)
-            run.output_data = {
-                "state": state,
-                "steps": step_results,
-                "trace": trace,
-                "wait": {
-                    **wait_checkpoint,
-                    "status": "resume_failed",
+            _store_failed_run(
+                db,
+                run_id=run.id,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+                error=exc,
+                extra_output={
+                    "wait": {
+                        **wait_checkpoint,
+                        "status": "resume_failed",
+                    },
                 },
-            }
-            db.commit()
+            )
             raise
 
     def resume_event(
@@ -2025,6 +2038,13 @@ class AutomationRuntime:
                 if isinstance(result, dict):
                     state.update(result)
                 state.pop("_xvond_graph_resume", None)
+                run.output_data = {
+                    "state": deepcopy(state),
+                    "steps": deepcopy(step_results),
+                    "trace": deepcopy(trace),
+                    "workflow_fingerprint": _checkpoint_fingerprint(workflow.steps or []),
+                }
+                db.commit()
 
             run.status = "success"
             run.resume_at = None
@@ -2036,6 +2056,7 @@ class AutomationRuntime:
                 "state": state,
                 "steps": step_results,
                 "trace": trace,
+                "workflow_fingerprint": _checkpoint_fingerprint(workflow.steps or []),
                 "event_wait": {
                     **event_wait,
                     "event_id": clean_event_id,
@@ -2079,24 +2100,21 @@ class AutomationRuntime:
                 trace=trace,
             )
         except Exception as exc:
-            run.status = "failed"
-            run.resume_at = None
-            run.resume_event_name = None
-            run.error_message = str(exc)[:2000]
-            run.finished_at = _utcnow_naive()
-            trace["status"] = "failed"
-            trace["finished_at"] = _trace_iso(run.finished_at)
-            run.output_data = {
-                "state": state,
-                "steps": step_results,
-                "trace": trace,
-                "event_wait": {
-                    **event_wait,
-                    "event_id": clean_event_id,
-                    "status": "resume_failed",
+            _store_failed_run(
+                db,
+                run_id=run.id,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+                error=exc,
+                extra_output={
+                    "event_wait": {
+                        **event_wait,
+                        "event_id": clean_event_id,
+                        "status": "resume_failed",
+                    },
                 },
-            }
-            db.commit()
+            )
             raise
 
     def execute_step(
