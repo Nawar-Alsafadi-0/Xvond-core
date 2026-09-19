@@ -6,6 +6,7 @@ import json
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from backend.app.core.config.settings import settings
 from backend.app.core.execution_claims import execution_claims
 from backend.app.core.http_security import safe_http_request, validate_public_http_url
 
@@ -41,8 +42,16 @@ def _access_token(config: dict) -> str:
 
 def _refresh_credentials(config: dict) -> tuple[str, str, str] | None:
     refresh_token = str(config.get("refresh_token") or "").strip()
-    client_id = str(config.get("client_id") or "").strip()
-    client_secret = str(config.get("client_secret") or "").strip()
+    client_id = str(
+        config.get("client_id")
+        or settings.GOOGLE_CALENDAR_OAUTH_CLIENT_ID
+        or ""
+    ).strip()
+    client_secret = str(
+        config.get("client_secret")
+        or settings.GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET
+        or ""
+    ).strip()
     if refresh_token and client_id and client_secret:
         return refresh_token, client_id, client_secret
     return None
