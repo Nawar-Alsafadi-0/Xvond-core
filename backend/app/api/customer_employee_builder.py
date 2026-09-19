@@ -3095,6 +3095,7 @@ def discover_self_service_capability(
                 "docs_url": result.get("docs_url"),
                 "contract_title": str(contract.get("title") or "")[:200],
                 "base_url": str(contract.get("base_url") or "")[:1200],
+                "auth_schemes": list(contract.get("auth_schemes") or [])[:10],
                 "operation_count": len(operations),
                 "attempted": list(result.get("attempted") or [])[:20],
             }
