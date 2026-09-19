@@ -40,6 +40,7 @@ from backend.app.modules.integrations.catalog import (
     validate_integration_config,
 )
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.integrations.openapi_contract import fetch_openapi_contract
 from backend.app.modules.integrations.http_api_auth import apply_http_api_auth
 from backend.app.modules.integrations.email_smtp import (
     EmailConnectorError,
@@ -71,6 +72,10 @@ class CustomerIntegrationUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     config: dict | None = None
     enabled: bool | None = None
+
+
+class CustomerIntegrationOpenAPIImport(BaseModel):
+    url: str = Field(min_length=8, max_length=2000)
 
 
 def _validate_live_connection(item: CompanyIntegration) -> dict:
@@ -604,6 +609,91 @@ def customer_integrations(
             .all()
         )
         return {"integrations": [_serialize_integration(item) for item in rows]}
+    finally:
+        db.close()
+
+
+@router.post("/integrations/{integration_id}/openapi")
+def customer_integration_import_openapi(
+    integration_id: int,
+    payload: CustomerIntegrationOpenAPIImport,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Import a bounded OpenAPI/Swagger document into a generic HTTP connection."""
+
+    db = SessionLocal()
+    try:
+        company_id = _self_service_company(db, current_user).id
+        item = (
+            db.query(CompanyIntegration)
+            .filter(
+                CompanyIntegration.id == integration_id,
+                CompanyIntegration.company_id == company_id,
+                CompanyIntegration.enabled.is_(True),
+            )
+            .first()
+        )
+        if item is None:
+            raise HTTPException(404, "Connected system not found or disabled")
+        if str(item.integration_type or "").strip().lower() not in {
+            "custom_api", "pos", "crm", "erp"
+        }:
+            raise HTTPException(409, "OpenAPI import is available only for generic HTTP API connections")
+
+        try:
+            contract = fetch_openapi_contract(payload.url)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(502, "OpenAPI document could not be fetched safely") from exc
+
+        _invalidate_bound_integration_previews(
+            db,
+            company_id=company_id,
+            integration_id=item.id,
+        )
+
+        plain = reveal_config(item.config) or {}
+        operations = dict(contract.get("operations") or {})
+        if not operations:
+            raise HTTPException(400, "OpenAPI contract has no executable operations")
+        plain["operations"] = operations
+        if not str(plain.get("base_url") or "").strip() and contract.get("base_url"):
+            plain["base_url"] = contract["base_url"]
+        plain.pop("_xvond_validation", None)
+        plain["_xvond_openapi"] = {
+            "title": str(contract.get("title") or "")[:200],
+            "openapi_version": str(contract.get("openapi_version") or "")[:40],
+            "operation_count": len(operations),
+            "imported_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        item.config = plain
+
+        audit_service.log(
+            db=db,
+            action="customer.integration_openapi_imported",
+            resource_type="integration",
+            resource_id=item.id,
+            user_id=current_user.id,
+            company_id=company_id,
+            details={
+                "integration_type": item.integration_type,
+                "operation_count": len(operations),
+                "contract_title": contract.get("title"),
+            },
+        )
+        db.commit()
+        return {
+            "status": "openapi_imported",
+            "integration_id": item.id,
+            "operation_count": len(operations),
+            "operations": operations,
+            "discovered_base_url": contract.get("base_url"),
+            "validation_required": True,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
     finally:
         db.close()
 
