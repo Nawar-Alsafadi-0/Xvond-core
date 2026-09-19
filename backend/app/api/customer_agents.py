@@ -168,5 +168,7 @@ def update_agent(
 
 
 from backend.app.api.customer_management import router as customer_management_router
+from backend.app.api.customer_google_calendar import router as customer_google_calendar_router
 
 router.include_router(customer_management_router)
+router.include_router(customer_google_calendar_router)
