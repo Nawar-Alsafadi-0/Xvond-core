@@ -2504,9 +2504,15 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
             timeout = float(raw.get("timeout") or 15)
         except (TypeError, ValueError):
             raise HTTPException(400, f"Invalid timeout for operation {name}")
+        input_mode = str(
+            raw.get("input_mode") or ("query" if method == "GET" else "json")
+        ).strip().lower()
+        if input_mode not in {"json", "query", "none"}:
+            raise HTTPException(400, f"Invalid input mode for operation {name}")
         result[name] = {
             "method": method,
             "endpoint": endpoint,
+            "input_mode": input_mode,
             "timeout": max(1, min(timeout, 30)),
         }
         if len(result) >= 20:
