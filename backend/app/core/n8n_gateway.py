@@ -102,6 +102,28 @@ class N8NActionGateway:
             max_retries_override=0,
         )
 
+    def deactivate_channel(
+        self,
+        *,
+        company_id: int,
+        agent_id: int,
+        channel_id: int,
+        connection_key: str,
+    ) -> dict[str, Any]:
+        """Deactivate one workflow-plane route without exposing its provider data."""
+        return self.execute(
+            company_id=company_id,
+            agent_id=agent_id,
+            action="channel.deactivate",
+            data={
+                "channel_id": channel_id,
+                "connection_key": connection_key,
+            },
+            # Registry deactivation is idempotent, but one request is enough for
+            # Core; callers persist cleanup-pending state and retry deliberately.
+            max_retries_override=0,
+        )
+
     def execute(
         self,
         *,
