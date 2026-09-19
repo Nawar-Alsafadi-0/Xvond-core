@@ -129,6 +129,7 @@ class EmployeeBuilderIntegrationBindRequest(BaseModel):
     availability_endpoint: str | None = Field(default=None, max_length=500)
     cancel_endpoint: str | None = Field(default=None, max_length=500)
     operations: dict[str, dict] = Field(default_factory=dict)
+    operation_map: dict[str, str] = Field(default_factory=dict)
 
 
 class EmployeeBuilderSetupAnswerRequest(BaseModel):
@@ -2845,6 +2846,134 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
     return result
 
 
+def _operation_match_tokens(value) -> set[str]:
+    stop = {
+        "a", "an", "the", "to", "for", "of", "and", "or", "api", "http",
+        "action", "operation", "request", "execute", "employee", "integration",
+        "system", "external", "data",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", str(value or "").lower())
+        if len(token) > 1 and token not in stop
+    }
+
+
+def _resolve_bound_graph_operations(
+    spec: dict,
+    *,
+    requirement_key: str,
+    operations: dict,
+    operation_map: dict | None = None,
+) -> tuple[dict, list[dict]]:
+    """Bind graph action nodes to real imported API operations, fail-closed if ambiguous."""
+    updated = deepcopy(spec)
+    available = {
+        normalize_requirement_key(key): dict(value)
+        for key, value in (operations or {}).items()
+        if normalize_requirement_key(key) and isinstance(value, dict)
+    }
+    explicit = {
+        str(node_id).strip(): normalize_requirement_key(operation)
+        for node_id, operation in (operation_map or {}).items()
+        if str(node_id).strip() and normalize_requirement_key(operation)
+    }
+    unresolved: list[dict] = []
+
+    def choose(node: dict, *, locator: str) -> str | None:
+        params = node.get("params") if isinstance(node.get("params"), dict) else {}
+        node_id = str(node.get("id") or "").strip()
+        requested = normalize_requirement_key(params.get("operation"))
+        if requested and requested in available:
+            return requested
+        forced = explicit.get(locator) or explicit.get(node_id)
+        if forced:
+            return forced if forced in available else None
+        if len(available) == 1:
+            return next(iter(available))
+        context_parts = [
+            node_id,
+            node.get("label"),
+            params.get("action_type"),
+            (params.get("arguments") or {}).keys()
+            if isinstance(params.get("arguments"), dict)
+            else "",
+        ]
+        context_tokens = _operation_match_tokens(" ".join(
+            " ".join(str(item) for item in part)
+            if not isinstance(part, str) and hasattr(part, "__iter__")
+            else str(part or "")
+            for part in context_parts
+        ))
+        ranked: list[tuple[int, str]] = []
+        for name, config in available.items():
+            name_tokens = _operation_match_tokens(name.replace("_", " "))
+            description_tokens = _operation_match_tokens(config.get("description"))
+            score = (4 * len(context_tokens & name_tokens)) + len(
+                context_tokens & description_tokens
+            )
+            ranked.append((score, name))
+        ranked.sort(reverse=True)
+        if ranked and ranked[0][0] > 0 and (
+            len(ranked) == 1 or ranked[0][0] > ranked[1][0]
+        ):
+            return ranked[0][1]
+        return None
+
+    def visit(graph: dict, *, prefix: str) -> None:
+        nodes = graph.get("nodes") if isinstance(graph, dict) else None
+        if not isinstance(nodes, list):
+            return
+        for index, raw in enumerate(nodes):
+            if not isinstance(raw, dict):
+                continue
+            node_id = str(raw.get("id") or f"node_{index + 1}").strip()
+            locator = f"{prefix}/{node_id}" if prefix else node_id
+            node_type = str(raw.get("type") or "").strip().lower()
+            params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
+            if (
+                node_type == "action"
+                and normalize_requirement_key(params.get("action_type"))
+                == requirement_key
+            ):
+                selected = choose(raw, locator=locator)
+                if selected:
+                    params = dict(params)
+                    params["operation"] = selected
+                    raw["params"] = params
+                else:
+                    unresolved.append({
+                        "node_id": node_id,
+                        "locator": locator,
+                        "label": str(raw.get("label") or "")[:200],
+                        "available_operations": sorted(available),
+                    })
+            elif node_type == "foreach":
+                nested = params.get("graph")
+                if isinstance(nested, dict):
+                    visit(nested, prefix=locator)
+
+    graph = updated.get("execution_graph")
+    if isinstance(graph, dict):
+        visit(graph, prefix="primary")
+    routines = updated.get("execution_routines")
+    if isinstance(routines, list):
+        for index, routine in enumerate(routines):
+            if not isinstance(routine, dict):
+                continue
+            routine_id = normalize_requirement_key(
+                routine.get("id") or routine.get("key") or f"routine_{index + 1}"
+            ) or f"routine_{index + 1}"
+            graph = (
+                routine.get("graph")
+                if isinstance(routine.get("graph"), dict)
+                else routine.get("execution_graph")
+            )
+            if isinstance(graph, dict):
+                visit(graph, prefix=routine_id)
+    return updated, unresolved
+
+
 def _relative_endpoint(value: str | None, *, required: bool = False) -> str | None:
     endpoint = str(value or "").strip()
     if not endpoint:
@@ -3416,6 +3545,25 @@ def bind_self_service_integration(
 
         compiled_value = dict(compiled_spec)
         compiled_value["requirements"] = requirements
+        compiled_value, unresolved_operations = _resolve_bound_graph_operations(
+            compiled_value,
+            requirement_key=key,
+            operations=operations,
+            operation_map=data.operation_map,
+        )
+        if unresolved_operations:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "api_operation_selection_required",
+                    "requirement_key": key,
+                    "message": (
+                        "Xvond found multiple API operations and could not safely "
+                        "choose one for every employee action."
+                    ),
+                    "unresolved": unresolved_operations,
+                },
+            )
 
         if isinstance(pending, dict):
             compiled_value["setup_required"] = [
