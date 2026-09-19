@@ -3464,3 +3464,61 @@ def test_graph_preview_allows_explicit_simulated_node_outputs():
 
     assert result["graph_outputs"]["external"]["preview_override"] is True
     assert result["graph_outputs"]["check"]["matched"] is True
+
+
+
+def test_graph_preview_can_use_stateless_real_ai_executor():
+    runtime = automation_runtime_module.AutomationRuntime()
+    captured = {}
+
+    def preview_ai_executor(*, prompt, context, node_scope):
+        captured.update(
+            {
+                "prompt": prompt,
+                "context": context,
+                "node_scope": node_scope,
+            }
+        )
+        return {
+            "ai_response": "preview answer",
+            "usage": {"total_tokens": 12},
+        }
+
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 1,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "think",
+                        "type": "ai",
+                        "depends_on": [],
+                        "params": {
+                            "prompt": "Analyze this.",
+                            "context": {"value": 42},
+                        },
+                    }
+                ],
+            },
+        },
+        state={
+            "_xvond_preview": True,
+            "_xvond_preview_ai_executor": preview_ai_executor,
+        },
+        run_id=0,
+        step_index=0,
+    )
+
+    output = result["graph_outputs"]["think"]
+    assert output["preview"] is True
+    assert output["simulated"] is False
+    assert output["ai_response"] == "preview answer"
+    assert captured == {
+        "prompt": "Analyze this.",
+        "context": {"value": 42},
+        "node_scope": "think",
+    }
