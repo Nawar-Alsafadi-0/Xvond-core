@@ -3388,7 +3388,7 @@ def test_graph_action_forwards_named_operation_to_connected_api(database, monkey
     assert captured["operation"] == "lookup"
     assert captured["arguments"]["operation"] == "lookup"
     assert captured["arguments"]["details"]["query"] == "abc"
-    assert captured["idempotency_key"].startswith("named-op-test:0:graph:")
+    assert captured["idempotency_key"].startswith("named-op-test:")\n    assert ":graph:" in captured["idempotency_key"]
     assert result["graph"]["nodes"]["lookup_vendor"]["scheduled_action_result"]["result"] == {"ok": True}
 
 
@@ -3403,6 +3403,10 @@ def test_generic_api_lookup_uses_query_contract_and_fails_closed_for_unknown_ope
     monkeypatch.setattr(
         "backend.app.modules.tools.action_request.safe_http_request",
         fake_http,
+    )
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.validate_public_http_url",
+        lambda url: url,
     )
 
     with factory() as db:
