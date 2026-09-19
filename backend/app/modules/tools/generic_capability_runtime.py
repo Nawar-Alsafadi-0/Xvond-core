@@ -18,6 +18,7 @@ from backend.app.modules.ai_agent.self_service_policy import (
 MAX_HTTP_RESPONSE_BYTES = 1_000_000
 MAX_RUNTIME_STEPS = 20
 _ALLOWED_COMPARE_OPERATORS = {"lt", "lte", "gt", "gte", "eq", "neq"}
+_ALLOWED_RUNTIME_OPERATIONS = {"http_get_json", "extract", "compare", "notify"}
 
 
 class GenericCapabilityRuntimeError(RuntimeError):
@@ -177,10 +178,48 @@ def generic_capability_readiness(action_config: dict) -> dict:
         return {"ready": False, "reason": "execution_plan_required"}
     if len(plan) > MAX_RUNTIME_STEPS:
         return {"ready": False, "reason": "execution_plan_too_large"}
+
     allowed_hosts = destination.get("allowed_hosts") or []
-    if any(isinstance(step, dict) and step.get("op") == "http_get_json" for step in plan):
-        if not allowed_hosts:
-            return {"ready": False, "reason": "approved_https_host_required"}
+    seen_ids: set[str] = set()
+    for raw_step in plan:
+        if not isinstance(raw_step, dict):
+            return {"ready": False, "reason": "invalid_runtime_step"}
+        step_id = str(raw_step.get("id") or "").strip()
+        op = str(raw_step.get("op") or "").strip().lower()
+        if not step_id or step_id in seen_ids:
+            return {"ready": False, "reason": "invalid_runtime_step_id"}
+        if op not in _ALLOWED_RUNTIME_OPERATIONS:
+            return {"ready": False, "reason": "unsupported_runtime_operation"}
+
+        if op == "http_get_json":
+            if not allowed_hosts:
+                return {"ready": False, "reason": "approved_https_host_required"}
+            if not str(raw_step.get("url_field") or "").strip():
+                return {"ready": False, "reason": "runtime_url_field_required"}
+
+        elif op == "extract":
+            source = str(raw_step.get("source") or "").strip()
+            if source not in seen_ids:
+                return {"ready": False, "reason": "runtime_source_unavailable"}
+            if not str(raw_step.get("path") or "").strip():
+                return {"ready": False, "reason": "runtime_extract_path_required"}
+
+        elif op == "compare":
+            source = str(raw_step.get("source") or "").strip()
+            if source not in seen_ids:
+                return {"ready": False, "reason": "runtime_source_unavailable"}
+            if str(raw_step.get("operator") or "").strip().lower() not in _ALLOWED_COMPARE_OPERATORS:
+                return {"ready": False, "reason": "unsupported_runtime_comparison"}
+            if not str(raw_step.get("value_field") or "").strip() and "value" not in raw_step:
+                return {"ready": False, "reason": "runtime_comparison_value_required"}
+
+        elif op == "notify":
+            when = str(raw_step.get("when") or "").strip()
+            if when and when not in seen_ids:
+                return {"ready": False, "reason": "runtime_condition_unavailable"}
+
+        seen_ids.add(step_id)
+
     return {"ready": True, "reason": None}
 
 
