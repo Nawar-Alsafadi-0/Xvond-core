@@ -40,7 +40,10 @@ from backend.app.modules.integrations.catalog import (
     validate_integration_config,
 )
 from backend.app.modules.integrations.models import CompanyIntegration
-from backend.app.modules.integrations.openapi_contract import fetch_openapi_contract
+from backend.app.modules.integrations.openapi_contract import (
+    discover_openapi_contract,
+    fetch_openapi_contract,
+)
 from backend.app.modules.integrations.http_api_auth import apply_http_api_auth
 from backend.app.modules.integrations.email_smtp import (
     EmailConnectorError,
@@ -619,6 +622,60 @@ def customer_integrations(
         db.close()
 
 
+def _store_openapi_contract(
+    db,
+    *,
+    company_id: int,
+    item: CompanyIntegration,
+    contract: dict,
+) -> dict:
+    _invalidate_bound_integration_previews(
+        db,
+        company_id=company_id,
+        integration_id=item.id,
+    )
+
+    plain = reveal_config(item.config) or {}
+    operations = dict(contract.get("operations") or {})
+    if not operations:
+        raise HTTPException(400, "OpenAPI contract has no executable operations")
+
+    plain["operations"] = operations
+    if not str(plain.get("base_url") or "").strip() and contract.get("base_url"):
+        plain["base_url"] = contract["base_url"]
+
+    if not str(plain.get("validation_endpoint") or "").strip():
+        safe_validation = next(
+            (
+                operation
+                for operation in operations.values()
+                if isinstance(operation, dict)
+                and str(operation.get("method") or "").upper() == "GET"
+                and not (operation.get("path_params") or [])
+                and not (operation.get("required_query_params") or [])
+                and str(operation.get("endpoint") or "").startswith("/")
+            ),
+            None,
+        )
+        if isinstance(safe_validation, dict):
+            plain["validation_endpoint"] = safe_validation["endpoint"]
+
+    plain.pop("_xvond_validation", None)
+    plain["_xvond_openapi"] = {
+        "title": str(contract.get("title") or "")[:200],
+        "openapi_version": str(contract.get("openapi_version") or "")[:40],
+        "operation_count": len(operations),
+        "source_url": str(
+            contract.get("discovery_url")
+            or contract.get("source_url")
+            or ""
+        )[:2000],
+        "imported_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    item.config = plain
+    return operations
+
+
 @router.post("/integrations/{integration_id}/openapi")
 def customer_integration_import_openapi(
     integration_id: int,
@@ -653,27 +710,13 @@ def customer_integration_import_openapi(
         except Exception as exc:
             raise HTTPException(502, "OpenAPI document could not be fetched safely") from exc
 
-        _invalidate_bound_integration_previews(
+        contract["source_url"] = payload.url
+        operations = _store_openapi_contract(
             db,
             company_id=company_id,
-            integration_id=item.id,
+            item=item,
+            contract=contract,
         )
-
-        plain = reveal_config(item.config) or {}
-        operations = dict(contract.get("operations") or {})
-        if not operations:
-            raise HTTPException(400, "OpenAPI contract has no executable operations")
-        plain["operations"] = operations
-        if not str(plain.get("base_url") or "").strip() and contract.get("base_url"):
-            plain["base_url"] = contract["base_url"]
-        plain.pop("_xvond_validation", None)
-        plain["_xvond_openapi"] = {
-            "title": str(contract.get("title") or "")[:200],
-            "openapi_version": str(contract.get("openapi_version") or "")[:40],
-            "operation_count": len(operations),
-            "imported_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        }
-        item.config = plain
 
         audit_service.log(
             db=db,
@@ -695,6 +738,84 @@ def customer_integration_import_openapi(
             "operation_count": len(operations),
             "operations": operations,
             "discovered_base_url": contract.get("base_url"),
+            "validation_required": True,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/integrations/{integration_id}/openapi/discover")
+def customer_integration_discover_openapi(
+    integration_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Discover OpenAPI/Swagger on the configured API host without asking for a docs URL."""
+
+    db = SessionLocal()
+    try:
+        company_id = _self_service_company(db, current_user).id
+        item = (
+            db.query(CompanyIntegration)
+            .filter(
+                CompanyIntegration.id == integration_id,
+                CompanyIntegration.company_id == company_id,
+                CompanyIntegration.enabled.is_(True),
+            )
+            .first()
+        )
+        if item is None:
+            raise HTTPException(404, "Connected system not found or disabled")
+        if str(item.integration_type or "").strip().lower() not in {
+            "custom_api", "pos", "crm", "erp"
+        }:
+            raise HTTPException(
+                409,
+                "OpenAPI discovery is available only for generic HTTP API connections",
+            )
+
+        plain = reveal_config(item.config) or {}
+        base_url = str(plain.get("base_url") or "").strip()
+        if not base_url:
+            raise HTTPException(409, "API Base URL is required before discovery")
+
+        try:
+            contract = discover_openapi_contract(base_url)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(502, "OpenAPI discovery failed safely") from exc
+
+        operations = _store_openapi_contract(
+            db,
+            company_id=company_id,
+            item=item,
+            contract=contract,
+        )
+        audit_service.log(
+            db=db,
+            action="customer.integration_openapi_discovered",
+            resource_type="integration",
+            resource_id=item.id,
+            user_id=current_user.id,
+            company_id=company_id,
+            details={
+                "integration_type": item.integration_type,
+                "operation_count": len(operations),
+                "discovery_url": contract.get("discovery_url"),
+            },
+        )
+        db.commit()
+        stored = reveal_config(item.config) or {}
+        return {
+            "status": "openapi_discovered",
+            "integration_id": item.id,
+            "operation_count": len(operations),
+            "operations": operations,
+            "discovery_url": contract.get("discovery_url"),
+            "validation_endpoint": stored.get("validation_endpoint"),
             "validation_required": True,
         }
     except HTTPException:
