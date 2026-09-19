@@ -129,6 +129,10 @@ class EmployeeBuilderPermissionRequest(BaseModel):
     mode: str = Field(min_length=4, max_length=20)
 
 
+class EmployeeBuilderRoutineStateRequest(BaseModel):
+    enabled: bool
+
+
 DEFAULT_CUSTOMER_CONTROLS = {
     "can_enable_disable": True,
     "can_view_conversations": True,
@@ -3812,6 +3816,223 @@ def apply_pending_live_revision(
             "agent_id": agent.id,
             "compiled_spec": self_service_spec_view(compiled_spec),
             "live_employee_replaced_atomically": True,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _employee_routine_rows(db, *, company_id: int, agent_id: int) -> list[AutomationWorkflow]:
+    rows = (
+        db.query(AutomationWorkflow)
+        .filter(AutomationWorkflow.company_id == int(company_id))
+        .order_by(AutomationWorkflow.id.asc())
+        .all()
+    )
+    result: list[AutomationWorkflow] = []
+    for row in rows:
+        config = row.trigger_config if isinstance(row.trigger_config, dict) else {}
+        if (
+            config.get("_xvond_source") == "self_service_employee"
+            and int(config.get("_xvond_agent_id") or 0) == int(agent_id)
+            and config.get("_xvond_graph_trigger") is True
+        ):
+            result.append(row)
+    return result
+
+
+def _workflow_routine_id(workflow: AutomationWorkflow) -> str:
+    config = workflow.trigger_config if isinstance(workflow.trigger_config, dict) else {}
+    return normalize_requirement_key(config.get("_xvond_routine_id") or "primary") or "primary"
+
+
+def _sync_routine_delivery_state(
+    config: AgentConfig,
+    *,
+    workflow: AutomationWorkflow,
+    routine_id: str,
+    enabled: bool,
+) -> None:
+    settings_value = deepcopy(dict(config.settings or {}))
+    builder = dict(settings_value.get("employee_builder") or {})
+    compiled_spec = (
+        deepcopy(builder.get("compiled_spec"))
+        if isinstance(builder.get("compiled_spec"), dict)
+        else None
+    )
+    if not isinstance(compiled_spec, dict):
+        return
+
+    delivery = (
+        deepcopy(compiled_spec.get("delivery"))
+        if isinstance(compiled_spec.get("delivery"), dict)
+        else {}
+    )
+    status = "ready" if enabled else "disabled"
+
+    graph_triggers = [
+        dict(item)
+        for item in (delivery.get("graph_triggers") or [])
+        if isinstance(item, dict)
+    ]
+    for item in graph_triggers:
+        stored_id = normalize_requirement_key(item.get("routine_id") or "primary") or "primary"
+        if stored_id == routine_id or int(item.get("workflow_id") or 0) == int(workflow.id):
+            item["status"] = status
+    if graph_triggers:
+        delivery["graph_triggers"] = graph_triggers
+
+    graph_trigger = delivery.get("graph_trigger")
+    if isinstance(graph_trigger, dict):
+        primary = dict(graph_trigger)
+        stored_id = normalize_requirement_key(primary.get("routine_id") or "primary") or "primary"
+        if stored_id == routine_id or int(primary.get("workflow_id") or 0) == int(workflow.id):
+            primary["status"] = status
+        delivery["graph_trigger"] = primary
+
+    compiled_spec["delivery"] = delivery
+    builder["compiled_spec"] = compiled_spec
+    builder["delivery"] = deepcopy(delivery)
+    settings_value["employee_builder"] = builder
+    config.settings = settings_value
+
+
+@router.get("/{agent_id}/routines")
+def customer_employee_routines(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        company = _company_or_404(db, company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Routine controls are available only for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+
+        routines = []
+        for workflow in _employee_routine_rows(
+            db,
+            company_id=company_id,
+            agent_id=agent.id,
+        ):
+            trigger_config = (
+                workflow.trigger_config
+                if isinstance(workflow.trigger_config, dict)
+                else {}
+            )
+            routines.append(
+                {
+                    "routine_id": _workflow_routine_id(workflow),
+                    "routine_name": trigger_config.get("_xvond_routine_name") or workflow.name,
+                    "workflow_id": workflow.id,
+                    "trigger_type": workflow.trigger_type,
+                    "enabled": bool(workflow.enabled),
+                    "paused_at": trigger_config.get("_xvond_paused_at"),
+                    "resumed_at": trigger_config.get("_xvond_resumed_at"),
+                }
+            )
+
+        return {
+            "agent_id": agent.id,
+            "employee_enabled": bool(agent.enabled),
+            "routines": routines,
+        }
+    finally:
+        db.close()
+
+
+@router.put("/{agent_id}/routines/{routine_id}")
+def customer_employee_set_routine_state(
+    agent_id: int,
+    routine_id: str,
+    data: EmployeeBuilderRoutineStateRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    normalized_routine = normalize_requirement_key(routine_id)
+    if not normalized_routine:
+        raise HTTPException(400, "Routine id is invalid")
+
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        company = _company_or_404(db, company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Routine controls are available only for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+
+        workflow = next(
+            (
+                row
+                for row in _employee_routine_rows(
+                    db,
+                    company_id=company_id,
+                    agent_id=agent.id,
+                )
+                if _workflow_routine_id(row) == normalized_routine
+            ),
+            None,
+        )
+        if workflow is None:
+            raise HTTPException(404, "Employee routine not found")
+
+        trigger_config = dict(workflow.trigger_config or {})
+        now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        workflow.enabled = bool(data.enabled)
+        if data.enabled:
+            trigger_config["_xvond_resumed_at"] = now_iso
+            trigger_config.pop("_xvond_paused_at", None)
+        else:
+            trigger_config["_xvond_paused_at"] = now_iso
+        workflow.trigger_config = trigger_config
+
+        _sync_routine_delivery_state(
+            config,
+            workflow=workflow,
+            routine_id=normalized_routine,
+            enabled=bool(data.enabled),
+        )
+        db.commit()
+
+        return {
+            "status": "resumed" if data.enabled else "paused",
+            "agent_id": agent.id,
+            "routine_id": normalized_routine,
+            "routine_name": trigger_config.get("_xvond_routine_name") or workflow.name,
+            "workflow_id": workflow.id,
+            "trigger_type": workflow.trigger_type,
+            "enabled": bool(workflow.enabled),
         }
     except HTTPException:
         db.rollback()

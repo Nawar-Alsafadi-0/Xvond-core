@@ -3125,3 +3125,86 @@ def test_nested_foreach_notifications_are_scoped_per_item():
         assert result["graph_outputs"]["each"]["count"] == 2
 
     engine.dispose()
+
+
+
+def test_resumed_interval_routine_waits_for_next_slot_instead_of_catching_up(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = lambda: Session(engine, autoflush=False)
+    monkeypatch.setattr(scheduler, "SessionLocal", factory)
+
+    with factory() as db:
+        db.add(
+            Company(
+                id=1,
+                name="Self Service",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Monitor",
+                system_prompt="monitor",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.add(
+            AutomationWorkflow(
+                id=1,
+                company_id=1,
+                name="Hourly routine",
+                trigger_type="schedule",
+                trigger_config={
+                    "_xvond_source": "self_service_employee",
+                    "_xvond_agent_id": 1,
+                    "_xvond_graph_trigger": True,
+                    "_xvond_routine_id": "hourly",
+                    "_xvond_resumed_at": "2026-09-18T12:05:00Z",
+                    "schedule": {"kind": "interval", "every_minutes": 60},
+                },
+                steps=[],
+                enabled=True,
+                created_at=datetime(2026, 9, 18, 10, 0),
+            )
+        )
+        db.commit()
+
+    called = []
+
+    def fake_execute(*, db, company_id, workflow, input_data):
+        called.append(dict(input_data))
+        run = AutomationRun(
+            company_id=company_id,
+            workflow_id=workflow.id,
+            status="success",
+            input_data=dict(input_data),
+            output_data={},
+            finished_at=datetime(2026, 9, 18, 13, 5),
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        return run
+
+    monkeypatch.setattr(scheduler.automation_runtime, "execute", fake_execute)
+
+    immediately_after_resume = scheduler.run_due_workflow(
+        1,
+        now=datetime(2026, 9, 18, 12, 10, tzinfo=UTC),
+    )
+    next_slot = scheduler.run_due_workflow(
+        1,
+        now=datetime(2026, 9, 18, 13, 6, tzinfo=UTC),
+    )
+
+    assert immediately_after_resume["status"] == "not_due"
+    assert next_slot["status"] == "success"
+    assert called[0]["_xvond_schedule_slot"] == "2026-09-18T13:05:00Z"
+    engine.dispose()
