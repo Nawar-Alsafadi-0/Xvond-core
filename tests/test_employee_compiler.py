@@ -932,3 +932,100 @@ def test_compiler_preserves_generic_durable_wait_node():
     assert nodes[1]["params"]["duration"] == 2
     assert nodes[1]["params"]["unit"] == "days"
     assert nodes[1]["params"]["source_text"] == "انتظر يومين"
+
+
+
+def test_compiler_drops_durable_wait_not_grounded_in_job_brief():
+    job_brief = "جهز المسودة ثم راجع النتيجة"
+    response = """{
+      "role":"Worker",
+      "scope":"personal",
+      "summary":"Prepare and review.",
+      "tasks":[{"name":"Task","description":"Prepare and review","trigger":"manual"}],
+      "requirements":[],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{"type":"manual"},
+        "nodes":[
+          {
+            "id":"prepare",
+            "type":"transform",
+            "depends_on":[],
+            "params":{"values":{"stage":"prepared"}}
+          },
+          {
+            "id":"invented_pause",
+            "type":"wait",
+            "depends_on":["prepare"],
+            "params":{
+              "duration":2,
+              "unit":"days",
+              "source_text":"انتظر يومين"
+            }
+          },
+          {
+            "id":"continue",
+            "type":"ai",
+            "depends_on":["invented_pause"],
+            "params":{"prompt":"Review the result."}
+          }
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+    nodes = spec["execution_graph"]["nodes"]
+
+    assert [node["type"] for node in nodes] == ["transform", "ai"]
+    assert nodes[1]["depends_on"] == []
+
+
+def test_compiler_grounds_waits_inside_foreach_graphs():
+    job_brief = "لكل عنصر جهزه وانتظر ساعة ثم كمل"
+    response = """{
+      "role":"Batch worker",
+      "scope":"personal",
+      "summary":"Process items with a requested pause.",
+      "tasks":[],
+      "requirements":[],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{"type":"manual"},
+        "nodes":[
+          {
+            "id":"each",
+            "type":"foreach",
+            "depends_on":[],
+            "params":{
+              "items":"$input.items",
+              "graph":{
+                "version":1,
+                "nodes":[
+                  {
+                    "id":"pause",
+                    "type":"wait",
+                    "depends_on":[],
+                    "params":{
+                      "duration":1,
+                      "unit":"hours",
+                      "source_text":"انتظر ساعة"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+    nested = spec["execution_graph"]["nodes"][0]["params"]["graph"]["nodes"]
+
+    assert len(nested) == 1
+    assert nested[0]["type"] == "wait"
+    assert nested[0]["params"]["source_text"] == "انتظر ساعة"
