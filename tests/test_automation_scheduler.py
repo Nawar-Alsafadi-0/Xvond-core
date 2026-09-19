@@ -2428,6 +2428,21 @@ def test_wait_graph_contract_is_generic_and_bounded():
     )
     assert any("at most one year" in item for item in errors)
 
+    ambiguous_until = graph_contract_errors(
+        {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "pause",
+                    "type": "wait",
+                    "depends_on": [],
+                    "params": {"until": "2026-10-01T09:00:00"},
+                }
+            ],
+        }
+    )
+    assert any("timezone offset" in item for item in ambiguous_until)
+
 
 def test_graph_wait_resumes_same_run_without_replaying_prior_nodes(monkeypatch):
     engine = create_engine("sqlite://")
