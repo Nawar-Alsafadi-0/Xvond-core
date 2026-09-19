@@ -90,11 +90,17 @@ def normalize_openapi_document(document: dict) -> dict:
             if isinstance(operation.get("parameters"), list):
                 parameters.extend(operation["parameters"])
 
-            has_query_parameters = any(
-                isinstance(item, dict)
+            query_parameters = [
+                item for item in parameters
+                if isinstance(item, dict)
                 and str(item.get("in") or "").strip().lower() == "query"
-                for item in parameters
-            )
+            ]
+            has_query_parameters = bool(query_parameters)
+            required_query_params = [
+                str(item.get("name") or "").strip()
+                for item in query_parameters
+                if item.get("required") is True and str(item.get("name") or "").strip()
+            ][:20]
             has_request_body = isinstance(operation.get("requestBody"), dict)
 
             if method == "GET":
@@ -118,6 +124,7 @@ def normalize_openapi_document(document: dict) -> dict:
                 "input_mode": input_mode,
                 "timeout": 15,
                 "path_params": list(dict.fromkeys(placeholders)),
+                "required_query_params": required_query_params,
                 "description": str(
                     operation.get("summary")
                     or operation.get("description")
