@@ -184,3 +184,26 @@ def test_openapi_discovery_fails_closed_when_no_contract_is_found(monkeypatch):
     )
     with pytest.raises(ValueError, match="No OpenAPI/Swagger"):
         discover_openapi_contract("https://api.vendor.example")
+
+
+
+def test_openapi_discovery_rejects_cross_port_execution_base(monkeypatch):
+    def fake_http(**kwargs):
+        return {
+            "status_code": 200,
+            "truncated": False,
+            "response": """
+            {
+              "openapi": "3.0.3",
+              "servers": [{"url": "https://api.vendor.example:444/v1"}],
+              "paths": {"/health": {"get": {"operationId": "health"}}}
+            }
+            """,
+        }
+
+    monkeypatch.setattr(
+        "backend.app.modules.integrations.openapi_contract.safe_http_request",
+        fake_http,
+    )
+    contract = discover_openapi_contract("https://api.vendor.example/v1")
+    assert contract["base_url"] is None
