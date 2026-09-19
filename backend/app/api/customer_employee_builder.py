@@ -4369,7 +4369,7 @@ def _run_duration_ms(run: AutomationRun | None) -> int | None:
 
 
 def _run_failure_detail(run: AutomationRun | None) -> dict | None:
-    if run is None or run.status != "failed":
+    if run is None or run.status not in {"failed", "waiting_retry"}:
         return None
 
     output = run.output_data if isinstance(run.output_data, dict) else {}
