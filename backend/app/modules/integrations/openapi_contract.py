@@ -90,11 +90,22 @@ def normalize_openapi_document(document: dict) -> dict:
             if isinstance(operation.get("parameters"), list):
                 parameters.extend(operation["parameters"])
 
-            has_query_parameters = any(
-                isinstance(item, dict)
-                and str(item.get("in") or "").strip().lower() == "query"
+            query_parameters = [
+                item
                 for item in parameters
-            )
+                if isinstance(item, dict)
+                and str(item.get("in") or "").strip().lower() == "query"
+            ]
+            has_query_parameters = bool(query_parameters)
+            required_query_params = [
+                str(item.get("name") or "").strip()
+                for item in query_parameters
+                if item.get("required") is True
+                and re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_.-]{0,63}",
+                    str(item.get("name") or "").strip(),
+                )
+            ]
             has_request_body = isinstance(operation.get("requestBody"), dict)
 
             if method == "GET":
@@ -118,6 +129,7 @@ def normalize_openapi_document(document: dict) -> dict:
                 "input_mode": input_mode,
                 "timeout": 15,
                 "path_params": list(dict.fromkeys(placeholders)),
+                "required_query_params": list(dict.fromkeys(required_query_params)),
                 "description": str(
                     operation.get("summary")
                     or operation.get("description")
@@ -175,3 +187,99 @@ def fetch_openapi_contract(url: str) -> dict:
     if result.get("truncated"):
         raise ValueError("OpenAPI document is too large")
     return parse_openapi_text(str(result.get("response") or ""))
+
+
+_OPENAPI_DISCOVERY_SUFFIXES = (
+    "openapi.json",
+    "swagger.json",
+    "api/openapi.json",
+    "openapi.yaml",
+    "swagger.yaml",
+)
+
+
+def _https_authority(value: str) -> tuple[str, int] | None:
+    parsed = urlparse(str(value or "").strip())
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        return None
+    return str(parsed.hostname).rstrip(".").lower(), int(parsed.port or 443)
+
+
+def openapi_discovery_urls(base_url: str) -> list[str]:
+    """Return bounded same-host candidate documentation URLs for a configured API."""
+
+    raw = str(base_url or "").strip().rstrip("/")
+    parsed = urlparse(raw)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("API base URL must be a plain public HTTPS URL")
+
+    origin = f"https://{parsed.netloc}"
+    roots = [raw]
+    if origin.rstrip("/") != raw:
+        roots.append(origin.rstrip("/"))
+
+    result: list[str] = []
+    for root in roots:
+        for suffix in _OPENAPI_DISCOVERY_SUFFIXES:
+            candidate = root.rstrip("/") + "/" + suffix
+            if candidate not in result:
+                result.append(candidate)
+            if len(result) >= 10:
+                return result
+    return result
+
+
+def discover_openapi_contract(base_url: str) -> dict:
+    """Probe common OpenAPI locations on the configured host only."""
+
+    configured_authority = _https_authority(base_url)
+    if configured_authority is None:
+        raise ValueError("API base URL must be a plain public HTTPS URL")
+    attempts: list[str] = []
+
+    for url in openapi_discovery_urls(base_url):
+        attempts.append(url)
+        try:
+            result = safe_http_request(
+                url=url,
+                method="GET",
+                headers={
+                    "Accept": "application/json, application/yaml, application/x-yaml, text/yaml, text/plain",
+                    "User-Agent": "Xvond-OpenAPI-Discovery/1.0",
+                },
+                timeout=8,
+                max_response_bytes=MAX_OPENAPI_RESPONSE_BYTES,
+            )
+        except Exception:
+            continue
+
+        status = int(result.get("status_code") or 0)
+        if not 200 <= status < 300 or result.get("truncated"):
+            continue
+
+        try:
+            contract = parse_openapi_text(str(result.get("response") or ""))
+        except ValueError:
+            continue
+
+        discovered_base = str(contract.get("base_url") or "").strip()
+        if discovered_base:
+            if _https_authority(discovered_base) != configured_authority:
+                # Discovery must never silently move execution to another
+                # host or port.
+                contract["base_url"] = None
+
+        return {
+            **contract,
+            "discovery_url": url,
+            "attempted_urls": attempts,
+        }
+
+    raise ValueError("No OpenAPI/Swagger contract was found on the configured API host")
