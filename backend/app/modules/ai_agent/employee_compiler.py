@@ -13,7 +13,7 @@ from backend.app.modules.channels.catalog import (
 )
 
 
-COMPILER_VERSION = 6
+COMPILER_VERSION = 7
 
 GENERIC_PRIMITIVES = {
     "workflow_engine",
@@ -242,7 +242,7 @@ Use this shape:
     "nodes": [
       {
         "id": "stable_node_id",
-        "type": "ai|media|action|http_get_json|web_fetch|browser|transform|condition|notify|foreach|select|filter|aggregate|state_read|state_write|state_delete",
+        "type": "ai|media|action|http_get_json|web_fetch|browser|transform|condition|notify|wait|foreach|select|filter|aggregate|state_read|state_write|state_delete",
         "depends_on": [],
         "params": {}
       }
@@ -263,6 +263,7 @@ Rules:
 - Always describe executable work as execution_graph nodes whenever the job contains more than a single conversational response. The graph is the general execution plan; requirements describe capabilities/connections needed to make that graph runnable.
 - execution_graph.trigger describes what starts the graph. Use manual when the user starts it explicitly, schedule for recurring/time-based work, webhook for an incoming external JSON event, and event for an internal Xvond event. Never invent a webhook/event trigger when the user did not request event-driven behavior.
 - For type=event, set trigger.event to the stable internal event name the graph should consume. Event names are capabilities of the Xvond runtime, not provider-specific webhook URLs.
+- Use a wait node only when the Job Brief explicitly requests a pause inside the same job before later steps continue. A wait is not an initial schedule trigger. Put either params.duration plus params.unit (seconds|minutes|hours|days|weeks), or params.until as an ISO-8601 timestamp with timezone. Include params.source_text copied verbatim from the Job Brief words that authorize the wait. Never invent a wait, delay, follow-up period or deadline.
 - Use generic node types, not use-case names. Examples: ai for reasoning/generation, media for generated visual media, action for a side effect through a requirement/connector, http_get_json for read-only JSON fetches, transform for data shaping, condition for branching gates, notify for an internal owner update.
 - ai and media nodes may use params.context to consume structured output from $input.* or $nodes.<id>.* while keeping the instruction itself in params.prompt. Prefer this over embedding raw upstream data inside prompt strings. Xvond bounds context before sending it to providers.
 - action nodes must reference a requirement key in params.action_type. Do not encode provider-specific logic in the graph.
