@@ -3,6 +3,7 @@ import pytest
 from backend.app.modules.integrations.openapi_contract import (
     discover_openapi_contract,
     normalize_openapi_document,
+    openapi_contract_from_document,
     openapi_discovery_urls,
     parse_openapi_text,
 )
