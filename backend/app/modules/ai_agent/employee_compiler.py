@@ -7,7 +7,10 @@ import re
 from datetime import datetime
 from typing import Any
 
-from backend.app.modules.automation.execution_graph import (\n    graph_action_types,\n    normalize_execution_graph,\n)
+from backend.app.modules.automation.execution_graph import (
+    graph_action_types,
+    normalize_execution_graph,
+)
 from backend.app.modules.channels.catalog import (
     canonical_channel_type,
     list_customer_channel_capabilities,
