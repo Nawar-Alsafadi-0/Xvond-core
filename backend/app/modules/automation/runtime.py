@@ -1707,13 +1707,30 @@ class AutomationRuntime:
                 nested_step: dict = {"type": node_type}
                 if node_type == "ai":
                     if preview_mode:
-                        node_outputs[node_id] = {
-                            "preview": True,
-                            "simulated": True,
-                            "ai_response": f"[simulated AI output for {node_scope}]",
-                            "prompt": params.get("prompt") or node.get("label"),
-                            "context": deepcopy(params.get("context")),
-                        }
+                        preview_ai = state.get("_xvond_preview_ai_executor")
+                        if callable(preview_ai):
+                            preview_result = preview_ai(
+                                prompt=str(params.get("prompt") or node.get("label") or ""),
+                                context=deepcopy(params.get("context")),
+                                node_scope=node_scope,
+                            )
+                            if not isinstance(preview_result, dict):
+                                raise ValueError(
+                                    f"Execution graph preview AI node {node_id} returned an invalid result"
+                                )
+                            node_outputs[node_id] = {
+                                "preview": True,
+                                "simulated": False,
+                                **preview_result,
+                            }
+                        else:
+                            node_outputs[node_id] = {
+                                "preview": True,
+                                "simulated": True,
+                                "ai_response": f"[simulated AI output for {node_scope}]",
+                                "prompt": params.get("prompt") or node.get("label"),
+                                "context": deepcopy(params.get("context")),
+                            }
                         continue
                     nested_step = {
                         "type": "ai",
