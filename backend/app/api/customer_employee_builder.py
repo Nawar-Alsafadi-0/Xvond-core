@@ -1259,7 +1259,16 @@ def _self_service_builder_journey(
             graph_trigger_status = str(
                 graph_trigger.get("status") or "not_required"
             )
-            if graph_trigger_status in {
+            if graph_trigger_status == "runtime_input_conflict":
+                conflicts = ", ".join(
+                    str(item)
+                    for item in (graph_trigger.get("runtime_input_conflicts") or [])
+                )
+                waiting_reasons.append(
+                    f"{routine_name} has conflicting runtime input keys"
+                    + (f": {conflicts}." if conflicts else ".")
+                )
+            elif graph_trigger_status in {
                 "schedule_required",
                 "schedule_setup_required",
                 "setup_required",
