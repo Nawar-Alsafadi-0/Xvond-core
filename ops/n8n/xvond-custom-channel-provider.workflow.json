@@ -1,0 +1,373 @@
+{
+  "id": "xvond-custom-channel-provider-v1",
+  "name": "Xvond Custom Channel Provider",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "xvond-custom-channel-inbound",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "custom-inbound-webhook",
+      "name": "Custom Channel Inbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        180,
+        180
+      ],
+      "webhookId": "xvond-custom-channel-inbound"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst item = $input.first();\nconst json = item.json || {};\nconst headers = json.headers || {};\nconst body = json.body || {};\nconst query = json.query || {};\nconst rawBase64 = item.binary?.data?.data || '';\nconst rawBody = rawBase64 ? Buffer.from(rawBase64, 'base64') : null;\nconst companyId = Number(query.company_id || 0);\nconst connectionKey = String(query.connection_key || '').trim();\nconst timestamp = String(headers['x-xvond-custom-timestamp'] || headers['X-Xvond-Custom-Timestamp'] || '').trim();\nconst signature = String(headers['x-xvond-custom-signature'] || headers['X-Xvond-Custom-Signature'] || '').trim();\nlet registry = {};\ntry { registry = JSON.parse($env.XVOND_CUSTOM_CHANNEL_ROUTES_JSON || '{}'); }\ncatch (_error) { return [{json:{_dispatch:'reject',_response:{success:false,error:'registry_invalid'},_http_status:403}}]; }\nconst routeKey = `${companyId}:${connectionKey}`;\nconst route = registry[routeKey];\nif (!companyId || !connectionKey || !route) {\n  return [{json:{_dispatch:'reject',_response:{success:false,error:'route_not_found'},_http_status:403}}];\n}\nconst inboundSecret = String(route.inbound_secret || '');\nconst requestTime = Number(timestamp || 0);\nconst now = Math.floor(Date.now() / 1000);\nif (!rawBody || inboundSecret.length < 32 || !requestTime || Math.abs(now - requestTime) > 300 || !signature.startsWith('v1=')) {\n  return [{json:{_dispatch:'reject',_response:{success:false,error:'signature_invalid'},_http_status:403}}];\n}\nconst base = `${timestamp}.${rawBody.toString('utf8')}`;\nconst expected = 'v1=' + crypto.createHmac('sha256', inboundSecret).update(base).digest('hex');\nconst a = Buffer.from(expected);\nconst b = Buffer.from(signature);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n  return [{json:{_dispatch:'reject',_response:{success:false,error:'signature_invalid'},_http_status:403}}];\n}\nconst externalContactId = String(body.external_contact_id || '').trim();\nconst externalMessageId = String(body.external_message_id || '').trim();\nconst message = String(body.message || '').trim();\nif (!externalContactId || !externalMessageId || !message) {\n  return [{json:{_dispatch:'reject',_response:{success:false,error:'invalid_contract'},_http_status:400}}];\n}\nreturn [{json:{\n  _dispatch:'xvond',\n  _response:{success:true,accepted:true,external_message_id:externalMessageId},\n  _http_status:202,\n  payload:{\n    company_id:Number(route.company_id || companyId),\n    agent_id:Number(route.agent_id || 0),\n    channel_id:Number(route.channel_id || 0),\n    channel_type:'custom',\n    external_contact_id:externalContactId,\n    external_message_id:externalMessageId,\n    message\n  }\n}}];"
+      },
+      "id": "verify-normalize-custom",
+      "name": "Verify and Normalize Custom Channel",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        430,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json._response }}",
+        "options": {
+          "responseCode": "={{ Number($json._http_status || 200) }}"
+        }
+      },
+      "id": "respond-custom-inbound",
+      "name": "Respond to Custom Sender",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        680,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "custom-forward",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "xvond",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-custom-inbound",
+      "name": "Forward Custom Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        920,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.XVOND_INTERNAL_CHANNEL_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Xvond-N8N-Secret",
+              "value": "={{ $env.N8N_SHARED_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "forward-custom-xvond",
+      "name": "Forward Custom Message to Xvond",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1170,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "xvond-custom-channel-provider",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "custom-outbound-webhook",
+      "name": "Custom Channel Provider",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        180,
+        540
+      ],
+      "webhookId": "xvond-custom-channel-provider"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst supplied = String(headers['x-xvond-channel-secret'] || headers['X-Xvond-Channel-Secret'] || '');\nconst requestId = String(body.request_id || headers['x-xvond-request-id'] || '').trim();\nconst action = String(body.action || '').trim();\nconst data = body.data && typeof body.data === 'object' ? body.data : {};\nconst companyId = Number(body.company_id || 0);\nconst connectionKey = String(data.connection_key || '').trim();\nlet registry = {};\ntry { registry = JSON.parse($env.XVOND_CUSTOM_CHANNEL_ROUTES_JSON || '{}'); }\ncatch (_error) { return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Custom channel registry is invalid',error_code:'provider_not_configured',data:null}}]; }\nconst routeKey = `${companyId}:${connectionKey}`;\nconst route = registry[routeKey];\nif (!route || String(route.provider_secret || '').length < 32 || String(route.outbound_secret || '').length < 32 || !route.outbound_url) {\n  return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Custom channel route is not configured',error_code:'provider_not_configured',data:null}}];\n}\nif (!supplied || supplied !== String(route.provider_secret)) {\n  return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unauthorized custom channel provider request',error_code:'unauthorized',data:null}}];\n}\nif (action !== 'channel.send') {\n  return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unsupported custom channel provider action',error_code:'unsupported_action',data:null}}];\n}\nlet outboundUrl;\ntry {\n  const parsed = new URL(String(route.outbound_url || ''));\n  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error('invalid');\n  if (['localhost','127.0.0.1','0.0.0.0','::1'].includes(parsed.hostname.toLowerCase())) throw new Error('invalid');\n  outboundUrl = parsed.toString();\n} catch (_error) {\n  return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Custom outbound URL is invalid',error_code:'provider_not_configured',data:null}}];\n}\nconst externalContactId = String(data.external_contact_id || '').trim();\nconst message = String(data.message || '').trim();\nconst idempotencyKey = String(data.idempotency_key || '').trim();\nif (!requestId || !externalContactId || !message || !idempotencyKey) {\n  return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Invalid custom channel send contract',error_code:'invalid_contract',data:null}}];\n}\nreturn [{json:{\n  success:true,\n  _dispatch:'custom_send',\n  request_id:requestId,\n  action,\n  route_key:routeKey,\n  outbound_url:outboundUrl,\n  outbound_secret:String(route.outbound_secret),\n  external_contact_id:externalContactId,\n  message,\n  idempotency_key:idempotencyKey\n}}];"
+      },
+      "id": "validate-custom-send",
+      "name": "Validate Custom Send",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        430,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "custom-send",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "custom_send",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-custom-send",
+      "name": "Send Custom Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        680,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.outbound_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Xvond-Custom-Secret",
+              "value": "={{ $json.outbound_secret }}"
+            },
+            {
+              "name": "X-Xvond-Request-ID",
+              "value": "={{ $json.request_id }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.idempotency_key }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ external_contact_id: $json.external_contact_id, message: $json.message, idempotency_key: $json.idempotency_key }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "send-custom-message",
+      "name": "Send Custom Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        930,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst request = $('Validate Custom Send').first().json;\nif (!response || response.success !== true || !String(response.provider_message_id || '').trim()) {\n  return [{json:{success:false,request_id:request.request_id,action:request.action,error:'Custom channel endpoint did not confirm delivery',error_code:'provider_rejected',data:null}}];\n}\nreturn [{json:{\n  success:true,\n  request_id:request.request_id,\n  action:request.action,\n  data:{provider_message_id:String(response.provider_message_id).trim()},\n  error:null\n}}];"
+      },
+      "id": "normalize-custom-result",
+      "name": "Normalize Custom Send Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1180,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
+      "id": "return-custom-provider",
+      "name": "Return Custom Provider",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1430,
+        540
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Custom Channel Inbound": {
+      "main": [
+        [
+          {
+            "node": "Verify and Normalize Custom Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify and Normalize Custom Channel": {
+      "main": [
+        [
+          {
+            "node": "Respond to Custom Sender",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Custom Sender": {
+      "main": [
+        [
+          {
+            "node": "Forward Custom Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Forward Custom Message?": {
+      "main": [
+        [
+          {
+            "node": "Forward Custom Message to Xvond",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Custom Channel Provider": {
+      "main": [
+        [
+          {
+            "node": "Validate Custom Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Custom Send": {
+      "main": [
+        [
+          {
+            "node": "Send Custom Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Custom Message?": {
+      "main": [
+        [
+          {
+            "node": "Send Custom Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Custom Provider",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Custom Message": {
+      "main": [
+        [
+          {
+            "node": "Normalize Custom Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Custom Send Result": {
+      "main": [
+        [
+          {
+            "node": "Return Custom Provider",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "88888888-8888-4888-8888-888888888888",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

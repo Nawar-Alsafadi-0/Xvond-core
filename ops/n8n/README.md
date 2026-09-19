@@ -55,6 +55,8 @@ Import and activate the Xvond-owned gateway/provider workflows:
 - `ops/n8n/xvond-telegram-provider.workflow.json` for Telegram Bot API inbound/outbound transport.
 - `ops/n8n/xvond-meta-messaging-provider.workflow.json` for Instagram DM and Facebook Messenger transport.
 - `ops/n8n/xvond-slack-provider.workflow.json` for Slack Events API inbound and Web API outbound transport.
+- `ops/n8n/xvond-custom-channel-provider.workflow.json` for the signed provider-neutral Custom/API channel protocol.
+- `ops/n8n/xvond-twilio-sms-provider.workflow.json` for Twilio SMS inbound/outbound transport.
 
 The first supported action is intentionally non-destructive: `health_check`.
 
@@ -211,6 +213,79 @@ sh scripts/validate_slack_channel_route.sh <company_id> <connection_key>
 The validator checks both route registries and calls Slack `auth.test` with the workflow-only bot token. It never prints the bot token, signing secret or provider secret.
 
 Slack remains subject to real provider acceptance: install the app into the intended workspace, grant the event/message scopes needed for the sold path, configure the Events API Request URL, and prove one real inbound/outbound round trip before calling that customer channel service-ready.
+
+
+### Custom / API provider
+
+Custom/API is a packaged provider-neutral channel protocol for communication surfaces that do not yet have a dedicated Xvond provider workflow.
+
+Configure both registries with the same tenant-scoped key `company_id:connection_key`:
+
+- `XVOND_CHANNEL_ROUTES_JSON` points the generic channel gateway to `https://<workflow-host>/webhook/xvond-custom-channel-provider` and carries the Xvond provider-route secret.
+- `XVOND_CUSTOM_CHANNEL_ROUTES_JSON` contains `company_id`, `agent_id`, `channel_id`, `inbound_secret`, `outbound_url`, `outbound_secret`, and the matching `provider_secret`.
+
+Inbound messages POST JSON to:
+
+`https://<workflow-host>/webhook/xvond-custom-channel-inbound?company_id=<id>&connection_key=<key>`
+
+The body contract is:
+
+```json
+{
+  "external_contact_id": "provider-conversation-or-recipient-id",
+  "external_message_id": "stable-provider-message-id",
+  "message": "customer message text"
+}
+```
+
+The sender must include the current Unix timestamp in `X-Xvond-Custom-Timestamp` and `X-Xvond-Custom-Signature: v1=<hex hmac>`, where the HMAC-SHA256 input is `<timestamp>.<raw_request_body>` using the route's `inbound_secret`. Requests outside the five-minute window fail closed.
+
+Outbound delivery POSTs to the route's credential-free HTTPS `outbound_url` with `X-Xvond-Custom-Secret`, `X-Xvond-Request-ID` and `Idempotency-Key`. The receiver must return:
+
+```json
+{
+  "success": true,
+  "provider_message_id": "stable-confirmed-delivery-id"
+}
+```
+
+Xvond does not accept delivery without a non-empty `provider_message_id`.
+
+Validate route structure before marking the Xvond channel connected:
+
+```sh
+sh scripts/validate_custom_channel_route.sh <company_id> <connection_key>
+```
+
+The validation command checks HTTPS destination policy, secret presence/length and registry consistency without making a customer-facing provider side effect. One real signed inbound plus provider-confirmed outbound round trip remains mandatory before that exact Custom/API connection is service-ready.
+
+
+### Twilio SMS provider
+
+SMS has a source-controlled Twilio binding on the shared Managed Channel Gateway.
+
+Configure both registries with the same tenant-scoped key `company_id:connection_key`:
+
+- `XVOND_CHANNEL_ROUTES_JSON` points the generic channel gateway to `https://<workflow-host>/webhook/xvond-twilio-sms-provider` and carries the Xvond provider-route secret.
+- `XVOND_TWILIO_SMS_ROUTES_JSON` contains `company_id`, `agent_id`, `channel_id`, `account_sid`, `auth_token`, the exact public `inbound_url`, the matching `provider_secret`, and exactly one sender: `from_number` or `messaging_service_sid`. Optional `inbound_number` can pin the destination number for inbound traffic.
+
+Configure the Twilio inbound message webhook to the exact `inbound_url`, for example:
+
+`https://<workflow-host>/webhook/xvond-twilio-sms-inbound?company_id=<id>&connection_key=<key>`
+
+The exact URL matters because Twilio signs the full webhook URL plus every `application/x-www-form-urlencoded` POST field. The workflow sorts all received form fields, appends name/value pairs to the stored exact URL, calculates HMAC-SHA1 with the primary Twilio Auth Token, Base64-encodes the result, and compares it to `X-Twilio-Signature`.
+
+Inbound `MessageSid` becomes the stable Xvond external message id; `From` becomes the conversation/contact id; `Body` becomes the customer text. Core deduplication therefore handles provider retries safely.
+
+Outbound delivery uses Twilio's Messages REST resource. Xvond accepts delivery only after Twilio returns a non-empty message `sid`, which becomes the provider message id. Ambiguous network outcomes remain non-retryable until reconciled by the existing managed-delivery runtime.
+
+Validate the route before marking the Xvond SMS channel connected:
+
+```sh
+sh scripts/validate_twilio_sms_route.sh <company_id> <connection_key>
+```
+
+The validator checks registry consistency, Twilio SID formats, exact signed inbound URL, sender configuration and provider secret consistency without printing the Auth Token or route secret. A real Twilio number or Messaging Service, webhook configuration and one inbound/outbound round trip are still required before that tenant SMS channel is service-ready.
 
 
 ## Booking adapter
