@@ -1,3 +1,5 @@
+from backend.app.core.config.settings import settings
+
 INTEGRATION_CATALOG = {
 
     "email_smtp": {
@@ -438,10 +440,19 @@ def validate_integration_config(
 
     if str(integration_type or "").strip().lower() == "calendar":
         access_token = str(config.get("access_token") or "").strip()
-        refresh_ready = all(
-            str(config.get(field) or "").strip()
-            for field in ("refresh_token", "client_id", "client_secret")
-        )
+        refresh_token = str(config.get("refresh_token") or "").strip()
+        client_id = str(
+            config.get("client_id")
+            or settings.GOOGLE_CALENDAR_OAUTH_CLIENT_ID
+            or ""
+        ).strip()
+        client_secret = str(
+            config.get("client_secret")
+            or settings.GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET
+            or ""
+        ).strip()
+        refresh_ready = bool(refresh_token and client_id and client_secret)
+
         if not access_token and not refresh_ready:
             raise ValueError(
                 "Google Calendar requires an access token or OAuth refresh credentials"
