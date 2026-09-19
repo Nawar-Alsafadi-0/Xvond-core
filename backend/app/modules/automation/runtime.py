@@ -1706,6 +1706,15 @@ class AutomationRuntime:
 
                 nested_step: dict = {"type": node_type}
                 if node_type == "ai":
+                    if preview_mode:
+                        node_outputs[node_id] = {
+                            "preview": True,
+                            "simulated": True,
+                            "ai_response": f"[simulated AI output for {node_scope}]",
+                            "prompt": params.get("prompt") or node.get("label"),
+                            "context": deepcopy(params.get("context")),
+                        }
+                        continue
                     nested_step = {
                         "type": "ai",
                         "agent_id": params.get("agent_id") or graph_agent_id,
