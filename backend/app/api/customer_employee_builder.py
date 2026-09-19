@@ -661,6 +661,161 @@ def _compiled_discovery_summary(spec: dict | None) -> dict:
     }
 
 
+def _attempt_compiled_capability_discovery(
+    db,
+    *,
+    company: Company,
+    agent: AIAgent,
+    spec: dict,
+) -> tuple[dict, list[dict]]:
+    """Resolve pending discovery plans during Build without user intervention."""
+    updated = deepcopy(spec)
+    requirements = [
+        dict(item) if isinstance(item, dict) else item
+        for item in (updated.get("requirements") or [])
+    ]
+    outcomes: list[dict] = []
+
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        key = normalize_requirement_key(requirement.get("key"))
+        discovery = requirement.get("discovery")
+        if not key or not isinstance(discovery, dict) or discovery.get("needed") is not True:
+            continue
+        if str(discovery.get("status") or "pending_discovery") == "resolved":
+            continue
+
+        result = discover_openapi_contract(discovery)
+        if result.get("status") != "resolved" or not isinstance(result.get("contract"), dict):
+            discovery = dict(discovery)
+            discovery["status"] = "not_found"
+            discovery["attempted"] = list(result.get("attempted") or [])[:20]
+            requirement["discovery"] = discovery
+            outcomes.append({"requirement_key": key, "status": "not_found"})
+            continue
+
+        contract = dict(result["contract"])
+        operations = _bounded_connection_operations(contract.get("operations") or {})
+        if not operations:
+            outcomes.append({"requirement_key": key, "status": "no_operations"})
+            continue
+
+        discovery = dict(discovery)
+        discovery.update({
+            "status": "contract_found",
+            "source": result.get("source"),
+            "docs_url": result.get("docs_url"),
+            "contract_title": str(contract.get("title") or "")[:200],
+            "base_url": str(contract.get("base_url") or "")[:1200],
+            "operation_count": len(operations),
+            "attempted": list(result.get("attempted") or [])[:20],
+        })
+        requirement["discovery"] = discovery
+        requirement["integration_operations"] = operations
+        requirement["requires_connection"] = True
+        requirement["fulfillment_mode"] = "external_connection"
+        requirement["status"] = "connection_required"
+        requirement["delivery_mode"] = "connect_and_compose"
+
+        auto_provisioned = False
+        access_mode = str(discovery.get("customer_access") or "unknown").strip().lower()
+        if access_mode == "none":
+            evidence = public_api_probe(contract)
+            base_url = str(contract.get("base_url") or "").strip().rstrip("/")
+            if evidence and base_url:
+                integration_config = {
+                    "base_url": base_url,
+                    "validation_endpoint": str(evidence.get("endpoint") or ""),
+                    "auth_type": "none",
+                    "operations": operations,
+                    "_xvond_validation": evidence,
+                    "_xvond_discovery": {
+                        "source": result.get("source"),
+                        "docs_url": result.get("docs_url"),
+                        "requirement_key": key,
+                    },
+                }
+                validate_integration_config("custom_api", integration_config)
+                current = (
+                    db.query(CompanyIntegration)
+                    .filter(
+                        CompanyIntegration.company_id == company.id,
+                        CompanyIntegration.enabled.is_(True),
+                    )
+                    .count()
+                )
+                service_limits.check_current(
+                    db, company.id, "ai_agents", "integrations", current
+                )
+                integration = CompanyIntegration(
+                    company_id=company.id,
+                    integration_type="custom_api",
+                    name=(
+                        str(discovery.get("service_hint") or "").strip()
+                        or str(contract.get("title") or "").strip()
+                        or key.replace("_", " ").title()
+                    )[:200],
+                    config=integration_config,
+                    enabled=True,
+                )
+                db.add(integration)
+                db.flush()
+                requirement["integration_id"] = integration.id
+                requirement["integration_type"] = "custom_api"
+                requirement["validation_required"] = True
+                requirement["status"] = "xvond_build"
+                requirement["delivery_mode"] = "compose"
+                discovery["status"] = "resolved"
+                discovery["auto_provisioned"] = True
+                auto_provisioned = True
+
+        outcomes.append({
+            "requirement_key": key,
+            "status": "resolved" if auto_provisioned else "contract_found",
+            "customer_access": access_mode,
+            "operation_count": len(operations),
+        })
+
+    updated["requirements"] = requirements
+    for outcome in outcomes:
+        if outcome.get("status") == "resolved":
+            resolved_key = normalize_requirement_key(outcome.get("requirement_key"))
+            updated["setup_required"] = [
+                item
+                for item in (updated.get("setup_required") or [])
+                if normalize_requirement_key(item) != resolved_key
+            ]
+            matching = next(
+                (
+                    item for item in requirements
+                    if isinstance(item, dict)
+                    and normalize_requirement_key(item.get("key")) == resolved_key
+                ),
+                None,
+            )
+            if isinstance(matching, dict):
+                updated, unresolved = _resolve_bound_graph_operations(
+                    updated,
+                    requirement_key=resolved_key,
+                    operations=matching.get("integration_operations") or {},
+                )
+                if unresolved:
+                    matching = next(
+                        item for item in updated["requirements"]
+                        if isinstance(item, dict)
+                        and normalize_requirement_key(item.get("key")) == resolved_key
+                    )
+                    matching["status"] = "connection_required"
+                    matching["delivery_mode"] = "connect_and_compose"
+                    matching.pop("integration_id", None)
+                    matching.pop("integration_type", None)
+                    matching["discovery"]["status"] = "operation_selection_required"
+                    outcome["status"] = "operation_selection_required"
+
+    return updated, outcomes
+
+
 def _compiler_connection_context(db, *, company_id: int) -> list[dict]:
     """Expose validated connection capabilities to the compiler without secrets or IDs."""
     rows = (
@@ -1056,6 +1211,12 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
                 candidate_response.text,
                 job_brief=job_brief,
             )
+            candidate_spec, discovery_outcomes = _attempt_compiled_capability_discovery(
+                db,
+                company=company,
+                agent=agent,
+                spec=candidate_spec,
+            )
             response = candidate_response
             selected = candidate
             compiled_spec = candidate_spec
@@ -1180,6 +1341,13 @@ def _compile_staged_employee_spec(
                 tools=None,
             )
             spec = parse_compiler_response(response.text, job_brief=job_brief)
+            company = db.query(Company).filter(Company.id == company_id).first()
+            spec, discovery_outcomes = _attempt_compiled_capability_discovery(
+                db,
+                company=company,
+                agent=agent,
+                spec=spec,
+            )
             spec = _carry_forward_requirement_bindings(previous_spec, spec)
             spec, _auto_bound = _auto_bind_single_packaged_integrations(
                 db,
