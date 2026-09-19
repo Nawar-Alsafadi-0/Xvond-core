@@ -66,14 +66,64 @@ function wsManagedChannelDetail(channel){
   }
   return `Xvond-managed provisioning${source?` requested via ${source}`:''}. Do not activate until provider/runtime verification is complete.`;
 }
+function wsManagedChannelActions(channel){
+  if(xvondSupportMode()||channel?.runtime_state!=='live'||channel?.enabled)return '';
+  const state=String(channel?.config?.provisioning_state||'').toLowerCase();
+  const agent=(xvondWorkspace.data?.view?.agents||[]).find(item=>+item.id===+channel.agent_id);
+  const company=xvondWorkspace.data?.view?.company||{};
+  const setupLabel=state==='connected'?'Verify / Change Route':'Complete Setup';
+  const activate=(state==='connected'&&company.active===true&&agent?.enabled===true)
+    ? `<button class="primary-button" onclick="activateManagedChannel(${Number(channel.id)})">Activate Channel</button>`
+    : '';
+  return `<div class="employee-actions" style="margin-top:12px"><button onclick="openManagedChannelSetup(${Number(channel.id)})">${setupLabel}</button>${activate}</div>`;
+}
 function renderManagedChannelRequests(agentId){
   const items=wsManagedChannelRequests(agentId);
   if(!items.length)return '';
-  return `<div class="workspace-panel" style="margin-top:14px"><div class="workspace-panel-head"><div><h4>Managed Channel Requests</h4><p>Requested by the employee contract. A request is not a live integration.</p></div></div><div class="channel-grid">${items.map(channel=>{
+  return `<div class="workspace-panel" style="margin-top:14px"><div class="workspace-panel-head"><div><h4>Managed Channel Requests</h4><p>Requested by the employee contract. Xvond verifies the provider route before marking a channel connected.</p></div></div><div class="channel-grid">${items.map(channel=>{
     const state=wsManagedChannelPresentation(channel);
-    return `<div class="channel-card"><div><span class="channel-name">${f(channel.channel_name||channel.channel_type)}</span>${wsPill(state.label,state.kind)}</div><p>${f(wsManagedChannelDetail(channel))}</p><div class="meta">Runtime: ${f(channel.runtime_state||'unknown')} · Setup: Xvond managed · Local: ${channel.enabled?'Active':'Inactive'}</div></div>`;
+    return `<div class="channel-card"><div><span class="channel-name">${f(channel.channel_name||channel.channel_type)}</span>${wsPill(state.label,state.kind)}</div><p>${f(wsManagedChannelDetail(channel))}</p><div class="meta">Runtime: ${f(channel.runtime_state||'unknown')} · Setup: Xvond managed · Local: ${channel.enabled?'Active':'Inactive'}</div>${wsManagedChannelActions(channel)}</div>`;
   }).join('')}</div></div>`;
 }
+
+window.openManagedChannelSetup=function(channelId){
+  const channel=(xvondWorkspace.data?.channels||[]).find(item=>+item.id===+channelId);
+  if(!channel){alert('Managed channel request not found.');return}
+  const cfg=channel.config||{};
+  openModal(
+    `Connect ${f(channel.channel_name||channel.channel_type)}`,
+    `<div class="modal-intro"><strong>Verify the provider route</strong><p>Provider credentials stay in the Xvond workflow/provider account. Core stores only the provider-neutral connection key after the gateway confirms it is configured.</p></div>
+      <div class="form-group"><label>Connection Key</label><input id="managed-channel-key" value="${f(cfg.connection_key||'')}" placeholder="Provider/workflow connection key"></div>
+      <div class="form-group"><label>Connected Account Label</label><input id="managed-channel-label" value="${f(cfg.provider_account_label||'')}" placeholder="e.g. Brand Instagram / Support Telegram"></div>
+      <div class="form-group"><label>Channel-only Instructions</label><textarea id="managed-channel-instructions" placeholder="Optional transport/channel rules only">${f(cfg.channel_instructions||'')}</textarea></div>
+      <button class="modal-submit" onclick="saveManagedChannelSetup(${Number(channel.id)})">Verify & Complete Setup</button>`
+  );
+};
+
+window.saveManagedChannelSetup=async function(channelId){
+  try{
+    const connection_key=String(document.getElementById('managed-channel-key')?.value||'').trim();
+    if(!connection_key)throw new Error('Connection key is required.');
+    const provider_account_label=String(document.getElementById('managed-channel-label')?.value||'').trim()||null;
+    const channel_instructions=String(document.getElementById('managed-channel-instructions')?.value||'').trim()||null;
+    await api(`/admin/channels/${Number(channelId)}/managed-connect`,{
+      method:'POST',
+      body:JSON.stringify({connection_key,provider_account_label,channel_instructions})
+    });
+    closeModal();
+    await loadCompanyControlCenter(xvondWorkspace.companyId,'channels');
+  }catch(error){alert(error.message)}
+};
+
+window.activateManagedChannel=async function(channelId){
+  try{
+    await api(`/admin/channels/${Number(channelId)}`,{
+      method:'PUT',
+      body:JSON.stringify({enabled:true})
+    });
+    await loadCompanyControlCenter(xvondWorkspace.companyId,'channels');
+  }catch(error){alert(error.message)}
+};
 function wsActiveOperations(){return (xvondWorkspace.data?.requests||[]).filter(x=>!['completed','cancelled'].includes(x.status))}
 function wsEnabledOperationCount(moduleName){return (xvondWorkspace.data?.agentMeta||[]).reduce((sum,row)=>sum+(row.actions||[]).filter(x=>x.enabled===true&&x.module===moduleName).length,0)}
 function wsPill(text,kind='neutral'){return `<span class="workspace-pill ${kind}">${f(text)}</span>`}
