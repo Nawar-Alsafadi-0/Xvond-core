@@ -1081,7 +1081,7 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
 
     _refresh_delivery_fields(prepared)
     delivery = {
-        "provisioning_version": 2,
+        "provisioning_version": 1,
         "action_plan": action_plan,
         "automation_plan": automation_plan,
         # Keep the singular field for old portal/API consumers.
