@@ -1211,29 +1211,49 @@ def _self_service_builder_journey(
                         f"Xvond execution setup is still required for {key.replace('_', ' ')}."
                     )
 
-        graph_trigger = (
-            (compiled_spec.get("delivery") or {}).get("graph_trigger")
+        delivery = (
+            compiled_spec.get("delivery")
             if isinstance(compiled_spec.get("delivery"), dict)
-            else None
+            else {}
         )
-        if (
-            isinstance(graph_trigger, dict)
-            and graph_trigger.get("trigger_type") == "webhook"
-            and graph_trigger.get("status") == "ready"
-            and graph_trigger.get("workflow_id")
-        ):
-            setup_actions.append(
-                _builder_action(
-                    "setup_webhook",
-                    "Configure webhook trigger",
-                    target="builder",
-                    key="webhook_trigger",
-                    detail="Copy the Xvond webhook URL and key into the external system that should trigger this employee.",
-                )
-            )
+        graph_triggers = (
+            [
+                item
+                for item in (delivery.get("graph_triggers") or [])
+                if isinstance(item, dict)
+            ]
+            if isinstance(delivery.get("graph_triggers"), list)
+            else []
+        )
+        if not graph_triggers and isinstance(delivery.get("graph_trigger"), dict):
+            graph_triggers = [delivery["graph_trigger"]]
 
-        if isinstance(graph_trigger, dict):
-            graph_trigger_status = str(graph_trigger.get("status") or "not_required")
+        for graph_trigger in graph_triggers:
+            routine_id = str(
+                graph_trigger.get("routine_id") or "primary"
+            ).strip() or "primary"
+            routine_name = str(
+                graph_trigger.get("routine_name")
+                or routine_id.replace("_", " ").title()
+            ).strip()
+            if (
+                graph_trigger.get("trigger_type") == "webhook"
+                and graph_trigger.get("status") == "ready"
+                and graph_trigger.get("workflow_id")
+            ):
+                setup_actions.append(
+                    _builder_action(
+                        "setup_webhook",
+                        f"Configure webhook for {routine_name}",
+                        target="builder",
+                        key=f"webhook_trigger:{routine_id}",
+                        detail="Copy this routine's Xvond webhook URL and key into the external system that should trigger it.",
+                    )
+                )
+
+            graph_trigger_status = str(
+                graph_trigger.get("status") or "not_required"
+            )
             if graph_trigger_status in {
                 "schedule_required",
                 "schedule_setup_required",
@@ -1241,7 +1261,7 @@ def _self_service_builder_journey(
                 "disabled",
             }:
                 waiting_reasons.append(
-                    "Xvond execution trigger setup is not ready yet."
+                    f"Xvond execution trigger setup is not ready for {routine_name}."
                 )
 
         for item in state.get("connected_system_setup") or []:
