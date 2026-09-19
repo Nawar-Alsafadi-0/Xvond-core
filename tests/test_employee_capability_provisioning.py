@@ -1889,3 +1889,185 @@ def test_legacy_execution_graph_still_provisions_as_primary_routine(database):
         )
         assert workflow.trigger_config["_xvond_routine_id"] == "primary"
         assert prepared["execution_graph"]["nodes"][0]["id"] == "done"
+
+
+
+def test_manual_run_requires_routine_id_when_employee_has_multiple_manual_routines(
+    database,
+    monkeypatch,
+):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+        db.add_all(
+            [
+                AutomationWorkflow(
+                    id=101,
+                    company_id=1,
+                    name="First manual routine",
+                    trigger_type="manual",
+                    trigger_config={
+                        "_xvond_source": "self_service_employee",
+                        "_xvond_agent_id": 1,
+                        "_xvond_graph_trigger": True,
+                        "_xvond_routine_id": "first",
+                        "_xvond_routine_name": "First",
+                    },
+                    steps=[{"type": "graph", "agent_id": 1, "graph": {"version": 1, "nodes": []}}],
+                    enabled=True,
+                ),
+                AutomationWorkflow(
+                    id=102,
+                    company_id=1,
+                    name="Second manual routine",
+                    trigger_type="manual",
+                    trigger_config={
+                        "_xvond_source": "self_service_employee",
+                        "_xvond_agent_id": 1,
+                        "_xvond_graph_trigger": True,
+                        "_xvond_routine_id": "second",
+                        "_xvond_routine_name": "Second",
+                    },
+                    steps=[{"type": "graph", "agent_id": 1, "graph": {"version": 1, "nodes": []}}],
+                    enabled=True,
+                ),
+            ]
+        )
+        db.commit()
+
+    executed = []
+
+    def fake_execute(*, db, company_id, workflow, input_data):
+        executed.append(workflow.id)
+        return SimpleNamespace(
+            id=900 + workflow.id,
+            workflow_id=workflow.id,
+            status="success",
+            output_data={"ok": True},
+            error_message=None,
+            created_at=None,
+            finished_at=None,
+        )
+
+    monkeypatch.setattr(api.automation_runtime, "execute", fake_execute)
+
+    with pytest.raises(HTTPException) as exc:
+        api.customer_employee_run_graph(
+            1,
+            api.EmployeeBuilderGraphRunRequest(input_data={}),
+            USER,
+        )
+    assert exc.value.status_code == 409
+    assert "multiple manual routines" in str(exc.value.detail)
+
+    result = api.customer_employee_run_graph(
+        1,
+        api.EmployeeBuilderGraphRunRequest(
+            input_data={"source": "owner"},
+            routine_id="second",
+        ),
+        USER,
+    )
+
+    assert executed == [102]
+    assert result["workflow_id"] == 102
+    assert result["routine_id"] == "second"
+    assert result["routine_name"] == "Second"
+
+
+def test_webhook_config_selects_requested_routine(database, monkeypatch):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings_value = deepcopy(config.settings)
+        builder = dict(settings_value.get("employee_builder") or {})
+        builder["compiled_spec"] = {
+            "role": "Webhook employee",
+            "requirements": [],
+            "delivery": {
+                "provisioning_version": 1,
+                "graph_trigger": {
+                    "routine_id": "alpha",
+                    "routine_name": "Alpha",
+                    "status": "ready",
+                    "workflow_id": 201,
+                    "trigger_type": "webhook",
+                },
+                "graph_triggers": [
+                    {
+                        "routine_id": "alpha",
+                        "routine_name": "Alpha",
+                        "status": "ready",
+                        "workflow_id": 201,
+                        "trigger_type": "webhook",
+                    },
+                    {
+                        "routine_id": "beta",
+                        "routine_name": "Beta",
+                        "status": "ready",
+                        "workflow_id": 202,
+                        "trigger_type": "webhook",
+                    },
+                ],
+            },
+        }
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.add_all(
+            [
+                AutomationWorkflow(
+                    id=201,
+                    company_id=1,
+                    name="Alpha",
+                    trigger_type="webhook",
+                    trigger_config={
+                        "_xvond_source": "self_service_employee",
+                        "_xvond_agent_id": 1,
+                        "_xvond_graph_trigger": True,
+                        "_xvond_routine_id": "alpha",
+                    },
+                    steps=[],
+                    enabled=True,
+                ),
+                AutomationWorkflow(
+                    id=202,
+                    company_id=1,
+                    name="Beta",
+                    trigger_type="webhook",
+                    trigger_config={
+                        "_xvond_source": "self_service_employee",
+                        "_xvond_agent_id": 1,
+                        "_xvond_graph_trigger": True,
+                        "_xvond_routine_id": "beta",
+                    },
+                    steps=[],
+                    enabled=True,
+                ),
+            ]
+        )
+        db.commit()
+
+    monkeypatch.setattr(api.settings, "PUBLIC_BASE_URL", "https://xvond.test")
+    monkeypatch.setattr(
+        api,
+        "automation_webhook_key",
+        lambda *, workflow_id, company_id: f"key-{company_id}-{workflow_id}",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        api.customer_employee_webhook(1, None, USER)
+    assert exc.value.status_code == 409
+    assert "multiple webhook routines" in str(exc.value.detail)
+
+    result = api.customer_employee_webhook(1, "beta", USER)
+
+    assert result["workflow_id"] == 202
+    assert result["routine_id"] == "beta"
+    assert result["routine_name"] == "Beta"
+    assert result["url"] == "https://xvond.test/webhooks/automation/202"
+    assert result["key"] == "key-1-202"
