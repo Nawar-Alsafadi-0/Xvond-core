@@ -19,7 +19,10 @@ from backend.app.modules.automation.schedule import (
 )
 from backend.app.modules.automation import scheduler
 from backend.app.modules.automation import runtime as automation_runtime_module
-from backend.app.modules.automation.execution_graph import graph_has_side_effect
+from backend.app.modules.automation.execution_graph import (
+    graph_contract_errors,
+    graph_has_side_effect,
+)
 from backend.app.modules.automation.webhook_auth import (
     automation_webhook_key,
     verify_automation_webhook_key,
@@ -2392,3 +2395,414 @@ def test_one_time_schedule_is_due_only_after_target_time():
     assert schedule["at"] == "2026-10-01T05:00:00Z"
     assert before is None
     assert due == datetime(2026, 10, 1, 5, 0, tzinfo=UTC)
+
+
+
+def test_wait_graph_contract_is_generic_and_bounded():
+    assert graph_contract_errors(
+        {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "pause",
+                    "type": "wait",
+                    "depends_on": [],
+                    "params": {"duration": 2, "unit": "days"},
+                }
+            ],
+        }
+    ) == []
+
+    errors = graph_contract_errors(
+        {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "pause",
+                    "type": "wait",
+                    "depends_on": [],
+                    "params": {"duration": 500, "unit": "weeks"},
+                }
+            ],
+        }
+    )
+    assert any("at most one year" in item for item in errors)
+
+
+def test_graph_wait_resumes_same_run_without_replaying_prior_nodes(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    calls = {"fetch": 0}
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_request(**kwargs):
+        calls["fetch"] += 1
+        return {
+            "status_code": 200,
+            "response": '{"value":42}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(
+            Company(
+                id=1,
+                name="Durable Wait",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Long-running worker",
+                system_prompt="Run durable work.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Durable wait graph",
+            trigger_type="manual",
+            trigger_config={"_xvond_agent_id": 1},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "fetch",
+                                "type": "http_get_json",
+                                "depends_on": [],
+                                "params": {"url": "https://example.com/data"},
+                            },
+                            {
+                                "id": "pause",
+                                "type": "wait",
+                                "depends_on": ["fetch"],
+                                "params": {"duration": 5, "unit": "minutes"},
+                            },
+                            {
+                                "id": "after_wait",
+                                "type": "notify",
+                                "depends_on": ["pause"],
+                                "params": {"message": "continued"},
+                            },
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        waiting = runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={"_xvond_execution_key": "durable-wait-test"},
+        )
+
+        assert waiting.status == "waiting_time"
+        assert waiting.resume_at is not None
+        assert waiting.finished_at is None
+        assert calls["fetch"] == 1
+        assert waiting.output_data["wait"]["node_id"] == "pause"
+
+        resumed = runtime.resume_wait(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=waiting,
+            now=waiting.resume_at,
+        )
+
+        assert resumed.id == waiting.id
+        assert resumed.status == "success"
+        assert resumed.resume_at is None
+        assert calls["fetch"] == 1
+        outputs = resumed.output_data["steps"][-1]["result"]["graph_outputs"]
+        assert outputs["pause"]["resumed"] is True
+        assert outputs["after_wait"]["notification"]["message"] == "continued"
+
+    engine.dispose()
+
+
+def test_scheduler_resumes_due_durable_wait(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = lambda: Session(engine, autoflush=False)
+
+    monkeypatch.setattr(scheduler, "SessionLocal", factory)
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    with factory() as db:
+        db.add(
+            Company(
+                id=1,
+                name="Due Wait",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Delayed worker",
+                system_prompt="Continue later.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Delayed workflow",
+            trigger_type="manual",
+            trigger_config={"_xvond_agent_id": 1},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "pause",
+                                "type": "wait",
+                                "depends_on": [],
+                                "params": {"duration": 1, "unit": "minutes"},
+                            },
+                            {
+                                "id": "done",
+                                "type": "notify",
+                                "depends_on": ["pause"],
+                                "params": {"message": "done"},
+                            },
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        waiting = automation_runtime_module.automation_runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={"_xvond_execution_key": "scheduler-wait-test"},
+        )
+        run_id = waiting.id
+        due_at = waiting.resume_at
+
+    result = scheduler.run_due_waiting_run(run_id, now=due_at)
+
+    assert result["run_id"] == run_id
+    assert result["status"] == "success"
+
+    with factory() as db:
+        stored = db.query(AutomationRun).filter(AutomationRun.id == run_id).one()
+        assert stored.status == "success"
+        assert stored.resume_at is None
+
+    engine.dispose()
+
+
+def test_nested_foreach_wait_resumes_without_replaying_completed_work(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    calls = {"fetch": 0}
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_request(**kwargs):
+        calls["fetch"] += 1
+        return {
+            "status_code": 200,
+            "response": '{"ok":true}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(
+            Company(
+                id=1,
+                name="Nested Wait",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Batch worker",
+                system_prompt="Process items with durable pauses.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Nested wait graph",
+            trigger_type="manual",
+            trigger_config={"_xvond_agent_id": 1},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "each",
+                                "type": "foreach",
+                                "depends_on": [],
+                                "params": {
+                                    "items": [{"id": 1}, {"id": 2}],
+                                    "graph": {
+                                        "version": 1,
+                                        "nodes": [
+                                            {
+                                                "id": "fetch",
+                                                "type": "http_get_json",
+                                                "depends_on": [],
+                                                "params": {
+                                                    "url": "https://example.com/data"
+                                                },
+                                            },
+                                            {
+                                                "id": "pause",
+                                                "type": "wait",
+                                                "depends_on": ["fetch"],
+                                                "params": {
+                                                    "duration": 1,
+                                                    "unit": "minutes",
+                                                },
+                                            },
+                                            {
+                                                "id": "done",
+                                                "type": "transform",
+                                                "depends_on": ["pause"],
+                                                "params": {
+                                                    "values": {"item_id": "$item.id"}
+                                                },
+                                            },
+                                        ],
+                                    },
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        first = runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={"_xvond_execution_key": "nested-wait-test"},
+        )
+        assert first.status == "waiting_time"
+        assert calls["fetch"] == 1
+
+        second = runtime.resume_wait(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=first,
+            now=first.resume_at,
+        )
+        assert second.status == "waiting_time"
+        assert calls["fetch"] == 2
+
+        finished = runtime.resume_wait(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=second,
+            now=second.resume_at,
+        )
+        assert finished.status == "success"
+        assert calls["fetch"] == 2
+        each = finished.output_data["steps"][-1]["result"]["graph_outputs"]["each"]
+        assert each["count"] == 2
+
+    engine.dispose()
