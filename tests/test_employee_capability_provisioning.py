@@ -3747,3 +3747,76 @@ def test_bound_api_operation_resolution_reaches_nested_foreach_graph():
     assert unresolved == []
     nested = resolved["execution_graph"]["nodes"][0]["params"]["graph"]
     assert nested["nodes"][0]["params"]["operation"] == "create_order"
+
+
+
+def test_openapi_required_query_parameter_fails_before_http_request(database, monkeypatch):
+    factory, _ = database
+    captured = {}
+
+    def fake_http(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 200, "response": "{\"ok\": true}", "truncated": False}
+
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.safe_http_request",
+        fake_http,
+    )
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.validate_public_http_url",
+        lambda url: url,
+    )
+
+    with factory() as db:
+        integration = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Search API",
+            config={
+                "base_url": "https://api.vendor.example",
+                "auth_type": "none",
+            },
+            enabled=True,
+        )
+        db.add(integration)
+        db.commit()
+        db.refresh(integration)
+
+        action = {
+            "destination": {
+                "type": "integration",
+                "integration_id": integration.id,
+                "operations": {
+                    "search_items": {
+                        "method": "GET",
+                        "endpoint": "/search",
+                        "input_mode": "query",
+                        "required_query_params": ["q"],
+                    }
+                },
+            }
+        }
+        missing = _integration_call(
+            db,
+            {"company_id": 1, "agent_id": 1},
+            "search",
+            action,
+            {"details": {"page": 1}},
+            "search_items",
+            idempotency_key="required-query-missing",
+        )
+        assert missing.success is False
+        assert "requires query parameter(s): q" in str(missing.error)
+        assert captured == {}
+
+        ok = _integration_call(
+            db,
+            {"company_id": 1, "agent_id": 1},
+            "search",
+            action,
+            {"details": {"q": "shoes", "page": 1}},
+            "search_items",
+            idempotency_key="required-query-ok",
+        )
+        assert ok.success is True
+        assert "q=shoes" in captured["url"]
