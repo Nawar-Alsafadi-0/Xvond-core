@@ -2071,3 +2071,181 @@ def test_webhook_config_selects_requested_routine(database, monkeypatch):
     assert result["routine_name"] == "Beta"
     assert result["url"] == "https://xvond.test/webhooks/automation/202"
     assert result["key"] == "key-1-202"
+
+
+
+def test_customer_can_pause_and_resume_one_employee_routine(database):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings_value = deepcopy(config.settings)
+        builder = dict(settings_value.get("employee_builder") or {})
+        builder["compiled_spec"] = {
+            "role": "Routine worker",
+            "requirements": [],
+            "delivery": {
+                "provisioning_version": 1,
+                "graph_trigger": {
+                    "routine_id": "morning",
+                    "routine_name": "Morning",
+                    "status": "ready",
+                    "workflow_id": 301,
+                    "trigger_type": "schedule",
+                },
+                "graph_triggers": [
+                    {
+                        "routine_id": "morning",
+                        "routine_name": "Morning",
+                        "status": "ready",
+                        "workflow_id": 301,
+                        "trigger_type": "schedule",
+                    },
+                    {
+                        "routine_id": "events",
+                        "routine_name": "Events",
+                        "status": "ready",
+                        "workflow_id": 302,
+                        "trigger_type": "event",
+                    },
+                ],
+            },
+        }
+        builder["delivery"] = deepcopy(builder["compiled_spec"]["delivery"])
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.add_all(
+            [
+                AutomationWorkflow(
+                    id=301,
+                    company_id=1,
+                    name="Morning",
+                    trigger_type="schedule",
+                    trigger_config={
+                        "_xvond_source": "self_service_employee",
+                        "_xvond_agent_id": 1,
+                        "_xvond_graph_trigger": True,
+                        "_xvond_routine_id": "morning",
+                        "_xvond_routine_name": "Morning",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 8,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    steps=[],
+                    enabled=True,
+                ),
+                AutomationWorkflow(
+                    id=302,
+                    company_id=1,
+                    name="Events",
+                    trigger_type="event",
+                    trigger_config={
+                        "_xvond_source": "self_service_employee",
+                        "_xvond_agent_id": 1,
+                        "_xvond_graph_trigger": True,
+                        "_xvond_routine_id": "events",
+                        "_xvond_routine_name": "Events",
+                        "event_name": "lead.created",
+                    },
+                    steps=[],
+                    enabled=True,
+                ),
+            ]
+        )
+        db.commit()
+
+    paused = api.customer_employee_set_routine_state(
+        1,
+        "morning",
+        api.EmployeeBuilderRoutineStateRequest(enabled=False),
+        USER,
+    )
+    assert paused["status"] == "paused"
+    assert paused["enabled"] is False
+
+    with factory() as db:
+        workflow = db.get(AutomationWorkflow, 301)
+        assert workflow.enabled is False
+        assert workflow.trigger_config["_xvond_paused_at"]
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        delivery = config.settings["employee_builder"]["compiled_spec"]["delivery"]
+        assert delivery["graph_trigger"]["status"] == "disabled"
+        statuses = {
+            item["routine_id"]: item["status"]
+            for item in delivery["graph_triggers"]
+        }
+        assert statuses == {"morning": "disabled", "events": "ready"}
+        assert config.settings["employee_builder"]["delivery"]["graph_trigger"]["status"] == "disabled"
+
+    resumed = api.customer_employee_set_routine_state(
+        1,
+        "morning",
+        api.EmployeeBuilderRoutineStateRequest(enabled=True),
+        USER,
+    )
+    assert resumed["status"] == "resumed"
+    assert resumed["enabled"] is True
+
+    with factory() as db:
+        workflow = db.get(AutomationWorkflow, 301)
+        assert workflow.enabled is True
+        assert "_xvond_paused_at" not in workflow.trigger_config
+        assert workflow.trigger_config["_xvond_resumed_at"]
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        delivery = config.settings["employee_builder"]["compiled_spec"]["delivery"]
+        assert delivery["graph_trigger"]["status"] == "ready"
+        statuses = {
+            item["routine_id"]: item["status"]
+            for item in delivery["graph_triggers"]
+        }
+        assert statuses == {"morning": "ready", "events": "ready"}
+
+
+def test_customer_routine_list_is_scoped_to_current_employee(database):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.add(
+            AutomationWorkflow(
+                id=401,
+                company_id=1,
+                name="Primary",
+                trigger_type="manual",
+                trigger_config={
+                    "_xvond_source": "self_service_employee",
+                    "_xvond_agent_id": 1,
+                    "_xvond_graph_trigger": True,
+                    "_xvond_routine_id": "primary",
+                    "_xvond_routine_name": "Primary",
+                },
+                steps=[],
+                enabled=False,
+            )
+        )
+        db.add(
+            AutomationWorkflow(
+                id=402,
+                company_id=1,
+                name="Unrelated",
+                trigger_type="manual",
+                trigger_config={
+                    "_xvond_source": "other_source",
+                    "_xvond_agent_id": 1,
+                    "_xvond_graph_trigger": True,
+                },
+                steps=[],
+                enabled=True,
+            )
+        )
+        db.commit()
+
+    result = api.customer_employee_routines(1, USER)
+
+    assert len(result["routines"]) == 1
+    assert result["routines"][0]["routine_id"] == "primary"
+    assert result["routines"][0]["enabled"] is False
