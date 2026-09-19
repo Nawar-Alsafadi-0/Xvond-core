@@ -99,6 +99,60 @@ The moat is not a prompt template.
 
 The moat is the system that can repeatedly convert many different jobs into safe, real, testable, maintainable employees.
 
+### 4.1 The employee must be operated, not merely generated
+
+Generating an agent, prompt, persona or configuration is only the beginning of the Xvond lifecycle.
+
+**Xvond is not successful when it outputs an AI Employee definition. Xvond is successful when that employee is connected, tested, launched and reliably performing the requested job.**
+
+The canonical value chain is:
+
+`Describe the job -> Understand -> Build -> Collect missing inputs -> Connect -> Validate -> Test -> Launch -> Operate -> Observe -> Refine`
+
+A generated employee that cannot execute its required real-world path is an incomplete product outcome.
+
+For example, if a customer asks for:
+
+> "An employee for my clinic that answers WhatsApp and books appointments."
+
+Xvond should not stop after generating instructions for a booking assistant. The intended product outcome includes, as applicable:
+
+- the clinic's real business knowledge;
+- working hours, services, prices and booking rules;
+- a connected communication channel;
+- a real booking execution path or connected system of record;
+- authorization and confirmation rules;
+- human handoff;
+- realistic Preview & Test;
+- readiness checks;
+- controlled launch;
+- observable delivery/action results;
+- ongoing monitoring and refinement.
+
+The customer should experience **an employee going to work**, not a configuration being generated.
+
+### 4.2 Agent generation is a feature, not the defensible product
+
+General AI systems can increasingly create agents from natural-language descriptions.
+
+Xvond must therefore not depend on "describe an agent and generate it" as the primary differentiated value.
+
+The defensible product value is the operational layer around the employee:
+
+- translating a business job into an executable contract;
+- identifying what is missing;
+- provisioning reusable capabilities;
+- connecting channels and business systems;
+- applying permissions and confirmations;
+- proving real execution;
+- handling failure and uncertain outcomes;
+- supporting human takeover;
+- operating the employee over time;
+- measuring cost and outcomes;
+- refining the same employee without rebuilding unrelated working parts.
+
+The builder is the front door. **The operating platform is the product.**
+
 ---
 
 ## 5. Core product principles
