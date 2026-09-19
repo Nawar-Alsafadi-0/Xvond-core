@@ -506,6 +506,7 @@ def _compiled_execution_routines(spec: dict) -> list[dict]:
                     "id": routine_id,
                     "name": name or routine_id,
                     "requirement_keys": requirement_keys,
+                    "requirement_scope_declared": "requirement_keys" in raw,
                     "graph": graph,
                 }
             )
@@ -522,6 +523,7 @@ def _compiled_execution_routines(spec: dict) -> list[dict]:
                 "id": "primary",
                 "name": "Primary routine",
                 "requirement_keys": [],
+                "requirement_scope_declared": False,
                 "graph": legacy_graph,
             }
         ]
@@ -1062,9 +1064,13 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                     requirement = requirements_by_key[requirement_key]
                     for key, value in (requirement.get("runtime_inputs") or {}).items():
                         routine_runtime_inputs.setdefault(str(key), value)
+            elif routine.get("requirement_scope_declared") is True:
+                # v10+ explicit empty scope means this routine intentionally
+                # consumes no requirement-owned runtime defaults.
+                routine_runtime_inputs = {}
             else:
-                # Backward compatibility for pre-v10 compiled employees whose
-                # routines did not declare requirement scope.
+                # Backward compatibility only for older compiled employees
+                # whose routines never had a requirement scope field.
                 routine_runtime_inputs = dict(shared_graph_runtime_inputs)
 
             status, workflow_id = _provision_self_service_graph_trigger(
