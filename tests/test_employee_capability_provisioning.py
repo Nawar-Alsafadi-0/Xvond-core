@@ -2519,3 +2519,76 @@ def test_v10_explicit_empty_routine_scope_does_not_inherit_shared_inputs(databas
         assert workflow.trigger_config["input_data"] == {}
         assert workflow.trigger_config["_xvond_runtime_inputs"] == {}
         assert workflow.trigger_config["_xvond_requirement_keys"] == []
+
+
+
+def test_routine_runtime_input_conflict_blocks_workflow_provisioning(database):
+    factory, _ = database
+    spec = {
+        "version": 10,
+        "role": "Conflicted routine",
+        "scope": "personal",
+        "requirements": [
+            {
+                "key": "source_one",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {"target": "A"},
+            },
+            {
+                "key": "source_two",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {"target": "B"},
+            },
+        ],
+        "permissions": [],
+        "execution_routines": [
+            {
+                "id": "conflicted",
+                "name": "Conflicted routine",
+                "requirement_keys": ["source_one", "source_two"],
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 8,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Done"},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        _, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=1,
+            spec=spec,
+        )
+        db.commit()
+
+        trigger = delivery["graph_triggers"][0]
+        assert trigger["status"] == "runtime_input_conflict"
+        assert trigger["runtime_input_conflicts"] == ["target"]
+        assert trigger["workflow_id"] is None
+        assert (
+            db.query(AutomationWorkflow)
+            .filter(AutomationWorkflow.company_id == 1)
+            .count()
+            == 0
+        )
