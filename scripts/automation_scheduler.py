@@ -3,7 +3,10 @@ import os
 import signal
 import time
 
-from backend.app.modules.automation.scheduler import (\n    run_due_schedules_once,\n    run_due_waits_once,\n)
+from backend.app.modules.automation.scheduler import (
+    run_due_schedules_once,
+    run_due_waits_once,
+)
 from backend.app.modules.automation.event_outbox import (
     dispatch_pending_automation_events_once,
 )
