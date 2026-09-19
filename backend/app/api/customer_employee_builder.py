@@ -52,6 +52,10 @@ from backend.app.modules.ai_agent.self_service_policy import (
 )
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.automation.runtime import automation_runtime
+from backend.app.modules.automation.schedule import (
+    ScheduleConfigError,
+    next_schedule_slot,
+)
 from backend.app.modules.automation.webhook_auth import automation_webhook_key
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
@@ -3855,6 +3859,117 @@ def _employee_routine_rows(db, *, company_id: int, agent_id: int) -> list[Automa
     return result
 
 
+def _runtime_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.replace(microsecond=0).isoformat() + (
+        "" if value.tzinfo is not None else "Z"
+    )
+
+
+def _routine_operational_state(
+    *,
+    workflow: AutomationWorkflow,
+    latest_run: AutomationRun | None,
+    employee_enabled: bool,
+) -> dict:
+    trigger_config = (
+        workflow.trigger_config
+        if isinstance(workflow.trigger_config, dict)
+        else {}
+    )
+
+    if not employee_enabled:
+        state = "employee_paused"
+    elif not workflow.enabled:
+        state = "paused"
+    elif latest_run is None:
+        state = "never_run"
+    elif latest_run.status in {"queued", "running"}:
+        state = "running"
+    elif latest_run.status == "waiting_time":
+        state = "waiting_time"
+    elif latest_run.status == "waiting_event":
+        state = "waiting_event"
+    elif latest_run.status == "waiting_approval":
+        state = "waiting_approval"
+    elif latest_run.status == "failed":
+        state = "needs_attention"
+    elif latest_run.status in {"success", "rejected"}:
+        state = "healthy"
+    else:
+        state = str(latest_run.status or "unknown")
+
+    next_scheduled_at = None
+    schedule = trigger_config.get("schedule")
+    if (
+        workflow.trigger_type == "schedule"
+        and isinstance(schedule, dict)
+        and workflow.enabled
+    ):
+        schedule_start = workflow.created_at
+        resumed_at = str(trigger_config.get("_xvond_resumed_at") or "").strip()
+        if resumed_at:
+            try:
+                schedule_start = datetime.fromisoformat(
+                    resumed_at.replace("Z", "+00:00")
+                )
+            except ValueError:
+                schedule_start = workflow.created_at
+        try:
+            next_slot = next_schedule_slot(
+                schedule,
+                after=datetime.utcnow(),
+                created_at=schedule_start,
+            )
+            next_scheduled_at = _runtime_datetime(next_slot)
+        except (ScheduleConfigError, ValueError):
+            next_scheduled_at = None
+
+    waiting = None
+    if latest_run is not None and latest_run.status == "waiting_time":
+        waiting = {
+            "type": "time",
+            "resume_at": _runtime_datetime(latest_run.resume_at),
+        }
+    elif latest_run is not None and latest_run.status == "waiting_event":
+        waiting = {
+            "type": "event",
+            "event_name": latest_run.resume_event_name,
+        }
+    elif latest_run is not None and latest_run.status == "waiting_approval":
+        approval = (
+            (latest_run.output_data or {}).get("approval")
+            if isinstance(latest_run.output_data, dict)
+            else None
+        )
+        waiting = {
+            "type": "approval",
+            "action_type": (
+                approval.get("action_type")
+                if isinstance(approval, dict)
+                else None
+            ),
+        }
+
+    return {
+        "operational_state": state,
+        "next_scheduled_at": next_scheduled_at,
+        "waiting": waiting,
+        "last_run": (
+            {
+                "id": latest_run.id,
+                "status": latest_run.status,
+                "created_at": _runtime_datetime(latest_run.created_at),
+                "finished_at": _runtime_datetime(latest_run.finished_at),
+                "error_message": latest_run.error_message,
+            }
+            if latest_run is not None
+            else None
+        ),
+    }
+
+
 def _workflow_routine_id(workflow: AutomationWorkflow) -> str:
     config = workflow.trigger_config if isinstance(workflow.trigger_config, dict) else {}
     return normalize_requirement_key(config.get("_xvond_routine_id") or "primary") or "primary"
@@ -3936,16 +4051,36 @@ def customer_employee_routines(
         if agent is None:
             raise HTTPException(404, "Employee not found")
 
-        routines = []
-        for workflow in _employee_routine_rows(
+        workflow_rows = _employee_routine_rows(
             db,
             company_id=company_id,
             agent_id=agent.id,
-        ):
+        )
+        workflow_ids = [row.id for row in workflow_rows]
+        latest_runs: dict[int, AutomationRun] = {}
+        if workflow_ids:
+            for run in (
+                db.query(AutomationRun)
+                .filter(
+                    AutomationRun.company_id == company_id,
+                    AutomationRun.workflow_id.in_(workflow_ids),
+                )
+                .order_by(AutomationRun.id.desc())
+                .all()
+            ):
+                latest_runs.setdefault(run.workflow_id, run)
+
+        routines = []
+        for workflow in workflow_rows:
             trigger_config = (
                 workflow.trigger_config
                 if isinstance(workflow.trigger_config, dict)
                 else {}
+            )
+            operational = _routine_operational_state(
+                workflow=workflow,
+                latest_run=latest_runs.get(workflow.id),
+                employee_enabled=bool(agent.enabled),
             )
             routines.append(
                 {
@@ -3956,6 +4091,12 @@ def customer_employee_routines(
                     "enabled": bool(workflow.enabled),
                     "paused_at": trigger_config.get("_xvond_paused_at"),
                     "resumed_at": trigger_config.get("_xvond_resumed_at"),
+                    "schedule": (
+                        deepcopy(trigger_config.get("schedule"))
+                        if isinstance(trigger_config.get("schedule"), dict)
+                        else None
+                    ),
+                    **operational,
                 }
             )
 
