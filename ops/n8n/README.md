@@ -54,6 +54,7 @@ Import and activate the Xvond-owned gateway/provider workflows:
 - `ops/n8n/xvond-channel-inbound.workflow.json` for normalized inbound communication-channel messages.
 - `ops/n8n/xvond-telegram-provider.workflow.json` for Telegram Bot API inbound/outbound transport.
 - `ops/n8n/xvond-meta-messaging-provider.workflow.json` for Instagram DM and Facebook Messenger transport.
+- `ops/n8n/xvond-slack-provider.workflow.json` for Slack Events API inbound and Web API outbound transport.
 
 The first supported action is intentionally non-destructive: `health_check`.
 
@@ -183,6 +184,34 @@ sh scripts/validate_meta_messaging_route.sh <company_id> <connection_key>
 The validation command checks both route registries and confirms that the configured sender/account id is reachable with the stored provider token. It never prints the provider credentials.
 
 Provider-side setup remains an external acceptance gate. For Messenger, the Meta app/Page must have the messaging permissions needed for the intended Page. For Instagram, the professional account/app must have the messaging permission required by the Instagram Messages API. Meta webhook subscription, app review/access level where required, customer message eligibility and one real inbound/outbound round trip must all pass before that customer channel is called service-ready.
+
+### Slack provider
+
+Slack now has a source-controlled binding on the shared Managed Channel Gateway.
+
+Configure both registries with the same tenant-scoped key `company_id:connection_key`:
+
+- `XVOND_CHANNEL_ROUTES_JSON` points the generic channel gateway to `https://<workflow-host>/webhook/xvond-slack-provider` and carries only the Xvond provider-route secret.
+- `XVOND_SLACK_ROUTES_JSON` carries workflow-only Slack settings: `company_id`, `agent_id`, `channel_id`, `bot_token`, `signing_secret`, optional `team_id`, and the matching `provider_secret`.
+
+The Slack Events API Request URL is:
+
+`https://<workflow-host>/webhook/xvond-slack-inbound?company_id=<id>&connection_key=<key>`
+
+Inbound requests are verified from the raw body using Slack's `v0:<timestamp>:<raw_body>` HMAC-SHA256 signature and are rejected when the request timestamp is older than five minutes. URL verification challenges are answered by the same webhook. Bot-authored events and unsupported message subtypes are ignored.
+
+Inbound `event_id` is used as the stable external message identity. The Slack conversation/channel id is used as the external contact id so replies return to the same Slack conversation. Outbound delivery uses `chat.postMessage`; Xvond accepts success only when Slack returns a message `ts`, which becomes the provider message id.
+
+Validate the route before marking the Xvond channel connected:
+
+```sh
+sh scripts/validate_slack_channel_route.sh <company_id> <connection_key>
+```
+
+The validator checks both route registries and calls Slack `auth.test` with the workflow-only bot token. It never prints the bot token, signing secret or provider secret.
+
+Slack remains subject to real provider acceptance: install the app into the intended workspace, grant the event/message scopes needed for the sold path, configure the Events API Request URL, and prove one real inbound/outbound round trip before calling that customer channel service-ready.
+
 
 ## Booking adapter
 

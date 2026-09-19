@@ -1,0 +1,365 @@
+{
+  "id": "xvond-slack-provider-v1",
+  "name": "Xvond Slack Provider",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "xvond-slack-inbound",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "slack-inbound-webhook",
+      "name": "Slack Inbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        180,
+        180
+      ],
+      "webhookId": "xvond-slack-inbound"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst item = $input.first();\nconst json = item.json || {};\nconst headers = json.headers || {};\nconst body = json.body || {};\nconst query = json.query || {};\nconst signature = String(headers['x-slack-signature'] || headers['X-Slack-Signature'] || '');\nconst timestamp = String(headers['x-slack-request-timestamp'] || headers['X-Slack-Request-Timestamp'] || '');\nconst rawBase64 = item.binary?.data?.data || '';\nconst rawBody = rawBase64 ? Buffer.from(rawBase64, 'base64') : null;\nconst companyId = Number(query.company_id || 0);\nconst connectionKey = String(query.connection_key || '').trim();\nlet registry = {};\ntry { registry = JSON.parse($env.XVOND_SLACK_ROUTES_JSON || '{}'); }\ncatch (_e) { return [{json:{_dispatch:'reject',_response:{error:'registry_invalid'},_http_status:403}}]; }\nconst routeKey = `${companyId}:${connectionKey}`;\nconst route = registry[routeKey];\nif (!companyId || !connectionKey || !route) {\n  return [{json:{_dispatch:'reject',_response:{error:'route_not_found'},_http_status:403}}];\n}\nconst signingSecret = String(route.signing_secret || '');\nconst requestTime = Number(timestamp || 0);\nconst now = Math.floor(Date.now() / 1000);\nif (!rawBody || !signingSecret || !signature.startsWith('v0=') || !requestTime || Math.abs(now - requestTime) > 300) {\n  return [{json:{_dispatch:'reject',_response:{error:'signature_invalid'},_http_status:403}}];\n}\nconst base = `v0:${timestamp}:${rawBody.toString('utf8')}`;\nconst expected = 'v0=' + crypto.createHmac('sha256', signingSecret).update(base).digest('hex');\nconst a = Buffer.from(expected);\nconst b = Buffer.from(signature);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n  return [{json:{_dispatch:'reject',_response:{error:'signature_invalid'},_http_status:403}}];\n}\nif (route.team_id && String(body.team_id || '') !== String(route.team_id)) {\n  return [{json:{_dispatch:'reject',_response:{error:'workspace_mismatch'},_http_status:403}}];\n}\nif (String(body.type || '') === 'url_verification') {\n  const challenge = String(body.challenge || '');\n  if (!challenge) return [{json:{_dispatch:'reject',_response:{error:'challenge_missing'},_http_status:400}}];\n  return [{json:{_dispatch:'challenge',_response:{challenge},_http_status:200}}];\n}\nif (String(body.type || '') !== 'event_callback') {\n  return [{json:{_dispatch:'ignore',_response:{ok:true},_http_status:200}}];\n}\nconst event = body.event || {};\nconst eventType = String(event.type || '');\nconst eventId = String(body.event_id || '').trim();\nconst channelId = String(event.channel || '').trim();\nconst text = String(event.text || '').trim();\nconst isMessage = eventType === 'message' || eventType === 'app_mention';\nconst botAuthored = Boolean(event.bot_id || event.bot_profile || event.subtype === 'bot_message');\nconst unsupportedSubtype = Boolean(event.subtype && event.subtype !== 'thread_broadcast');\nif (!isMessage || botAuthored || unsupportedSubtype || !eventId || !channelId || !text) {\n  return [{json:{_dispatch:'ignore',_response:{ok:true},_http_status:200}}];\n}\nreturn [{json:{\n  _dispatch:'xvond',\n  _response:{ok:true},\n  _http_status:200,\n  payload:{\n    company_id:Number(route.company_id || companyId),\n    agent_id:Number(route.agent_id || 0),\n    channel_id:Number(route.channel_id || 0),\n    channel_type:'slack',\n    external_contact_id:channelId,\n    external_message_id:eventId,\n    message:text\n  }\n}}];"
+      },
+      "id": "verify-normalize-slack",
+      "name": "Verify and Normalize Slack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        430,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json._response }}",
+        "options": {
+          "responseCode": "={{ Number($json._http_status || 200) }}"
+        }
+      },
+      "id": "respond-slack-early",
+      "name": "Respond to Slack",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        670,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "slack-forward",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "xvond",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-slack-inbound",
+      "name": "Forward Slack?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        910,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.XVOND_INTERNAL_CHANNEL_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Xvond-N8N-Secret",
+              "value": "={{ $env.N8N_SHARED_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "forward-slack-xvond",
+      "name": "Forward Slack to Xvond",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1160,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "xvond-slack-provider",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "slack-outbound-webhook",
+      "name": "Slack Provider",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        180,
+        520
+      ],
+      "webhookId": "xvond-slack-provider"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst supplied = String(headers['x-xvond-channel-secret'] || headers['X-Xvond-Channel-Secret'] || '');\nconst requestId = String(body.request_id || headers['x-xvond-request-id'] || '').trim();\nconst action = String(body.action || '').trim();\nconst data = body.data && typeof body.data === 'object' ? body.data : {};\nconst companyId = Number(body.company_id || 0);\nconst connectionKey = String(data.connection_key || '').trim();\nlet registry = {};\ntry { registry = JSON.parse($env.XVOND_SLACK_ROUTES_JSON || '{}'); }\ncatch (_e) { return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Slack route registry is invalid',error_code:'provider_not_configured',data:null}}]; }\nconst routeKey = `${companyId}:${connectionKey}`;\nconst route = registry[routeKey];\nif (!route || !route.bot_token || !route.provider_secret) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Slack route is not configured',error_code:'provider_not_configured',data:null}}];\nif (!supplied || supplied !== String(route.provider_secret)) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unauthorized Slack provider request',error_code:'unauthorized',data:null}}];\nif (action !== 'channel.send') return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unsupported Slack provider action',error_code:'unsupported_action',data:null}}];\nconst channel = String(data.external_contact_id || '').trim();\nconst message = String(data.message || '').trim();\nif (!requestId || !channel || !message) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Invalid Slack send contract',error_code:'invalid_contract',data:null}}];\nreturn [{json:{success:true,_dispatch:'slack_send',request_id:requestId,action,route_key:routeKey,channel,message}}];"
+      },
+      "id": "validate-slack-send",
+      "name": "Validate Slack Send",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        430,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "slack-send",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "slack_send",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-slack-send",
+      "name": "Send Slack?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        670,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ JSON.parse($env.XVOND_SLACK_ROUTES_JSON || '{}')[$json.route_key].bot_token }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json; charset=utf-8"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ channel: $json.channel, text: $json.message }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "send-slack-message",
+      "name": "Slack chat.postMessage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        920,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst request = $('Validate Slack Send').first().json;\nif (!response || response.ok !== true || !response.ts) {\n  return [{json:{success:false,request_id:request.request_id,action:request.action,error:'Slack provider rejected the send',error_code:'provider_rejected',data:null}}];\n}\nreturn [{json:{\n  success:true,\n  request_id:request.request_id,\n  action:request.action,\n  data:{provider_message_id:String(response.ts)},\n  error:null\n}}];"
+      },
+      "id": "normalize-slack-result",
+      "name": "Normalize Slack Send Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1170,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
+      "id": "return-slack-provider",
+      "name": "Return Slack Provider",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1420,
+        520
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Slack Inbound": {
+      "main": [
+        [
+          {
+            "node": "Verify and Normalize Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify and Normalize Slack": {
+      "main": [
+        [
+          {
+            "node": "Respond to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Slack": {
+      "main": [
+        [
+          {
+            "node": "Forward Slack?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Forward Slack?": {
+      "main": [
+        [
+          {
+            "node": "Forward Slack to Xvond",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Slack Provider": {
+      "main": [
+        [
+          {
+            "node": "Validate Slack Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Slack Send": {
+      "main": [
+        [
+          {
+            "node": "Send Slack?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Slack?": {
+      "main": [
+        [
+          {
+            "node": "Slack chat.postMessage",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Slack Provider",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack chat.postMessage": {
+      "main": [
+        [
+          {
+            "node": "Normalize Slack Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Slack Send Result": {
+      "main": [
+        [
+          {
+            "node": "Return Slack Provider",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "77777777-7777-4777-8777-777777777777",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
