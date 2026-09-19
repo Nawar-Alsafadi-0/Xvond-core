@@ -927,7 +927,7 @@ def test_compiler_preserves_generic_durable_wait_node():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 13
+    assert spec["version"] == 14
     assert [node["type"] for node in nodes] == ["transform", "wait", "ai"]
     assert nodes[1]["params"]["duration"] == 2
     assert nodes[1]["params"]["unit"] == "days"
@@ -980,7 +980,7 @@ def test_compiler_preserves_generic_correlated_event_wait():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 13
+    assert spec["version"] == 14
     assert [node["type"] for node in nodes] == [
         "transform",
         "await_event",
@@ -1148,7 +1148,7 @@ def test_compiler_normalizes_multiple_independent_execution_routines():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 13
+    assert spec["version"] == 14
     assert [item["id"] for item in spec["execution_routines"]] == [
         "morning_summary",
         "lead_review",
@@ -1187,7 +1187,7 @@ def test_compiler_maps_legacy_execution_graph_to_primary_routine():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 13
+    assert spec["version"] == 14
     assert len(spec["execution_routines"]) == 1
     assert spec["execution_routines"][0]["id"] == "primary"
     assert spec["execution_routines"][0]["graph"] == spec["execution_graph"]
@@ -1476,7 +1476,7 @@ def test_compiler_scopes_each_routine_to_only_its_requirements():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 13
+    assert spec["version"] == 14
     assert spec["execution_routines"][0]["requirement_keys"] == [
         "source_a",
         "source_b",
@@ -1586,3 +1586,62 @@ def test_compiler_message_exposes_bounded_connection_capabilities_without_runtim
     assert "/orders" in message
     assert "integration_id" not in message
     assert "api_key" not in message
+
+
+def test_novel_external_capability_preserves_bounded_discovery_plan():
+    brief = "Connect to Acme Fleet API and dispatch vehicles. Docs: https://docs.acme.example/openapi.json"
+    spec = normalize_compiled_spec(
+        {
+            "role": "Fleet dispatcher",
+            "requirements": [{
+                "key": "fleet_dispatch",
+                "kind": "integration",
+                "purpose": "Dispatch vehicles in Acme Fleet",
+                "requires_connection": True,
+                "fulfillment_mode": "external_connection",
+                "primitives": ["http_api", "workflow_engine"],
+                "discovery": {
+                    "needed": True,
+                    "capability": "Dispatch vehicles through Acme Fleet API",
+                    "service_hint": "Acme Fleet",
+                    "docs_url": "https://docs.acme.example/openapi.json",
+                    "search_queries": [
+                        "Acme Fleet API OpenAPI",
+                        "Acme Fleet dispatch API docs",
+                    ],
+                    "customer_access": "api_key",
+                },
+            }],
+        },
+        job_brief=brief,
+    )
+    discovery = spec["requirements"][0]["discovery"]
+    assert discovery["status"] == "pending_discovery"
+    assert discovery["service_hint"] == "Acme Fleet"
+    assert discovery["docs_url"] == "https://docs.acme.example/openapi.json"
+    assert discovery["customer_access"] == "api_key"
+
+
+def test_discovery_drops_hallucinated_docs_url_and_bounds_queries():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Novel worker",
+            "requirements": [{
+                "key": "novel_external",
+                "kind": "integration",
+                "requires_connection": True,
+                "discovery": {
+                    "needed": True,
+                    "capability": "Use a novel vendor API",
+                    "docs_url": "https://invented.example/openapi.json",
+                    "search_queries": [f"query {i}" for i in range(10)],
+                    "customer_access": "something_invalid",
+                },
+            }],
+        },
+        job_brief="Use a novel vendor API.",
+    )
+    discovery = spec["requirements"][0]["discovery"]
+    assert discovery["docs_url"] == ""
+    assert len(discovery["search_queries"]) == 5
+    assert discovery["customer_access"] == "unknown"
