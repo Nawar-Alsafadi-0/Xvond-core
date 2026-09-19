@@ -185,7 +185,7 @@ def google_calendar_oauth_start(
         except CalendarConnectorError as exc:
             raise HTTPException(400, str(exc)) from exc
 
-        state, challenge = issue_google_calendar_oauth_state(
+        state = issue_google_calendar_oauth_state(
             user_id=current_user.id,
             company_id=company_id,
             integration_id=integration_id,
@@ -193,10 +193,7 @@ def google_calendar_oauth_start(
             config=normalized,
         )
         return {
-            "authorization_url": build_google_calendar_authorization_url(
-                state=state,
-                code_challenge=challenge,
-            ),
+            "authorization_url": build_google_calendar_authorization_url(state=state),
             "expires_in": 600,
         }
     finally:
@@ -225,10 +222,7 @@ def google_calendar_oauth_callback(
         raise HTTPException(409, "Google Calendar connection callback was already used")
 
     try:
-        token = exchange_google_calendar_code(
-            code=str(code).strip(),
-            code_verifier=str(oauth_state.get("code_verifier") or ""),
-        )
+        token = exchange_google_calendar_code(code=str(code).strip())
     except GoogleCalendarOAuthError as exc:
         raise HTTPException(502, str(exc)) from exc
 
