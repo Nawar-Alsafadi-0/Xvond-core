@@ -1063,6 +1063,276 @@ class AutomationRuntime:
             )
             raise
 
+    def retry_failed(
+        self,
+        db,
+        *,
+        company_id: int,
+        workflow: AutomationWorkflow,
+        run: AutomationRun,
+    ) -> AutomationRun:
+        if run.company_id != company_id or workflow.company_id != company_id:
+            raise ValueError("Failed run does not belong to company")
+        if run.workflow_id != workflow.id:
+            raise ValueError("Failed run does not belong to workflow")
+        if run.status != "failed":
+            raise ValueError("Automation run is not failed")
+        if not workflow.enabled:
+            raise ValueError("Automation workflow is disabled")
+
+        output = deepcopy(run.output_data if isinstance(run.output_data, dict) else {})
+        checkpoint = output.get("retry_checkpoint")
+        if not isinstance(checkpoint, dict):
+            raise ValueError("This failed run has no durable retry checkpoint")
+        if int(checkpoint.get("version") or 0) != RETRY_CHECKPOINT_VERSION:
+            raise ValueError("This failed run uses an unsupported retry checkpoint")
+        if not bool(checkpoint.get("safe")):
+            raise ValueError(
+                str(checkpoint.get("reason") or "").strip()
+                or "Xvond cannot prove that retrying this node is safe"
+            )
+
+        current_fingerprint = _checkpoint_fingerprint(workflow.steps or [])
+        saved_fingerprint = str(
+            checkpoint.get("workflow_fingerprint")
+            or output.get("workflow_fingerprint")
+            or ""
+        ).strip()
+        if not saved_fingerprint:
+            raise ValueError("Retry checkpoint does not identify the workflow build")
+        if saved_fingerprint != current_fingerprint:
+            raise ValueError("Automation workflow changed after the failed checkpoint")
+
+        try:
+            step_index = int(checkpoint.get("workflow_step_index"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Retry checkpoint has an invalid workflow step") from exc
+        if not 0 <= step_index < len(workflow.steps or []):
+            raise ValueError("Retry checkpoint workflow step is out of range")
+        step = (workflow.steps or [])[step_index]
+        if str(step.get("type") or "").strip().lower() != "graph":
+            raise ValueError("Retry checkpoint does not point to a graph workflow step")
+
+        graph_resume = checkpoint.get("graph_resume")
+        if not isinstance(graph_resume, dict) or not str(
+            graph_resume.get("node_id") or ""
+        ).strip():
+            raise ValueError("Retry checkpoint is missing its graph resume state")
+
+        state = dict(run.input_data or {})
+        checkpoint_state = checkpoint.get("state")
+        if isinstance(checkpoint_state, dict):
+            state.update(deepcopy(checkpoint_state))
+        for key in _RETRY_TRANSIENT_STATE_KEYS:
+            state.pop(key, None)
+        state["_xvond_graph_resume"] = {
+            "workflow_step_index": step_index,
+            **deepcopy(graph_resume),
+        }
+
+        step_results = list(output.get("steps") or [])
+        execution_key = str(state.get("_xvond_execution_key") or "")
+        if not execution_key:
+            raise ValueError("Retry checkpoint lost the stable execution identity")
+
+        trace = deepcopy(output.get("trace") or {})
+        if not isinstance(trace, dict) or not trace.get("trace_id"):
+            trace = _new_trace(
+                company_id=company_id,
+                workflow=workflow,
+                execution_key=execution_key,
+            )
+        trace["status"] = "running"
+        trace["finished_at"] = None
+
+        attempts = int(output.get("retry_attempts") or 0) + 1
+        run.status = "running"
+        run.resume_at = None
+        run.resume_event_name = None
+        run.error_message = None
+        run.finished_at = None
+        run.output_data = {
+            **output,
+            "trace": deepcopy(trace),
+            "retry_attempts": attempts,
+            "retry": {
+                "status": "running",
+                "attempt": attempts,
+                "from_node": checkpoint.get("failed_node_id"),
+                "from_scope": checkpoint.get("failed_node_scope"),
+            },
+        }
+        db.commit()
+        db.refresh(run)
+
+        try:
+            for index in range(step_index, len(workflow.steps or [])):
+                current_step = (workflow.steps or [])[index]
+                span_started_at = _trace_iso()
+                span_started_perf = perf_counter()
+                try:
+                    result = self.execute_step(
+                        db,
+                        company_id,
+                        current_step,
+                        state,
+                        run_id=run.id,
+                        step_index=index,
+                    )
+                except AutomationEventRequired as event_wait:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=current_step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_event",
+                        phase="retry",
+                        node_id=event_wait.node_id,
+                    )
+                    raise
+                except AutomationWaitRequired as wait:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=current_step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_time",
+                        phase="retry",
+                        node_id=wait.node_id,
+                    )
+                    raise
+                except AutomationApprovalRequired as approval:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=current_step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_approval",
+                        phase="retry",
+                        node_id=approval.node_id,
+                    )
+                    raise
+                except Exception as exc:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=current_step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="failed",
+                        phase="retry",
+                        error=str(exc),
+                    )
+                    raise
+
+                _append_step_span(
+                    trace,
+                    index=index,
+                    step=current_step,
+                    started_at=span_started_at,
+                    started_perf=span_started_perf,
+                    status="success",
+                    phase="retry",
+                )
+                step_results.append(
+                    {
+                        "index": index,
+                        "type": current_step.get("type"),
+                        "label": current_step.get("label"),
+                        "result": result,
+                    }
+                )
+                if isinstance(result, dict):
+                    state.update(result)
+                state.pop("_xvond_graph_resume", None)
+
+                run.output_data = {
+                    "state": deepcopy(state),
+                    "steps": deepcopy(step_results),
+                    "trace": deepcopy(trace),
+                    "workflow_fingerprint": current_fingerprint,
+                    "retry_attempts": attempts,
+                    "retry": {
+                        "status": "running",
+                        "attempt": attempts,
+                    },
+                }
+                db.commit()
+
+            run.status = "success"
+            run.resume_at = None
+            run.resume_event_name = None
+            run.finished_at = _utcnow_naive()
+            trace["status"] = "success"
+            trace["finished_at"] = _trace_iso(run.finished_at)
+            run.output_data = {
+                "state": state,
+                "steps": step_results,
+                "trace": trace,
+                "workflow_fingerprint": current_fingerprint,
+                "retry_attempts": attempts,
+                "retry": {
+                    "status": "succeeded",
+                    "attempt": attempts,
+                },
+            }
+            db.commit()
+            db.refresh(run)
+            return run
+        except AutomationEventRequired as event_wait:
+            state.pop("_xvond_graph_resume", None)
+            return _store_event_checkpoint(
+                db,
+                run=run,
+                workflow=workflow,
+                event_wait=event_wait,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+            )
+        except AutomationWaitRequired as wait:
+            state.pop("_xvond_graph_resume", None)
+            return _store_wait_checkpoint(
+                db,
+                run=run,
+                workflow=workflow,
+                wait=wait,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+            )
+        except AutomationApprovalRequired as approval:
+            state.pop("_xvond_graph_resume", None)
+            return _store_approval_checkpoint(
+                db,
+                run=run,
+                workflow=workflow,
+                approval=approval,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+            )
+        except Exception as exc:
+            _store_failed_run(
+                db,
+                run_id=run.id,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+                error=exc,
+                extra_output={
+                    "retry_attempts": attempts,
+                    "retry": {
+                        "status": "failed",
+                        "attempt": attempts,
+                    },
+                },
+            )
+            raise
+
     def resume_approval(
         self,
         db,
