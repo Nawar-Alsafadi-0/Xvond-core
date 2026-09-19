@@ -326,10 +326,17 @@
                                                 <div class="muted" data-routine-health="${escapeHtml(encodeURIComponent(routineId))}"></div>
                                                 <div class="muted" data-routine-next="${escapeHtml(encodeURIComponent(routineId))}"></div>
                                                 <div class="error" data-routine-failure="${escapeHtml(encodeURIComponent(routineId))}"></div>
+                                                <div class="muted" data-routine-retry-status="${escapeHtml(encodeURIComponent(routineId))}"></div>
                                             </div>
                                             ${badge(enabled ? "Running" : "Paused", enabled ? "ready" : "neutral")}
                                         </div>
                                         <div class="employee-builder-actions">
+                                            <button
+                                                type="button"
+                                                class="hidden"
+                                                data-routine-retry="${escapeHtml(encodeURIComponent(routineId))}"
+                                                data-routine-run-id=""
+                                            >Retry from checkpoint</button>
                                             <button
                                                 type="button"
                                                 data-routine-toggle="${escapeHtml(encodeURIComponent(routineId))}"
@@ -977,6 +984,45 @@
             });
         });
 
+        document.querySelectorAll("[data-routine-retry]").forEach(button => {
+            button.addEventListener("click", async () => {
+                if (button.disabled) return;
+                const encodedRoutine = String(button.dataset.routineRetry || "");
+                const routineId = decodeURIComponent(encodedRoutine);
+                const runId = Number(button.dataset.routineRunId || 0);
+                const error = document.querySelector(`[data-routine-error="${encodedRoutine}"]`);
+                if (error) error.textContent = "";
+                if (!runId) {
+                    if (error) error.textContent = "Refresh routine status before retrying.";
+                    return;
+                }
+
+                const originalText = button.textContent;
+                button.disabled = true;
+                button.textContent = "Retrying...";
+                try {
+                    await api(
+                        `/customer/employee-builder/${Number(employee.agent_id)}/routines/${encodeURIComponent(routineId)}/retry`,
+                        {
+                            method: "POST",
+                            body: JSON.stringify({run_id: runId}),
+                        }
+                    );
+                    await loadRoutineOperations();
+                    await loadExecutionHistory();
+                } catch (err) {
+                    if (error) error.textContent = err?.message || "Routine retry failed.";
+                    await loadRoutineOperations();
+                    await loadExecutionHistory();
+                } finally {
+                    if (document.body.contains(button)) {
+                        button.textContent = originalText;
+                        button.disabled = false;
+                    }
+                }
+            });
+        });
+
         async function loadRoutineOperations() {
             if (!controllableRoutines.length) return;
             try {
@@ -998,6 +1044,12 @@
                     );
                     const failureNode = document.querySelector(
                         `[data-routine-failure="${encoded}"]`
+                    );
+                    const retryStatusNode = document.querySelector(
+                        `[data-routine-retry-status="${encoded}"]`
+                    );
+                    const retryButton = document.querySelector(
+                        `[data-routine-retry="${encoded}"]`
                     );
 
                     let detail = String(item.operational_state || "unknown").replaceAll("_", " ");
@@ -1052,6 +1104,29 @@
                         } else {
                             failureNode.textContent = "";
                         }
+                    }
+
+                    const retry = item.retry || null;
+                    if (retryStatusNode) {
+                        if (retry?.safe) {
+                            retryStatusNode.textContent = "Safe retry available from the last durable checkpoint.";
+                        } else if (retry?.reason && item.last_run?.status === "failed") {
+                            retryStatusNode.textContent = `Retry blocked: ${String(retry.reason).slice(0, 500)}`;
+                        } else {
+                            retryStatusNode.textContent = "";
+                        }
+                    }
+                    if (retryButton) {
+                        const canRetry = Boolean(
+                            retry?.safe
+                            && Number(retry.run_id || item.last_run?.id || 0) > 0
+                            && item.last_run?.status === "failed"
+                        );
+                        retryButton.classList.toggle("hidden", !canRetry);
+                        retryButton.dataset.routineRunId = canRetry
+                            ? String(Number(retry.run_id || item.last_run?.id))
+                            : "";
+                        retryButton.disabled = false;
                     }
 
                     if (nextNode) {
