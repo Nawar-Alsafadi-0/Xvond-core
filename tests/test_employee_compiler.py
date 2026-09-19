@@ -1250,3 +1250,43 @@ def test_compiler_grounds_waits_inside_each_independent_routine():
 
     assert spec["execution_routines"][0]["graph"]["nodes"][0]["type"] == "wait"
     assert spec["execution_routines"][1]["graph"]["nodes"][0]["type"] == "await_event"
+
+
+
+def test_compiler_fails_ungrounded_schedule_trigger_closed():
+    job_brief = "لخص البيانات عندما أشغلك يدويًا"
+    response = """{
+      "role":"Analyst",
+      "scope":"personal",
+      "summary":"Summarize supplied data.",
+      "tasks":[],
+      "requirements":[],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{
+          "type":"schedule",
+          "schedule":{
+            "kind":"daily",
+            "hour":8,
+            "minute":0,
+            "timezone":"Asia/Muscat",
+            "source_text":"كل يوم الساعة 8"
+          }
+        },
+        "nodes":[
+          {
+            "id":"summarize",
+            "type":"ai",
+            "depends_on":[],
+            "params":{"prompt":"Summarize the supplied data."}
+          }
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+
+    assert spec["execution_graph"]["trigger"] == {"type": "schedule"}
+    assert spec["execution_routines"][0]["graph"]["trigger"] == {"type": "schedule"}
