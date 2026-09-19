@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -10,7 +12,7 @@ from backend.app.core.config_secrets import (
 )
 from backend.app.core.database.connection import SessionLocal
 from backend.app.core.n8n_gateway import N8NGatewayError, n8n_gateway
-from backend.app.core.dependencies import require_xvond_admin
+from backend.app.core.dependencies import require_xvond_admin, require_xvond_operator
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
 from backend.app.models.user import User
@@ -19,6 +21,7 @@ from backend.app.modules.audit.service import audit_service
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.channels.catalog import (
     CHANNEL_RUNTIME_LIVE,
+    CHANNEL_SETUP_MANAGED,
     N8N_CHANNEL_ADAPTER,
     canonical_channel_type,
     get_channel_capability,
@@ -40,6 +43,12 @@ class ChannelCreate(BaseModel):
 class ChannelUpdate(BaseModel):
     config: dict | None = None
     enabled: bool | None = None
+
+
+class ManagedChannelConnect(BaseModel):
+    connection_key: str = Field(min_length=1, max_length=200)
+    provider_account_label: str | None = Field(default=None, max_length=200)
+    channel_instructions: str | None = Field(default=None, max_length=4000)
 
 
 class WhatsAppConfigUpdate(BaseModel):
@@ -150,6 +159,53 @@ def serialize_channel(
         "enabled": channel.enabled,
         "created_at": channel.created_at,
     }
+
+
+def _managed_gateway_capability(channel: AgentChannel) -> dict:
+    capability = get_channel_capability(channel.channel_type) or {}
+    if (
+        capability.get("runtime_state") != CHANNEL_RUNTIME_LIVE
+        or capability.get("setup_mode") != CHANNEL_SETUP_MANAGED
+        or capability.get("runtime_adapter") != N8N_CHANNEL_ADAPTER
+    ):
+        raise HTTPException(
+            409,
+            "This channel is not provisioned through the Xvond managed channel gateway",
+        )
+    return capability
+
+
+def _verify_managed_gateway_route(
+    channel: AgentChannel,
+    *,
+    connection_key: str,
+) -> dict:
+    if not n8n_gateway.configured():
+        raise HTTPException(503, "Xvond managed channel gateway is not configured")
+    try:
+        result = n8n_gateway.execute(
+            company_id=channel.company_id,
+            agent_id=channel.agent_id,
+            action="channel.check",
+            data={
+                "channel_id": channel.id,
+                "channel_type": canonical_channel_type(channel.channel_type),
+                "connection_key": connection_key,
+            },
+        )
+    except N8NGatewayError as exc:
+        raise HTTPException(
+            502,
+            "Xvond managed channel route could not be verified",
+        ) from exc
+
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    if result.get("success") is not True or data.get("configured") is not True:
+        raise HTTPException(
+            409,
+            "The managed channel provider route is not configured yet",
+        )
+    return data
 
 
 def _ensure_channels_module(db, company_id: int):
@@ -396,6 +452,157 @@ def list_company_channels(
                 for item in items
             ],
         }
+    finally:
+        db.close()
+
+
+@router.get("/managed/requests")
+def managed_channel_requests(
+    current_admin: User = Depends(require_xvond_operator),
+):
+    """Return the global queue of unresolved Xvond-managed channel requests."""
+
+    db = SessionLocal()
+    try:
+        channels = (
+            db.query(AgentChannel)
+            .filter(AgentChannel.enabled.is_(False))
+            .order_by(AgentChannel.created_at.asc(), AgentChannel.id.asc())
+            .all()
+        )
+        company_ids = {row.company_id for row in channels}
+        agent_ids = {row.agent_id for row in channels}
+        companies = {
+            row.id: row
+            for row in (
+                db.query(Company).filter(Company.id.in_(company_ids)).all()
+                if company_ids
+                else []
+            )
+        }
+        agents = {
+            row.id: row
+            for row in (
+                db.query(AIAgent).filter(AIAgent.id.in_(agent_ids)).all()
+                if agent_ids
+                else []
+            )
+        }
+
+        requests = []
+        for channel in channels:
+            capability = get_channel_capability(channel.channel_type) or {}
+            if (
+                capability.get("runtime_state") != CHANNEL_RUNTIME_LIVE
+                or capability.get("setup_mode") != CHANNEL_SETUP_MANAGED
+                or capability.get("runtime_adapter") != N8N_CHANNEL_ADAPTER
+            ):
+                continue
+            config = reveal_config(channel.config) or {}
+            state = str(config.get("provisioning_state") or "").strip().lower()
+            if state != "requested":
+                continue
+            company = companies.get(channel.company_id)
+            agent = agents.get(channel.agent_id)
+            requests.append(
+                {
+                    "channel_id": channel.id,
+                    "company_id": channel.company_id,
+                    "company_name": company.name if company else None,
+                    "agent_id": channel.agent_id,
+                    "agent_name": agent.name if agent else None,
+                    "channel_type": canonical_channel_type(channel.channel_type),
+                    "channel_name": capability.get("name") or channel.channel_type,
+                    "provisioning_state": state,
+                    "request_source": config.get("request_source"),
+                    "created_at": channel.created_at,
+                }
+            )
+        return {"requests": requests, "count": len(requests)}
+    finally:
+        db.close()
+
+
+@router.post("/{channel_id}/managed-connect")
+def connect_managed_channel(
+    channel_id: int,
+    data: ManagedChannelConnect,
+    current_admin: User = Depends(require_xvond_admin),
+):
+    """Verify and complete one Xvond-managed channel request.
+
+    Provider credentials remain in the workflow/provider plane. Core stores only
+    the provider-neutral connection key and verification evidence.
+    """
+
+    db = SessionLocal()
+    try:
+        channel = (
+            db.query(AgentChannel)
+            .filter(AgentChannel.id == channel_id)
+            .with_for_update()
+            .first()
+        )
+        if channel is None:
+            raise HTTPException(404, "Channel not found")
+
+        _managed_gateway_capability(channel)
+        connection_key = str(data.connection_key or "").strip()
+        verification = _verify_managed_gateway_route(
+            channel,
+            connection_key=connection_key,
+        )
+
+        incoming = {
+            "connection_key": connection_key,
+            "provisioning_state": "connected",
+            "provisioning_error": None,
+            "connection_method": "xvond_managed_gateway",
+            "provisioning_verified_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        if data.provider_account_label is not None:
+            incoming["provider_account_label"] = str(data.provider_account_label or "").strip() or None
+        if data.channel_instructions is not None:
+            incoming["channel_instructions"] = str(data.channel_instructions or "").strip() or None
+
+        channel.config = merge_config(channel.config, incoming)
+        channel.enabled = False
+        _ensure_channels_module(db, channel.company_id)
+        _audit_channel(
+            db,
+            current_admin,
+            channel,
+            "channel.managed_connected",
+            details={
+                "connection_method": "xvond_managed_gateway",
+                "gateway_configured": True,
+                "provider_account_label": incoming.get("provider_account_label"),
+            },
+        )
+        db.flush()
+
+        blockers = _activation_blockers(db, channel)
+        db.commit()
+        db.refresh(channel)
+        result = serialize_channel(channel)
+        result.update(
+            {
+                "status": "connected",
+                "gateway_verified": True,
+                "ready": not blockers,
+                "blockers": blockers,
+                "provider": {
+                    "configured": verification.get("configured") is True,
+                },
+            }
+        )
+        return result
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
