@@ -364,6 +364,12 @@ async function renderIntegrations() {
                         ${(item.configured_secret_fields || []).length
                             ? `<p class="muted">Protected credentials configured: ${safe((item.configured_secret_fields || []).join(", "))}</p>`
                             : ""}
+                        ${Number(item.operation_count || 0) > 0
+                            ? `<p class="muted">${Number(item.operation_count)} API operations imported.</p>`
+                            : ""}
+                        ${item.openapi_import_supported
+                            ? `<button type="button" onclick="importCustomerIntegrationOpenAPI(${Number(item.id)})">Import OpenAPI</button>`
+                            : ""}
                         ${item.integration_type === "calendar" && googleOAuth.ready
                             ? `<button type="button" onclick="connectGoogleCalendar(${Number(item.id)})">Reconnect Google Calendar</button>`
                             : item.configured && !item.validated
@@ -494,6 +500,23 @@ async function validateCustomerIntegration(integrationId) {
 }
 
 window.validateCustomerIntegration = validateCustomerIntegration;
+
+async function importCustomerIntegrationOpenAPI(integrationId) {
+    const url = String(prompt("OpenAPI / Swagger JSON or YAML URL") || "").trim();
+    if (!url) return;
+    try {
+        const result = await api(`/customer/agents/manage/integrations/${Number(integrationId)}/openapi`, {
+            method: "POST",
+            body: JSON.stringify({url}),
+        });
+        alert(`Imported ${Number(result.operation_count || 0)} API operations. Validate the connection before using it.`);
+        await renderIntegrations();
+    } catch (error) {
+        alert(error.message);
+    }
+}
+
+window.importCustomerIntegrationOpenAPI = importCustomerIntegrationOpenAPI;
 
 async function deleteCustomerIntegration(integrationId) {
     if (!confirm("Remove this connected system?")) return;

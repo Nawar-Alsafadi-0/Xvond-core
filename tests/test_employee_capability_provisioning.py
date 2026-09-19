@@ -3483,8 +3483,9 @@ def test_generic_api_lookup_uses_query_contract_and_fails_closed_for_unknown_ope
                 "operations": {
                     "lookup": {
                         "method": "GET",
-                        "endpoint": "/v1/items",
+                        "endpoint": "/v1/items/{item_id}",
                         "input_mode": "query",
+                        "path_params": ["item_id"],
                         "timeout": 8,
                     }
                 },
@@ -3495,15 +3496,17 @@ def test_generic_api_lookup_uses_query_contract_and_fails_closed_for_unknown_ope
             {"company_id": 1, "agent_id": 1},
             "vendor_items",
             action,
-            {"details": {"q": "red shoes", "limit": 3}},
+            {"details": {"item_id": "A/B", "q": "red shoes", "limit": 3}},
             "lookup",
             idempotency_key="test-key",
         )
         assert result.success is True
         assert captured["method"] == "GET"
         assert captured["json_data"] is None
+        assert "/v1/items/A%2FB?" in captured["url"]
         assert "q=red+shoes" in captured["url"]
         assert "limit=3" in captured["url"]
+        assert "item_id=" not in captured["url"]
 
         captured.clear()
         missing = _integration_call(
@@ -3518,3 +3521,67 @@ def test_generic_api_lookup_uses_query_contract_and_fails_closed_for_unknown_ope
         assert missing.success is False
         assert "not configured" in str(missing.error).lower()
         assert captured == {}
+
+
+def test_openapi_path_parameter_is_encoded_and_removed_from_payload(database, monkeypatch):
+    factory, _ = database
+    captured = {}
+
+    def fake_http(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 200, "response": "{\"ok\": true}", "truncated": False}
+
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.safe_http_request",
+        fake_http,
+    )
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.validate_public_http_url",
+        lambda url: url,
+    )
+
+    with factory() as db:
+        integration = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="OpenAPI Vendor",
+            config={
+                "base_url": "https://api.vendor.example",
+                "validation_endpoint": "/health",
+                "auth_type": "none",
+            },
+            enabled=True,
+        )
+        db.add(integration)
+        db.commit()
+        db.refresh(integration)
+
+        action = {
+            "destination": {
+                "type": "integration",
+                "integration_id": integration.id,
+                "operations": {
+                    "get_order": {
+                        "method": "GET",
+                        "endpoint": "/orders/{order_id}",
+                        "input_mode": "query",
+                        "path_params": ["order_id"],
+                    }
+                },
+            }
+        }
+        result = _integration_call(
+            db,
+            {"company_id": 1, "agent_id": 1},
+            "orders",
+            action,
+            {"details": {"order_id": "A/B 12", "expand": "items"}},
+            "get_order",
+            idempotency_key="openapi-path-test",
+        )
+
+    assert result.success is True
+    assert "/orders/A%2FB%2012" in captured["url"]
+    assert "expand=items" in captured["url"]
+    assert "order_id=" not in captured["url"]
+    assert captured["json_data"] is None

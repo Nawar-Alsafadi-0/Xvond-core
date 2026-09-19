@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 import json
-from urllib.parse import urlencode
+import re
+from urllib.parse import quote, urlencode
 
 from sqlalchemy import text
 
@@ -585,6 +586,7 @@ def _integration_call(
         headers.setdefault("Idempotency-Key", idempotency_key)
         headers.setdefault("X-Xvond-Idempotency-Key", idempotency_key)
     integration_type = integration.integration_type
+    request_payload = payload.get("details") if isinstance(payload, dict) else payload
 
     if integration_type == "instagram_publish":
         return _instagram_publish_call(
@@ -655,6 +657,30 @@ def _integration_call(
                 success=False,
                 error="Integration endpoint must be a relative path",
             )
+        path_params = op_config.get("path_params")
+        if not isinstance(path_params, list):
+            path_params = re.findall(r"{([A-Za-z_][A-Za-z0-9_]{0,63})}", endpoint)
+        clean_payload = dict(request_payload) if isinstance(request_payload, dict) else {}
+        for raw_name in path_params[:20]:
+            name = str(raw_name or "").strip()
+            placeholder = "{" + name + "}"
+            if not name or placeholder not in endpoint:
+                continue
+            if name not in clean_payload or clean_payload[name] is None:
+                return ToolResult(
+                    success=False,
+                    error=f"API operation '{operation}' requires path parameter '{name}'",
+                )
+            endpoint = endpoint.replace(
+                placeholder,
+                quote(str(clean_payload.pop(name)), safe=""),
+            )
+        if "{" in endpoint or "}" in endpoint:
+            return ToolResult(
+                success=False,
+                error=f"API operation '{operation}' has unresolved path parameters",
+            )
+        request_payload = clean_payload
         url = base_url + "/" + endpoint.lstrip("/")
     else:
         return ToolResult(
@@ -665,7 +691,6 @@ def _integration_call(
             ),
         )
 
-    request_payload = payload.get("details") if isinstance(payload, dict) else payload
     input_mode = str(
         (op_config or {}).get("input_mode") or ("query" if method == "GET" else "json")
     ).strip().lower()
