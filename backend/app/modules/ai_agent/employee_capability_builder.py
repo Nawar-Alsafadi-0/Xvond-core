@@ -495,10 +495,17 @@ def _compiled_execution_routines(spec: dict) -> list[dict]:
             used_ids.add(routine_id)
 
             name = str(raw.get("name") or routine_id.replace("_", " ")).strip()[:200]
+            requirement_keys: list[str] = []
+            for raw_key in raw.get("requirement_keys") or []:
+                key = normalize_requirement_key(raw_key)
+                if key and key not in requirement_keys:
+                    requirement_keys.append(key)
+
             result.append(
                 {
                     "id": routine_id,
                     "name": name or routine_id,
+                    "requirement_keys": requirement_keys,
                     "graph": graph,
                 }
             )
@@ -514,6 +521,7 @@ def _compiled_execution_routines(spec: dict) -> list[dict]:
             {
                 "id": "primary",
                 "name": "Primary routine",
+                "requirement_keys": [],
                 "graph": legacy_graph,
             }
         ]
@@ -574,6 +582,7 @@ def _provision_self_service_graph_trigger(
     runtime_inputs: dict | None = None,
     routine_id: str = "primary",
     routine_name: str | None = None,
+    requirement_keys: list[str] | None = None,
 ) -> tuple[str, int | None]:
     if str(company.onboarding_source or "").strip().lower() != "self_service":
         return "managed_delivery", None
@@ -635,6 +644,7 @@ def _provision_self_service_graph_trigger(
                 "_xvond_graph_trigger": True,
                 "_xvond_routine_id": routine_id,
                 "_xvond_routine_name": (routine_name or routine_id)[:200],
+                "_xvond_requirement_keys": list(requirement_keys or []),
                 "_xvond_generated": True,
                 **(
                     {"event_name": str(trigger.get("event") or "").strip()[:120]}
@@ -1019,11 +1029,16 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             "automation_workflow_id": schedule_workflow_id,
         }
 
-    graph_runtime_inputs: dict = {}
+    requirements_by_key = {
+        normalize_requirement_key(item.get("key")): item
+        for item in requirements
+        if isinstance(item, dict) and normalize_requirement_key(item.get("key"))
+    }
+    shared_graph_runtime_inputs: dict = {}
     for requirement in requirements:
         if isinstance(requirement, dict):
             for key, value in (requirement.get("runtime_inputs") or {}).items():
-                graph_runtime_inputs.setdefault(str(key), value)
+                shared_graph_runtime_inputs.setdefault(str(key), value)
 
     graph_triggers: list[dict] = []
     if company is not None:
@@ -1031,6 +1046,26 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             routine_id = str(routine.get("id") or "primary").strip() or "primary"
             routine_name = str(routine.get("name") or routine_id).strip() or routine_id
             graph = routine.get("graph") if isinstance(routine.get("graph"), dict) else {}
+            requirement_keys = [
+                key
+                for key in (
+                    normalize_requirement_key(item)
+                    for item in (routine.get("requirement_keys") or [])
+                )
+                if key and key in requirements_by_key
+            ]
+
+            if requirement_keys:
+                routine_runtime_inputs: dict = {}
+                for requirement_key in requirement_keys:
+                    requirement = requirements_by_key[requirement_key]
+                    for key, value in (requirement.get("runtime_inputs") or {}).items():
+                        routine_runtime_inputs.setdefault(str(key), value)
+            else:
+                # Backward compatibility for pre-v10 compiled employees whose
+                # routines did not declare requirement scope.
+                routine_runtime_inputs = dict(shared_graph_runtime_inputs)
+
             status, workflow_id = _provision_self_service_graph_trigger(
                 db,
                 company=company,
@@ -1039,14 +1074,16 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                 execution_graph=graph,
                 actions=actions,
                 action_plan=action_plan,
-                runtime_inputs=graph_runtime_inputs,
+                runtime_inputs=routine_runtime_inputs,
                 routine_id=routine_id,
                 routine_name=routine_name,
+                requirement_keys=requirement_keys,
             )
             graph_triggers.append(
                 {
                     "routine_id": routine_id,
                     "routine_name": routine_name,
+                    "requirement_keys": requirement_keys,
                     "status": status,
                     "workflow_id": workflow_id,
                     "trigger_type": str(
