@@ -14,7 +14,7 @@ from backend.app.modules.channels.catalog import (
 )
 
 
-COMPILER_VERSION = 8
+COMPILER_VERSION = 9
 
 GENERIC_PRIMITIVES = {
     "workflow_engine",
@@ -237,6 +237,17 @@ Use this shape:
   "permissions": [
     {"action": "action description", "mode": "automatic|ask_before|never"}
   ],
+  "execution_routines": [
+    {
+      "id": "stable_snake_case_routine_id",
+      "name": "short human-readable routine name",
+      "graph": {
+        "version": 1,
+        "trigger": {"type":"manual|schedule|webhook|event","event":"internal event name when type=event"},
+        "nodes": []
+      }
+    }
+  ],
   "execution_graph": {
     "version": 1,
     "trigger": {"type":"manual|schedule|webhook|event","event":"internal event name when type=event"},
@@ -261,7 +272,11 @@ Rules:
 - Keep intake field keys stable snake_case identifiers. Labels should be short human-readable labels in the customer's language when practical.
 - intake.known values must be copied from information explicitly present in the Job Brief. Never invent values. Do not place passwords, API keys, access tokens or other credentials in intake.known; credentials belong to protected connection flows.
 - Never use a missing Xvond feature as a reason to reject the job. For a novel digital requirement, return it and give it useful generic primitives so Xvond can compose it.
-- Always describe executable work as execution_graph nodes whenever the job contains more than a single conversational response. The graph is the general execution plan; requirements describe capabilities/connections needed to make that graph runnable.
+- Describe executable work as execution graph nodes whenever the job contains more than a single conversational response. Requirements describe capabilities/connections needed to make those graphs runnable.
+- When the same employee has multiple independent responsibilities with different starting triggers or independently runnable lifecycles, use execution_routines. Each routine is one cohesive executable graph with a stable snake_case id and its own trigger. Examples include one scheduled monitoring routine plus a separate webhook routine, or a morning report plus an independently runnable manual analysis routine.
+- Do not split sequential steps of the same job into separate routines. If work is one continuous lifecycle (including wait, await_event, approval or foreach checkpoints), keep it inside one graph.
+- For a single executable routine, execution_graph remains valid for backward compatibility. For multiple independent routines, prefer execution_routines and let Xvond derive the legacy primary execution_graph from the first routine.
+- Limit execution_routines to the smallest set that faithfully represents the requested job; never invent extra routines.
 - execution_graph.trigger describes what starts the graph. Use manual when the user starts it explicitly, schedule for recurring/time-based work, webhook for an incoming external JSON event, and event for an internal Xvond event. Never invent a webhook/event trigger when the user did not request event-driven behavior.
 - For type=event, set trigger.event to the stable internal event name the graph should consume. Event names are capabilities of the Xvond runtime, not provider-specific webhook URLs.
 - Use a wait node only when the Job Brief explicitly requests a pause inside the same job before later steps continue. A wait is not an initial schedule trigger. Put either params.duration plus params.unit (seconds|minutes|hours|days|weeks), or params.until as an ISO-8601 timestamp with timezone. Include params.source_text copied verbatim from the Job Brief words that authorize the wait. Never invent a wait, delay, follow-up period or deadline.
@@ -563,6 +578,79 @@ def _ground_execution_graph(value: Any, *, job_brief: str) -> dict:
         )
 
     return visit(value)
+
+
+MAX_EXECUTION_ROUTINES = 20
+
+
+def _normalize_execution_routines(
+    payload: dict,
+    *,
+    job_brief: str,
+) -> tuple[list[dict], dict]:
+    """Normalize independent employee routines while preserving the legacy graph."""
+
+    routines: list[dict] = []
+    used_ids: set[str] = set()
+    raw_routines = payload.get("execution_routines")
+
+    if isinstance(raw_routines, list):
+        for index, raw in enumerate(raw_routines):
+            if not isinstance(raw, dict):
+                continue
+            raw_graph = (
+                raw.get("graph")
+                if isinstance(raw.get("graph"), dict)
+                else raw.get("execution_graph")
+            )
+            graph = _ground_execution_graph(raw_graph, job_brief=job_brief)
+            if not graph.get("nodes"):
+                continue
+
+            base_id = normalize_requirement_key(
+                raw.get("id")
+                or raw.get("key")
+                or raw.get("name")
+                or f"routine_{index + 1}"
+            )[:80] or f"routine_{index + 1}"
+            routine_id = base_id
+            suffix = 2
+            while routine_id in used_ids:
+                routine_id = f"{base_id[:70]}_{suffix}"
+                suffix += 1
+            used_ids.add(routine_id)
+
+            name = _bounded_text(raw.get("name"), limit=200)
+            routines.append(
+                {
+                    "id": routine_id,
+                    "name": name or routine_id.replace("_", " "),
+                    "graph": graph,
+                }
+            )
+            if len(routines) >= MAX_EXECUTION_ROUTINES:
+                break
+
+    if routines:
+        return routines, deepcopy(routines[0]["graph"])
+
+    legacy_graph = _ground_execution_graph(
+        payload.get("execution_graph"),
+        job_brief=job_brief,
+    )
+    if legacy_graph.get("nodes"):
+        return (
+            [
+                {
+                    "id": "primary",
+                    "name": "Primary routine",
+                    "graph": deepcopy(legacy_graph),
+                }
+            ],
+            legacy_graph,
+        )
+
+    return [], legacy_graph
 
 
 def _normalize_smart_intake(value: Any, *, job_brief: str) -> dict:
@@ -871,8 +959,8 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         if len(setup_questions) >= 30:
             break
 
-    execution_graph = _ground_execution_graph(
-        payload.get("execution_graph"),
+    execution_routines, execution_graph = _normalize_execution_routines(
+        payload,
         job_brief=job_brief,
     )
 
@@ -887,6 +975,7 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
         "requirements": requirements,
         "permissions": permissions,
         "execution_graph": execution_graph,
+        "execution_routines": execution_routines,
         "setup_questions": setup_questions,
         "ready_requirements": [x["key"] for x in requirements if x["status"] == "available"],
         "build_required": [x["key"] for x in requirements if x["status"] == "xvond_build"],
