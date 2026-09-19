@@ -99,11 +99,17 @@ def _assignment(db):
     return db.query(AgentToolAssignment).filter_by(agent_id=1, tool_name="action_request").one()
 
 
-def _cache(factory, spec):
+def _cache(factory, spec, owner_permissions=None):
     with factory() as db:
         config = db.query(AgentConfig).filter_by(agent_id=1).one()
         settings = deepcopy(config.settings)
-        settings["employee_builder"].update({"compiled_spec": spec, "compiled_at": "original-time"})
+        settings["employee_builder"].update(
+            {
+                "compiled_spec": spec,
+                "compiled_at": "original-time",
+                "owner_permissions": dict(owner_permissions or {}),
+            }
+        )
         config.settings = settings
         db.commit()
 
@@ -331,7 +337,7 @@ def test_runtime_ready_generated_plan_is_exposed_to_employee(database):
 
 
 @pytest.mark.parametrize("mode,enabled,confirmation", [
-    ("automatic", True, False), ("ask_before", True, True), ("never", False, True),
+    ("automatic", True, False), ("ask_before", True, True), ("never", True, True),
 ])
 def test_generated_contract_respects_exact_permission(mode, enabled, confirmation):
     action = build_managed_action_config(requirement=PAYLOAD["requirements"][0], spec={
@@ -373,7 +379,11 @@ def test_stored_contract_reaches_generic_runtime_and_fails_closed_without_plan(d
     factory, _ = database
     payload = deepcopy(PAYLOAD)
     payload["permissions"] = [{"action": KEY, "mode": "automatic"}]
-    _cache(factory, normalize_compiled_spec(payload, job_brief=BRIEF))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=BRIEF),
+        owner_permissions={KEY: "automatic"},
+    )
     api.compile_employee(1, USER)
     captured = []
 
@@ -474,7 +484,7 @@ def test_self_service_recurring_capability_provisions_one_real_schedule_workflow
         db.commit()
 
     spec = normalize_compiled_spec(payload, job_brief=brief)
-    _cache(factory, spec)
+    _cache(factory, spec, owner_permissions={KEY: "automatic"})
     result = api.compile_employee(1, USER)
 
     requirement = result["spec"]["requirements"][0]
@@ -541,7 +551,11 @@ def test_self_service_content_generation_schedule_builds_ai_then_action(database
         company.onboarding_source = "self_service"
         db.commit()
 
-    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={KEY: "automatic"},
+    )
     result = api.compile_employee(1, USER)
     requirement = result["spec"]["requirements"][0]
 
@@ -686,7 +700,11 @@ def test_self_service_media_generation_schedule_builds_ai_media_then_action(data
         company.onboarding_source = "self_service"
         db.commit()
 
-    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={KEY: "automatic"},
+    )
     result = api.compile_employee(1, USER)
     requirement = result["spec"]["requirements"][0]
 
@@ -938,7 +956,11 @@ def test_self_service_schedule_requires_explicit_automatic_permission(database):
         company.onboarding_source = "self_service"
         db.commit()
 
-    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={KEY: "automatic"},
+    )
     result = api.compile_employee(1, USER)
     requirement = result["spec"]["requirements"][0]
 
@@ -959,7 +981,11 @@ def test_self_service_daily_schedule_inherits_workspace_timezone(database):
         db.add(CompanyProfile(company_id=1, timezone="Asia/Muscat"))
         db.commit()
 
-    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={KEY: "automatic"},
+    )
     result = api.compile_employee(1, USER)
     requirement = result["spec"]["requirements"][0]
 
@@ -984,7 +1010,11 @@ def test_self_service_schedule_blocks_when_required_runtime_input_is_missing(dat
         company.onboarding_source = "self_service"
         db.commit()
 
-    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={KEY: "automatic"},
+    )
     result = api.compile_employee(1, USER)
     requirement = result["spec"]["requirements"][0]
 
@@ -1529,3 +1559,195 @@ def test_live_rollback_stages_previous_version_without_touching_live_runtime(dat
         assert "last_tested_compiled_at" not in pending
 
     assert calls == []
+
+
+def _seed_owner_permission_contract(factory, *, live: bool):
+    with factory() as db:
+        company = db.query(Company).filter_by(id=1).one()
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live" if live else "paused"
+        company.active = True
+
+        agent = db.query(AIAgent).filter_by(id=1).one()
+        agent.enabled = live
+
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings = deepcopy(config.settings or {})
+        builder = dict(settings.get("employee_builder") or {})
+        builder.update(
+            {
+                "compiled_at": "2026-09-19T00:00:00Z",
+                "last_tested_at": "2026-09-19T00:01:00Z",
+                "last_tested_compiled_at": "2026-09-19T00:00:00Z",
+                "owner_permissions": {},
+                "compiled_spec": {
+                    "version": 1,
+                    "job_brief": "Monitor and send a report.",
+                    "role": "Report worker",
+                    "scope": "business",
+                    "summary": "Monitor and send a report.",
+                    "tasks": [],
+                    "requirements": [
+                        {
+                            "key": KEY,
+                            "kind": "custom",
+                            "purpose": "Monitor the specialist platform",
+                            "status": "xvond_managed",
+                            "delivery_mode": "compose",
+                            "primitives": ["workflow_engine"],
+                            "runtime_inputs": {},
+                            "execution_plan": [
+                                {
+                                    "id": "notify",
+                                    "op": "notify",
+                                    "title": "Monitor",
+                                    "message": "Done.",
+                                }
+                            ],
+                            "customer_inputs": [],
+                            "requires_connection": False,
+                            "fulfillment_mode": "xvond_internal",
+                            "known_to_xvond": False,
+                        }
+                    ],
+                    "permissions": [
+                        {
+                            "action": KEY,
+                            "mode": "ask_before",
+                            "suggested_mode": "automatic",
+                            "source": "compiler_suggestion",
+                        }
+                    ],
+                    "execution_graph": {
+                        "version": 1,
+                        "trigger": {"type": "manual"},
+                        "nodes": [],
+                    },
+                    "setup_questions": [],
+                    "ready_requirements": [],
+                    "build_required": [],
+                    "setup_required": [],
+                    "unsupported_requirements": [],
+                    "delivery": {
+                        "provisioning_version": 1,
+                        "action_plan": {
+                            KEY: {
+                                "tool_name": "action_request",
+                                "action_type": KEY,
+                                "execution_status": "ready",
+                            }
+                        },
+                        "automation_plan": {},
+                        "graph_trigger": {
+                            "status": "not_required",
+                            "workflow_id": None,
+                            "trigger_type": "manual",
+                        },
+                        "managed_capabilities": [KEY],
+                        "connection_required": [],
+                        "customer_input_required": [],
+                        "unsupported": [],
+                    },
+                },
+            }
+        )
+        settings["employee_builder"] = builder
+        config.settings = settings
+
+        assignment = (
+            db.query(AgentToolAssignment)
+            .filter_by(agent_id=1, tool_name="action_request")
+            .first()
+        )
+        if assignment is None:
+            assignment = AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={},
+            )
+            db.add(assignment)
+            db.flush()
+        assignment.config = {
+            "actions": {
+                KEY: {
+                    "enabled": True,
+                    "confirmation_required": True,
+                    "xvond_generated": True,
+                    "_xvond_permission_mode": "ask_before",
+                    "module": "tools",
+                    "destination": {
+                        "type": "xvond_internal",
+                        "adapter": "generic_capability",
+                        "capability_key": KEY,
+                        "execution_plan": [
+                            {
+                                "id": "notify",
+                                "op": "notify",
+                                "title": "Monitor",
+                                "message": "Done.",
+                            }
+                        ],
+                        "allowed_hosts": [],
+                    },
+                    "availability": {"mode": "none"},
+                }
+            }
+        }
+        db.commit()
+
+
+def test_live_employee_cannot_escalate_owner_permission_to_automatic(database):
+    factory, _ = database
+    _seed_owner_permission_contract(factory, live=True)
+
+    with pytest.raises(HTTPException) as exc:
+        api.set_self_service_permission(
+            1,
+            KEY,
+            api.EmployeeBuilderPermissionRequest(mode="automatic"),
+            current_user=USER,
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["requires_deactivation"] is True
+
+    with factory() as db:
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        builder = config.settings["employee_builder"]
+        assert builder.get("owner_permissions") == {}
+        action = reveal_config(_assignment(db).config)["actions"][KEY]
+        assert action["confirmation_required"] is True
+
+
+def test_paused_employee_owner_grant_becomes_authoritative_runtime_policy(database, monkeypatch):
+    factory, _ = database
+    monkeypatch.setattr(api, "self_service_readiness", lambda *args, **kwargs: {})
+    _seed_owner_permission_contract(factory, live=False)
+
+    result = api.set_self_service_permission(
+        1,
+        KEY,
+        api.EmployeeBuilderPermissionRequest(mode="automatic"),
+        current_user=USER,
+    )
+
+    assert result["status"] == "saved"
+    assert result["mode"] == "automatic"
+    permission = next(
+        item
+        for item in result["compiled_spec"]["permissions"]
+        if item["action"] == KEY
+    )
+    assert permission["mode"] == "automatic"
+    assert permission["source"] == "owner"
+
+    with factory() as db:
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        builder = config.settings["employee_builder"]
+        assert builder["owner_permissions"][KEY] == "automatic"
+        assert "last_tested_at" not in builder
+        assert "last_tested_compiled_at" not in builder
+        action = reveal_config(_assignment(db).config)["actions"][KEY]
+        assert action["confirmation_required"] is False
+        assert action["_xvond_permission_mode"] == "automatic"
