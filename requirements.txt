@@ -17,6 +17,7 @@ PyMuPDF==1.28.2
 pytesseract==0.3.13
 Pillow==12.3.0
 beautifulsoup4==4.15.0
+PyYAML==6.0.3
 pycountry==26.2.16
 tzdata==2026.3
 
