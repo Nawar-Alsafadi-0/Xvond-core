@@ -927,7 +927,7 @@ def test_compiler_preserves_generic_durable_wait_node():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 9
+    assert spec["version"] == 10
     assert [node["type"] for node in nodes] == ["transform", "wait", "ai"]
     assert nodes[1]["params"]["duration"] == 2
     assert nodes[1]["params"]["unit"] == "days"
@@ -980,7 +980,7 @@ def test_compiler_preserves_generic_correlated_event_wait():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 9
+    assert spec["version"] == 10
     assert [node["type"] for node in nodes] == [
         "transform",
         "await_event",
@@ -1148,7 +1148,7 @@ def test_compiler_normalizes_multiple_independent_execution_routines():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 9
+    assert spec["version"] == 10
     assert [item["id"] for item in spec["execution_routines"]] == [
         "morning_summary",
         "lead_review",
@@ -1187,7 +1187,7 @@ def test_compiler_maps_legacy_execution_graph_to_primary_routine():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 9
+    assert spec["version"] == 10
     assert len(spec["execution_routines"]) == 1
     assert spec["execution_routines"][0]["id"] == "primary"
     assert spec["execution_routines"][0]["graph"] == spec["execution_graph"]
@@ -1373,3 +1373,155 @@ def test_compiler_fails_invented_internal_event_trigger_closed():
 
     assert spec["execution_graph"]["trigger"] == {"type": "event"}
     assert spec["execution_routines"][0]["graph"]["trigger"] == {"type": "event"}
+
+
+
+def test_compiler_scopes_each_routine_to_only_its_requirements():
+    job_brief = (
+        "Every morning monitor source A. "
+        "Every evening monitor source B."
+    )
+    response = """{
+      "role":"Monitoring employee",
+      "scope":"personal",
+      "summary":"Run two independent monitors.",
+      "tasks":[],
+      "requirements":[
+        {
+          "key":"source_a",
+          "kind":"custom",
+          "purpose":"Monitor source A",
+          "runtime_inputs":{"target":"A"},
+          "primitives":["scheduler","workflow_engine"],
+          "schedule":{
+            "kind":"daily",
+            "hour":8,
+            "minute":0,
+            "timezone":"UTC",
+            "source_text":"Every morning"
+          }
+        },
+        {
+          "key":"source_b",
+          "kind":"custom",
+          "purpose":"Monitor source B",
+          "runtime_inputs":{"target":"B"},
+          "primitives":["scheduler","workflow_engine"],
+          "schedule":{
+            "kind":"daily",
+            "hour":18,
+            "minute":0,
+            "timezone":"UTC",
+            "source_text":"Every evening"
+          }
+        }
+      ],
+      "permissions":[],
+      "execution_routines":[
+        {
+          "id":"morning",
+          "name":"Morning monitor",
+          "requirement_keys":["source_a","source_b","invented"],
+          "graph":{
+            "version":1,
+            "trigger":{
+              "type":"schedule",
+              "schedule":{
+                "kind":"daily",
+                "hour":8,
+                "minute":0,
+                "timezone":"UTC",
+                "source_text":"Every morning"
+              }
+            },
+            "nodes":[
+              {
+                "id":"finish",
+                "type":"notify",
+                "depends_on":[],
+                "params":{"message":"Morning complete"}
+              }
+            ]
+          }
+        },
+        {
+          "id":"evening",
+          "name":"Evening monitor",
+          "requirement_keys":["source_b"],
+          "graph":{
+            "version":1,
+            "trigger":{
+              "type":"schedule",
+              "schedule":{
+                "kind":"daily",
+                "hour":18,
+                "minute":0,
+                "timezone":"UTC",
+                "source_text":"Every evening"
+              }
+            },
+            "nodes":[
+              {
+                "id":"finish",
+                "type":"notify",
+                "depends_on":[],
+                "params":{"message":"Evening complete"}
+              }
+            ]
+          }
+        }
+      ],
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+
+    assert spec["version"] == 10
+    assert spec["execution_routines"][0]["requirement_keys"] == [
+        "source_a",
+        "source_b",
+    ]
+    assert spec["execution_routines"][1]["requirement_keys"] == ["source_b"]
+
+
+def test_compiler_adds_action_requirement_to_routine_scope():
+    job_brief = "When I run it manually, save the result."
+    response = """{
+      "role":"Saver",
+      "scope":"personal",
+      "summary":"Save a result.",
+      "tasks":[],
+      "requirements":[
+        {
+          "key":"save_result",
+          "kind":"custom",
+          "purpose":"Save the result",
+          "primitives":["workflow_engine"]
+        }
+      ],
+      "permissions":[],
+      "execution_routines":[
+        {
+          "id":"save",
+          "name":"Save result",
+          "requirement_keys":[],
+          "graph":{
+            "version":1,
+            "trigger":{"type":"manual"},
+            "nodes":[
+              {
+                "id":"save",
+                "type":"action",
+                "depends_on":[],
+                "params":{"action_type":"save_result","arguments":{}}
+              }
+            ]
+          }
+        }
+      ],
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+
+    assert spec["execution_routines"][0]["requirement_keys"] == ["save_result"]
