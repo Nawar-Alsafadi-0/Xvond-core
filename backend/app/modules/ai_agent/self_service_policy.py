@@ -612,6 +612,25 @@ def _execution_blockers(
                 blockers.append(f"{key}: scheduled workflow is disabled")
             else:
                 blockers.append(f"{key}: execution setup required")
+
+    delivery = spec.get("delivery") if isinstance(spec.get("delivery"), dict) else {}
+    graph_trigger = (
+        delivery.get("graph_trigger")
+        if isinstance(delivery.get("graph_trigger"), dict)
+        else {}
+    )
+    graph_status = str(graph_trigger.get("status") or "not_required").strip().lower()
+    if graph_status not in {"ready", "not_required", "managed_delivery"}:
+        if graph_status == "schedule_required":
+            blockers.append("Execution graph: schedule configuration required")
+        elif graph_status == "schedule_setup_required":
+            blockers.append("Execution graph: valid workspace timezone or schedule setup required")
+        elif graph_status == "disabled":
+            blockers.append("Execution graph: generated workflow is disabled")
+        elif graph_status == "nested_approval_not_ready":
+            blockers.append("Execution graph: nested approval resume is not ready")
+        else:
+            blockers.append("Execution graph: trigger setup required")
     return blockers
 
 

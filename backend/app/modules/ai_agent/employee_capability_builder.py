@@ -14,10 +14,12 @@ from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.automation.execution_graph import (
     graph_action_types,
+    graph_contract_errors,
     normalize_execution_graph,
 )
 from backend.app.modules.automation.schedule import ScheduleConfigError, normalize_schedule_config
 from backend.app.modules.ai_agent.employee_compiler import normalize_requirement_key
+from backend.app.modules.tools.generic_capability_runtime import generic_capability_readiness
 from backend.app.modules.tools.models import AgentToolAssignment
 
 
@@ -498,6 +500,8 @@ def _provision_self_service_graph_trigger(
     graph = normalize_execution_graph(execution_graph or {})
     if not graph.get("nodes"):
         return "not_required", None
+    if graph_contract_errors(graph, graph_agent_id=agent_id):
+        return "setup_required", None
     trigger = graph.get("trigger") or {"type": "manual"}
     trigger_type = str(trigger.get("type") or "manual").strip().lower()
     if trigger_type not in {"manual", "schedule", "webhook", "event"}:
@@ -717,6 +721,9 @@ def _provision_self_service_schedule(
             )
             selected_graph = {"version": 1, "nodes": fallback_nodes}
 
+        if graph_contract_errors(selected_graph, graph_agent_id=agent_id):
+            return "setup_required", None
+
         workflow_steps = [
             {
                 "type": "graph",
@@ -869,14 +876,9 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "business_record":
             execution_status = "ready"
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "generic_capability":
-            plan = destination.get("execution_plan") or []
-            needs_http = any(
-                isinstance(step, dict) and step.get("op") == "http_get_json"
-                for step in plan
-            )
             execution_status = (
                 "ready"
-                if plan and (not needs_http or destination.get("allowed_hosts"))
+                if generic_capability_readiness(action).get("ready") is True
                 else "setup_required"
             )
         elif destination.get("type") == "workflow_engine":

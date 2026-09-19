@@ -168,3 +168,45 @@ def test_generic_runtime_readiness_requires_plan_and_http_host():
         {"destination": {"execution_plan": [{"id": "f", "op": "http_get_json"}]}}
     )
     assert result == {"ready": False, "reason": "approved_https_host_required"}
+
+def test_generic_runtime_readiness_rejects_unknown_operations():
+    result = runtime.generic_capability_readiness(
+        {
+            "destination": {
+                "execution_plan": [
+                    {"id": "run", "op": "shell", "command": "echo unsafe"}
+                ]
+            }
+        }
+    )
+    assert result == {"ready": False, "reason": "unsupported_runtime_operation"}
+
+
+def test_generic_runtime_readiness_rejects_forward_or_missing_sources():
+    result = runtime.generic_capability_readiness(
+        {
+            "destination": {
+                "execution_plan": [
+                    {"id": "value", "op": "extract", "source": "fetch", "path": "price"},
+                    {"id": "fetch", "op": "http_get_json", "url_field": "url"},
+                ],
+                "allowed_hosts": ["prices.example.com"],
+            }
+        }
+    )
+    assert result == {"ready": False, "reason": "runtime_source_unavailable"}
+
+
+def test_generic_runtime_readiness_rejects_duplicate_step_ids():
+    result = runtime.generic_capability_readiness(
+        {
+            "destination": {
+                "execution_plan": [
+                    {"id": "notify", "op": "notify"},
+                    {"id": "notify", "op": "notify"},
+                ]
+            }
+        }
+    )
+    assert result == {"ready": False, "reason": "invalid_runtime_step_id"}
+
