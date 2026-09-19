@@ -243,5 +243,115 @@ def latest_due_slot(
     return None
 
 
+
+def next_schedule_slot(
+    schedule: dict,
+    *,
+    after: datetime,
+    created_at: datetime,
+) -> datetime | None:
+    """Return the first schedule slot strictly after the supplied timestamp."""
+
+    normalized = normalize_schedule_config(schedule)
+    after_utc = _utc(after)
+    created_utc = _utc(created_at)
+
+    if normalized["kind"] == "interval":
+        raw_anchor = normalized.get("anchor_at")
+        if raw_anchor:
+            anchor = _utc(
+                datetime.fromisoformat(str(raw_anchor).replace("Z", "+00:00"))
+            )
+        else:
+            anchor = created_utc
+        if after_utc < anchor:
+            return anchor
+        period = timedelta(minutes=int(normalized["every_minutes"]))
+        steps = int((after_utc - anchor).total_seconds() // period.total_seconds()) + 1
+        return anchor + (period * steps)
+
+    if normalized["kind"] == "once":
+        target = _utc(
+            datetime.fromisoformat(str(normalized["at"]).replace("Z", "+00:00"))
+        )
+        if target < created_utc or target <= after_utc:
+            return None
+        return target
+
+    zone = _timezone(normalized["timezone"])
+    local_after = after_utc.astimezone(zone)
+
+    if normalized["kind"] == "daily":
+        candidate = local_after.replace(
+            hour=normalized["hour"],
+            minute=normalized["minute"],
+            second=0,
+            microsecond=0,
+        )
+        if candidate <= local_after:
+            candidate += timedelta(days=1)
+        candidate_utc = candidate.astimezone(UTC)
+        while candidate_utc < created_utc:
+            candidate += timedelta(days=1)
+            candidate_utc = candidate.astimezone(UTC)
+        return candidate_utc
+
+    if normalized["kind"] == "monthly":
+        candidate = _monthly_candidate(
+            year=local_after.year,
+            month=local_after.month,
+            day_of_month=normalized["day_of_month"],
+            hour=normalized["hour"],
+            minute=normalized["minute"],
+            zone=zone,
+        )
+        if candidate <= local_after:
+            if local_after.month == 12:
+                year, month = local_after.year + 1, 1
+            else:
+                year, month = local_after.year, local_after.month + 1
+            candidate = _monthly_candidate(
+                year=year,
+                month=month,
+                day_of_month=normalized["day_of_month"],
+                hour=normalized["hour"],
+                minute=normalized["minute"],
+                zone=zone,
+            )
+        candidate_utc = candidate.astimezone(UTC)
+        while candidate_utc < created_utc:
+            if candidate.month == 12:
+                year, month = candidate.year + 1, 1
+            else:
+                year, month = candidate.year, candidate.month + 1
+            candidate = _monthly_candidate(
+                year=year,
+                month=month,
+                day_of_month=normalized["day_of_month"],
+                hour=normalized["hour"],
+                minute=normalized["minute"],
+                zone=zone,
+            )
+            candidate_utc = candidate.astimezone(UTC)
+        return candidate_utc
+
+    weekdays = set(normalized["weekdays"])
+    for offset in range(0, 15):
+        local_day = local_after + timedelta(days=offset)
+        if local_day.weekday() not in weekdays:
+            continue
+        candidate = local_day.replace(
+            hour=normalized["hour"],
+            minute=normalized["minute"],
+            second=0,
+            microsecond=0,
+        )
+        candidate_utc = candidate.astimezone(UTC)
+        if candidate <= local_after or candidate_utc < created_utc:
+            continue
+        return candidate_utc
+    return None
+
+
 def schedule_slot_key(slot: datetime) -> str:
     return _utc(slot).replace(microsecond=0).isoformat().replace("+00:00", "Z")
