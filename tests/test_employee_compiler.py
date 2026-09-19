@@ -1290,3 +1290,86 @@ def test_compiler_fails_ungrounded_schedule_trigger_closed():
 
     assert spec["execution_graph"]["trigger"] == {"type": "schedule"}
     assert spec["execution_routines"][0]["graph"]["trigger"] == {"type": "schedule"}
+
+
+
+def test_compiler_inherits_graph_schedule_only_from_grounded_requirement_schedule():
+    job_brief = "Every 60 minutes generate a summary and save it."
+    response = """{
+      "role":"Scheduled worker",
+      "scope":"personal",
+      "summary":"Generate and save a recurring summary.",
+      "tasks":[],
+      "requirements":[
+        {
+          "key":"save_summary",
+          "kind":"custom",
+          "purpose":"Save the generated summary",
+          "primitives":["scheduler","workflow_engine"],
+          "schedule":{
+            "kind":"interval",
+            "every_minutes":60,
+            "source_text":"Every 60 minutes"
+          }
+        }
+      ],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{
+          "type":"schedule",
+          "schedule":{"kind":"interval","every_minutes":60}
+        },
+        "nodes":[
+          {
+            "id":"summarize",
+            "type":"ai",
+            "depends_on":[],
+            "params":{"prompt":"Generate the summary."}
+          }
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+
+    assert spec["execution_graph"]["trigger"]["schedule"] == {
+        "kind": "interval",
+        "every_minutes": 60,
+        "source_text": "Every 60 minutes",
+    }
+
+
+def test_compiler_fails_invented_internal_event_trigger_closed():
+    job_brief = "حلل البيانات فقط عندما أشغلك بنفسي"
+    response = """{
+      "role":"Manual analyst",
+      "scope":"personal",
+      "summary":"Analyze supplied data.",
+      "tasks":[],
+      "requirements":[],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{
+          "type":"event",
+          "event":"lead.created",
+          "source_text":"عندما يصل lead جديد"
+        },
+        "nodes":[
+          {
+            "id":"analyze",
+            "type":"ai",
+            "depends_on":[],
+            "params":{"prompt":"Analyze the supplied data."}
+          }
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+
+    assert spec["execution_graph"]["trigger"] == {"type": "event"}
+    assert spec["execution_routines"][0]["graph"]["trigger"] == {"type": "event"}
