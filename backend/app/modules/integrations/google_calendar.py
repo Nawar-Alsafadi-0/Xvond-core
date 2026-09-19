@@ -115,6 +115,20 @@ def _slot_minutes(config: dict) -> int:
     return value
 
 
+def validate_google_calendar_preferences(config: dict) -> dict:
+    """Validate non-secret Calendar setup before OAuth consent."""
+    _provider(config)
+    calendar_id = _calendar_id(config)
+    zone = _timezone(config)
+    slot_minutes = _slot_minutes(config)
+    return {
+        "provider": "google",
+        "calendar_id": calendar_id,
+        "timezone": zone.key,
+        "slot_minutes": slot_minutes,
+    }
+
+
 def _headers(access_token: str) -> dict:
     if not str(access_token or "").strip():
         raise CalendarConnectorError(
