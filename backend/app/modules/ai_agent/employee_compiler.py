@@ -17,7 +17,7 @@ from backend.app.modules.channels.catalog import (
 )
 
 
-COMPILER_VERSION = 12
+COMPILER_VERSION = 13
 
 GENERIC_PRIMITIVES = {
     "workflow_engine",
