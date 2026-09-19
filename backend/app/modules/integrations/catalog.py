@@ -345,7 +345,7 @@ INTEGRATION_CATALOG = {
             {
                 "name": "validation_endpoint",
                 "label": "Validation Endpoint",
-                "required": True,
+                "required": False,
                 "secret": False,
             },
         ],
