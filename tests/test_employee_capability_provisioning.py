@@ -2949,14 +2949,14 @@ def test_routine_observability_exposes_health_duration_and_failed_step(database)
                                     "step_type": "graph",
                                     "phase": "resume",
                                     "status": "failed",
-                                    "node_id": "notify_owner",
+                                    "node_id": None,
                                     "duration_ms": 87.25,
-                                    "error": "notification provider unavailable",
+                                    "error": "Execution graph node notify_owner (notify) failed: notification provider unavailable",
                                 }
                             ]
                         }
                     },
-                    error_message="notification provider unavailable",
+                    error_message="Execution graph node notify_owner (notify) failed: notification provider unavailable",
                     created_at=datetime(2026, 9, 19, 11, 0),
                     finished_at=datetime(2026, 9, 19, 11, 0, 4),
                 ),
@@ -2988,7 +2988,7 @@ def test_routine_observability_exposes_health_duration_and_failed_step(database)
         "step_type": "graph",
         "node_id": "notify_owner",
         "phase": "resume",
-        "error": "notification provider unavailable",
+        "error": "Execution graph node notify_owner (notify) failed: notification provider unavailable",
         "duration_ms": 87.25,
     }
     assert observed["retry"]["safe"] is False
