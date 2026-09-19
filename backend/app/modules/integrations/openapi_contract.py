@@ -35,6 +35,44 @@ def _operation_name(operation_id: Any, method: str, path: str, used: set[str]) -
     return candidate
 
 
+def _normalized_auth_schemes(document: dict) -> list[dict]:
+    components = document.get("components") if isinstance(document.get("components"), dict) else {}
+    schemes = components.get("securitySchemes") if isinstance(components.get("securitySchemes"), dict) else {}
+    result: list[dict] = []
+    for raw_name, raw in list(schemes.items())[:20]:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw_name or "").strip()[:80]
+        scheme_type = str(raw.get("type") or "").strip().lower()
+        item: dict[str, Any] | None = None
+        if scheme_type == "apikey":
+            location = str(raw.get("in") or "").strip().lower()
+            param_name = str(raw.get("name") or "").strip()[:80]
+            if location == "header" and param_name:
+                item = {
+                    "name": name,
+                    "auth_type": "api_key_header",
+                    "api_key_name": param_name,
+                }
+            elif location == "query" and param_name:
+                item = {
+                    "name": name,
+                    "auth_type": "api_key_query",
+                    "api_key_name": param_name,
+                }
+        elif scheme_type == "http":
+            scheme = str(raw.get("scheme") or "").strip().lower()
+            if scheme == "bearer":
+                item = {"name": name, "auth_type": "bearer"}
+            elif scheme == "basic":
+                item = {"name": name, "auth_type": "basic"}
+        elif scheme_type == "oauth2":
+            item = {"name": name, "auth_type": "oauth"}
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
 def _static_https_server_url(document: dict) -> str | None:
     servers = document.get("servers")
     if not isinstance(servers, list):
@@ -150,6 +188,7 @@ def normalize_openapi_document(document: dict) -> dict:
         "title": str(info.get("title") or "Imported API").strip()[:200],
         "openapi_version": str(document.get("openapi") or document.get("swagger") or "").strip()[:40],
         "base_url": _static_https_server_url(document),
+        "auth_schemes": _normalized_auth_schemes(document),
         "operations": operations,
     }
 
