@@ -775,6 +775,7 @@ def _attempt_compiled_capability_discovery(
             "status": "resolved" if auto_provisioned else "contract_found",
             "customer_access": access_mode,
             "operation_count": len(operations),
+            "_integration_id": requirement.get("integration_id") if auto_provisioned else None,
         })
 
     updated["requirements"] = requirements
@@ -811,8 +812,22 @@ def _attempt_compiled_capability_discovery(
                     matching.pop("integration_id", None)
                     matching.pop("integration_type", None)
                     matching["discovery"]["status"] = "operation_selection_required"
+                    orphan_id = outcome.get("_integration_id")
+                    if orphan_id:
+                        orphan = (
+                            db.query(CompanyIntegration)
+                            .filter(
+                                CompanyIntegration.id == int(orphan_id),
+                                CompanyIntegration.company_id == company.id,
+                            )
+                            .first()
+                        )
+                        if orphan is not None:
+                            db.delete(orphan)
                     outcome["status"] = "operation_selection_required"
 
+    for outcome in outcomes:
+        outcome.pop("_integration_id", None)
     return updated, outcomes
 
 
