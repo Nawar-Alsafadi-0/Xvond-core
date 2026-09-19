@@ -3895,8 +3895,10 @@ def _routine_operational_state(
         state = "waiting_approval"
     elif latest_run.status == "failed":
         state = "needs_attention"
-    elif latest_run.status in {"success", "rejected"}:
+    elif latest_run.status == "success":
         state = "healthy"
+    elif latest_run.status == "rejected":
+        state = "rejected"
     else:
         state = str(latest_run.status or "unknown")
 
@@ -3906,6 +3908,7 @@ def _routine_operational_state(
         workflow.trigger_type == "schedule"
         and isinstance(schedule, dict)
         and workflow.enabled
+        and employee_enabled
     ):
         schedule_start = workflow.created_at
         resumed_at = str(trigger_config.get("_xvond_resumed_at") or "").strip()
