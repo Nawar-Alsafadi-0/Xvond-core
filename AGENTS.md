@@ -27,6 +27,29 @@ A working employee may communicate through multiple channels, use business knowl
 
 Channels are surfaces, not separate employees.
 
+## Non-negotiable product boundary: do not stop at agent generation
+
+Treat agent generation as the start of the lifecycle, not the finish line.
+
+A task is not complete merely because Xvond can create:
+
+- a prompt;
+- an employee record;
+- a compiled specification;
+- an action contract;
+- a workflow definition;
+- a channel configuration.
+
+The intended product outcome is:
+
+`Describe -> Build -> Complete missing setup -> Connect -> Test -> Launch -> Operate -> Observe -> Refine`
+
+When planning product work, prefer the change that moves an employee closer to performing the requested job in a real environment.
+
+If the employee requires an external channel, system or action, the implementation must represent that dependency honestly and must not claim the employee is operational until the real path is proven.
+
+The Builder is a product entry point. **Xvond Core is the operating platform that gets the employee to work and keeps it working.**
+
 ## Business before local code assumptions
 
 Existing code is runtime truth, but it is not automatically product truth.
