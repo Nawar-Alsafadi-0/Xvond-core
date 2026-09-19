@@ -136,7 +136,8 @@ def build_internal_booking_action_config(*, requirement: dict, spec: dict) -> di
         {"key": "notes", "label": "Notes", "required": False, "type": "text"},
     ]
     action = {
-        "enabled": _permission_mode(spec, requirement) != "never",
+        "enabled": True,
+        "_xvond_permission_mode": _permission_mode(spec, requirement),
         "label": str(requirement.get("purpose") or "Booking").strip()[:200] or "Booking",
         "description": str(requirement.get("purpose") or "Create and manage bookings").strip()[:1000],
         "module": "booking",
@@ -212,7 +213,8 @@ def build_internal_record_action_config(*, requirement: dict, spec: dict) -> dic
     if definition is None:
         raise ValueError(f"No Xvond-native record definition for {key}")
     return {
-        "enabled": _permission_mode(spec, requirement) != "never",
+        "enabled": True,
+        "_xvond_permission_mode": _permission_mode(spec, requirement),
         "label": purpose[:200] or key,
         "description": purpose[:1000],
         "module": definition["module"],
@@ -262,7 +264,8 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
         "customer_support": "customer_support",
     }
     return {
-        "enabled": _permission_mode(spec, requirement) != "never",
+        "enabled": True,
+        "_xvond_permission_mode": _permission_mode(spec, requirement),
         "label": purpose[:200] or key,
         "description": purpose[:1000],
         "module": module_map.get(key, "tools"),
@@ -336,7 +339,8 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
         return build_external_integration_action_config(requirement=requirement, spec=spec)
 
     return {
-        "enabled": _permission_mode(spec, requirement) != "never",
+        "enabled": True,
+        "_xvond_permission_mode": _permission_mode(spec, requirement),
         "label": purpose[:200] or key,
         "description": purpose[:1000],
         "module": "tools",
@@ -519,6 +523,10 @@ def _provision_self_service_graph_trigger(
         plan = action_plan.get(action_type) or {}
         if not isinstance(action, dict):
             return "setup_required", None
+        if str(action.get("_xvond_permission_mode") or "").strip().lower() == "never":
+            # An owner-denied node is a deliberate no-op at runtime, not missing
+            # setup. Other graph work may still run normally.
+            continue
         if str(plan.get("execution_status") or "") != "ready":
             return "setup_required", None
 
@@ -582,8 +590,6 @@ def _provision_self_service_schedule(
         return "managed_delivery", None
     if "scheduler" not in (requirement.get("primitives") or []):
         return "not_required", None
-    if action.get("confirmation_required", True):
-        return "approval_required", None
     raw_schedule = requirement.get("schedule")
     if not isinstance(raw_schedule, dict):
         return "schedule_required", None
@@ -605,6 +611,11 @@ def _provision_self_service_schedule(
     if missing:
         requirement["schedule_missing_inputs"] = missing
         return "runtime_inputs_required", None
+
+    if str(action.get("_xvond_permission_mode") or "").strip().lower() == "never":
+        return "permission_denied", None
+    if action.get("confirmation_required", True):
+        return "approval_required", None
 
     key = str(requirement.get("key") or "")
     workflow = _generated_schedule_workflow(
@@ -803,10 +814,28 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
         if not isinstance(actions.get(key), dict):
             actions[key] = build_managed_action_config(requirement=item, spec=prepared)
             changed = True
-        # Existing operator configuration, permissions and disable switches win.
+        # Existing operator configuration and destination setup win, but
+        # Xvond-generated policy flags must follow the owner's latest permission.
         action = actions[key]
+        if action.get("xvond_generated") is True:
+            permission_mode = _permission_mode(prepared, item)
+            desired_confirmation = permission_mode != "automatic"
+            if (
+                action.get("confirmation_required", True) != desired_confirmation
+                or action.get("_xvond_permission_mode") != permission_mode
+            ):
+                # Operator enable/disable is a separate, higher-priority switch.
+                # Owner policy controls whether an enabled generated action may
+                # execute automatically, require approval, or be denied.
+                action["confirmation_required"] = desired_confirmation
+                action["_xvond_permission_mode"] = permission_mode
+                actions[key] = action
+                changed = True
         destination = action.get("destination") or {}
-        if not action.get("enabled", True) or (assignment is not None and not assignment.enabled):
+        permission_mode = str(action.get("_xvond_permission_mode") or "").strip().lower()
+        if permission_mode == "never":
+            execution_status = "permission_denied"
+        elif not action.get("enabled", True) or (assignment is not None and not assignment.enabled):
             execution_status = "disabled"
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "booking":
             execution_status = (
