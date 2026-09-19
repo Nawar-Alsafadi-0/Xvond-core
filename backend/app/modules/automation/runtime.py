@@ -2524,6 +2524,12 @@ class AutomationRuntime:
                 message=message,
                 commit=False,
                 allow_tools=False,
+                system_prompt_override=(
+                    str(state.get("_xvond_preview_system_prompt"))
+                    if state.get("_xvond_preview")
+                    and state.get("_xvond_preview_system_prompt")
+                    else None
+                ),
             )
             return {
                 "ai_response": response.get("response", {}).get("content", ""),
