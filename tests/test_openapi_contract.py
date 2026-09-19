@@ -105,3 +105,20 @@ def test_openapi_ignores_dynamic_server_templates():
     document = _document()
     document["servers"] = [{"url": "https://{tenant}.example.com/v1"}]
     assert normalize_openapi_document(document)["base_url"] is None
+
+
+def test_openapi_limits_operation_count_and_rejects_no_supported_operations():
+    document = {
+        "openapi": "3.0.3",
+        "paths": {
+            f"/items/{index}": {"get": {"operationId": f"readItem{index}"}}
+            for index in range(120)
+        },
+    }
+    contract = normalize_openapi_document(document)
+    assert len(contract["operations"]) == 100
+
+    with pytest.raises(ValueError):
+        normalize_openapi_document(
+            {"openapi": "3.0.3", "paths": {"/items": {"trace": {}}}}
+        )
