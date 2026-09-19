@@ -255,8 +255,11 @@ def deactivate(company_id: int, connection_key: str, x_xvond_registry_secret: st
     if len(clean_key) < 16 or len(clean_key) > 200:
         raise HTTPException(status_code=400, detail="invalid_connection_key")
     with _db() as conn, conn.cursor() as cur:
+        # Route removal is a credential-retention boundary, not merely a
+        # routing toggle. Delete the encrypted provider material entirely; Core
+        # keeps the non-secret channel/audit history and can reprovision later.
         cur.execute(
-            "UPDATE xvond_managed_channel_routes SET active=FALSE,updated_at=NOW() WHERE company_id=%s AND connection_key=%s",
+            "DELETE FROM xvond_managed_channel_routes WHERE company_id=%s AND connection_key=%s",
             (company_id, clean_key),
         )
         changed = cur.rowcount
