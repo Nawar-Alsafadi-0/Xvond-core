@@ -241,6 +241,7 @@ Use this shape:
     {
       "id": "stable_snake_case_routine_id",
       "name": "short human-readable routine name",
+      "requirement_keys": ["exact requirement key used by this routine"],
       "graph": {
         "version": 1,
         "trigger": {"type":"manual|schedule|webhook|event","event":"internal event name when type=event","source_text":"exact Job Brief words authorizing an event/webhook trigger","schedule":{"kind":"interval|once|daily|weekly|monthly","source_text":"exact cadence/time words copied from the Job Brief"}},
@@ -277,6 +278,7 @@ Rules:
 - Do not split sequential steps of the same job into separate routines. If work is one continuous lifecycle (including wait, await_event, approval or foreach checkpoints), keep it inside one graph.
 - For a single executable routine, execution_graph remains valid for backward compatibility. For multiple independent routines, prefer execution_routines and let Xvond derive the legacy primary execution_graph from the first routine.
 - Limit execution_routines to the smallest set that faithfully represents the requested job; never invent extra routines.
+- Each execution_routine must list only the requirement keys it actually depends on in requirement_keys. Use keys from the normalized requirements array; never invent a routine-only requirement key. This binding keeps setup/runtime inputs isolated between independent responsibilities.
 - execution_graph.trigger describes what starts the graph. Use manual when the user starts it explicitly, schedule for recurring/time-based work, webhook for an incoming external JSON event, and event for an internal Xvond event. Never invent a webhook/event trigger when the user did not request event-driven behavior.
 - For a schedule trigger, include trigger.schedule.source_text copied verbatim from the Job Brief words that authorize the cadence/time. Xvond will fail the schedule closed when this grounding is missing or does not occur in the Job Brief.
 - For type=event, set trigger.event to the stable internal event name the graph should consume and include trigger.source_text copied verbatim from the Job Brief words that authorize that event-driven routine. Event names are capabilities of the Xvond runtime, not provider-specific webhook URLs. Xvond also accepts the exact event name itself as grounding when the customer wrote it.
@@ -662,6 +664,7 @@ def _normalize_execution_routines(
     *,
     job_brief: str,
     grounded_schedules: list[dict] | None = None,
+    valid_requirement_keys: set[str] | None = None,
 ) -> tuple[list[dict], dict]:
     """Normalize independent employee routines while preserving the legacy graph."""
 
@@ -700,10 +703,24 @@ def _normalize_execution_routines(
             used_ids.add(routine_id)
 
             name = _bounded_text(raw.get("name"), limit=200)
+            allowed_requirement_keys = set(valid_requirement_keys or set())
+            requirement_keys: list[str] = []
+            for raw_key in raw.get("requirement_keys") or []:
+                key = normalize_requirement_key(raw_key)
+                if (
+                    key
+                    and key in allowed_requirement_keys
+                    and key not in requirement_keys
+                ):
+                    requirement_keys.append(key)
+                if len(requirement_keys) >= 50:
+                    break
+
             routines.append(
                 {
                     "id": routine_id,
                     "name": name or routine_id.replace("_", " "),
+                    "requirement_keys": requirement_keys,
                     "graph": graph,
                 }
             )
@@ -724,6 +741,7 @@ def _normalize_execution_routines(
                 {
                     "id": "primary",
                     "name": "Primary routine",
+                    "requirement_keys": [],
                     "graph": deepcopy(legacy_graph),
                 }
             ],
@@ -1047,6 +1065,11 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
             for item in requirements
             if isinstance(item, dict) and isinstance(item.get("schedule"), dict)
         ],
+        valid_requirement_keys={
+            str(item.get("key") or "")
+            for item in requirements
+            if isinstance(item, dict) and str(item.get("key") or "")
+        },
     )
 
     return {
