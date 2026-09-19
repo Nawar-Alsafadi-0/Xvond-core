@@ -264,3 +264,64 @@ def test_direct_self_service_channel_keeps_normal_connect_blocker():
     )
     assert "website: setup required" in state["blockers"]
     assert not any("adapter required" in item for item in state["blockers"])
+
+
+
+def test_readiness_checks_every_employee_routine_trigger():
+    spec = _spec(scope="personal")
+    spec["delivery"]["graph_trigger"] = {
+        "routine_id": "morning",
+        "routine_name": "Morning routine",
+        "status": "ready",
+        "workflow_id": 10,
+        "trigger_type": "schedule",
+    }
+    spec["delivery"]["graph_triggers"] = [
+        {
+            "routine_id": "morning",
+            "routine_name": "Morning routine",
+            "status": "ready",
+            "workflow_id": 10,
+            "trigger_type": "schedule",
+        },
+        {
+            "routine_id": "incoming_event",
+            "routine_name": "Incoming event",
+            "status": "disabled",
+            "workflow_id": 11,
+            "trigger_type": "event",
+        },
+    ]
+
+    state = evaluate_readiness(
+        subscribed=True,
+        channel_limit=None,
+        requested_channels=[],
+        enabled_channels=[],
+        compiled_spec=spec,
+        provisioned=True,
+    )
+
+    assert state["ready"] is False
+    assert "Incoming event: generated workflow is disabled" in state["blockers"]
+    assert not any("Morning routine" in item for item in state["blockers"])
+
+
+def test_readiness_keeps_legacy_single_graph_trigger_compatible():
+    spec = _spec(scope="personal")
+    spec["delivery"]["graph_trigger"] = {
+        "status": "ready",
+        "workflow_id": 10,
+        "trigger_type": "manual",
+    }
+
+    state = evaluate_readiness(
+        subscribed=True,
+        channel_limit=None,
+        requested_channels=[],
+        enabled_channels=[],
+        compiled_spec=spec,
+        provisioned=True,
+    )
+
+    assert state["ready"] is True

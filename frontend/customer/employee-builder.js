@@ -232,13 +232,19 @@
     function journeyMarkup(employee) {
         if (employee.delivery_mode !== "self_service") return "";
         const journey = employee.builder_journey || {};
-        const graphTrigger = employee.compiled_spec?.delivery?.graph_trigger || {};
-        const manualGraphReady = Boolean(
-            employee.enabled
-            && graphTrigger.trigger_type === "manual"
-            && graphTrigger.status === "ready"
-            && graphTrigger.workflow_id
+        const delivery = employee.compiled_spec?.delivery || {};
+        const graphTriggers = (
+            Array.isArray(delivery.graph_triggers) && delivery.graph_triggers.length
+                ? delivery.graph_triggers
+                : (delivery.graph_trigger ? [delivery.graph_trigger] : [])
         );
+        const manualRoutines = graphTriggers.filter(item =>
+            employee.enabled
+            && item?.trigger_type === "manual"
+            && item?.status === "ready"
+            && item?.workflow_id
+        );
+        const manualGraphReady = manualRoutines.length > 0;
         const stages = Array.isArray(journey.stages) ? journey.stages : [];
         if (!stages.length) return "";
         const progress = Number(journey.total_count || stages.length)
@@ -283,9 +289,19 @@
                 ${manualGraphReady ? `
                     <div id="employee-builder-manual-run-panel" class="employee-builder-section">
                         <h3>Run now</h3>
-                        <p class="muted">Run this employee's live execution graph now. Optional JSON becomes the graph input.</p>
+                        <p class="muted">Run one of this employee's live manual routines. Optional JSON becomes the routine input.</p>
+                        <label>
+                            <span>Routine</span>
+                            <select id="employee-builder-manual-routine">
+                                ${manualRoutines.map(item => `
+                                    <option value="${escapeHtml(String(item.routine_id || "primary"))}">
+                                        ${escapeHtml(String(item.routine_name || item.routine_id || "Primary routine"))}
+                                    </option>
+                                `).join("")}
+                            </select>
+                        </label>
                         <textarea id="employee-builder-manual-run-input" rows="4" placeholder='{"key":"value"}'></textarea>
-                        <button type="button" id="employee-builder-manual-run">Run employee</button>
+                        <button type="button" id="employee-builder-manual-run">Run routine</button>
                         <pre id="employee-builder-manual-run-output" class="employee-builder-run-output hidden"></pre>
                         <div id="employee-builder-manual-run-error" class="error"></div>
                     </div>
@@ -741,7 +757,11 @@
                 const error = document.getElementById("employee-builder-webhook-error");
                 if (error) error.textContent = "";
                 try {
-                    const result = await api(`/customer/employee-builder/${Number(employee.agent_id)}/webhook`);
+                    const routineId = String(actionKey || "").startsWith("webhook_trigger:")
+                        ? String(actionKey).slice("webhook_trigger:".length)
+                        : "";
+                    const query = routineId ? `?routine_id=${encodeURIComponent(routineId)}` : "";
+                    const result = await api(`/customer/employee-builder/${Number(employee.agent_id)}/webhook${query}`);
                     const url = document.getElementById("employee-builder-webhook-url");
                     const key = document.getElementById("employee-builder-webhook-key");
                     const idempotency = document.getElementById("employee-builder-webhook-idempotency");
@@ -961,11 +981,16 @@
                 }
             }
             try {
+                const routine = document.getElementById("employee-builder-manual-routine");
+                const routineId = String(routine?.value || "").trim();
                 const result = await api(
                     `/customer/employee-builder/${Number(employee.agent_id)}/run-graph`,
                     {
                         method: "POST",
-                        body: JSON.stringify({input_data: inputData}),
+                        body: JSON.stringify({
+                            input_data: inputData,
+                            routine_id: routineId || null,
+                        }),
                     }
                 );
                 if (output) {
