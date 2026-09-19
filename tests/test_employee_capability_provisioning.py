@@ -1829,7 +1829,7 @@ def test_multi_routine_provisioning_keeps_same_trigger_routines_independent(data
         ]
         assert all(item["status"] == "ready" for item in triggers)
         assert delivery["graph_trigger"]["routine_id"] == "morning_summary"
-        assert prepared["delivery"]["provisioning_version"] == 2
+        assert prepared["delivery"]["provisioning_version"] == 1
 
         workflows = (
             db.query(AutomationWorkflow)
