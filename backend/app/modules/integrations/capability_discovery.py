@@ -259,3 +259,57 @@ def api_connection_probe(contract: dict, *, auth_config: dict | None = None) -> 
 def public_api_probe(contract: dict) -> dict | None:
     return api_connection_probe(contract, auth_config=None)
 
+
+
+def oauth_client_credentials_token(flow: dict, *, client_id: str, client_secret: str) -> dict:
+    """Exchange client credentials at a discovered HTTPS OAuth token endpoint."""
+    if not isinstance(flow, dict) or str(flow.get("flow") or "") != "client_credentials":
+        raise ValueError("OAuth client-credentials flow is not available")
+    token_url = str(flow.get("token_url") or "").strip()
+    if not token_url:
+        raise ValueError("OAuth token URL is missing")
+    scopes = [
+        str(item).strip()
+        for item in (flow.get("scopes") or [])
+        if str(item).strip()
+    ][:50]
+    import base64
+    basic = base64.b64encode(
+        f"{str(client_id)}:{str(client_secret)}".encode("utf-8")
+    ).decode("ascii")
+    form = {"grant_type": "client_credentials"}
+    if scopes:
+        form["scope"] = " ".join(scopes)
+    result = safe_http_request(
+        url=token_url,
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": f"Basic {basic}",
+            "User-Agent": "Xvond-Capability-Discovery/1.0",
+        },
+        form_data=form,
+        timeout=15,
+        max_response_bytes=64_000,
+    )
+    status = int(result.get("status_code") or 0)
+    if not 200 <= status < 300:
+        raise ValueError(f"OAuth token endpoint returned HTTP {status}")
+    import json
+    try:
+        payload = json.loads(str(result.get("response") or ""))
+    except json.JSONDecodeError as exc:
+        raise ValueError("OAuth token response is not valid JSON") from exc
+    token = str(payload.get("access_token") or "").strip()
+    if not token:
+        raise ValueError("OAuth token response has no access_token")
+    token_type = str(payload.get("token_type") or "Bearer").strip()
+    if token_type.lower() != "bearer":
+        raise ValueError("Only Bearer OAuth access tokens are supported")
+    return {
+        "access_token": token,
+        "token_type": "Bearer",
+        "expires_in": payload.get("expires_in"),
+        "scope": payload.get("scope"),
+    }

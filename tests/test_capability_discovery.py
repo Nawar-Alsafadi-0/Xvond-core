@@ -186,3 +186,57 @@ def test_authenticated_api_probe_applies_bearer_without_writes(monkeypatch):
     assert captured[0]["method"] == "GET"
     assert captured[0]["url"] == "https://api.example.com/me"
     assert captured[0]["headers"]["Authorization"] == "Bearer secret-token"
+
+
+def test_oauth_client_credentials_exchange_is_bounded(monkeypatch):
+    captured = {}
+
+    def fake_http(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status_code": 200,
+            "response": '{"access_token":"abc123","token_type":"Bearer","expires_in":3600}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(discovery, "safe_http_request", fake_http)
+    token = discovery.oauth_client_credentials_token(
+        {
+            "flow": "client_credentials",
+            "token_url": "https://accounts.example.com/oauth/token",
+            "scopes": ["orders.read"],
+        },
+        client_id="client-1",
+        client_secret="secret-1",
+    )
+    assert token["access_token"] == "abc123"
+    assert captured["method"] == "POST"
+    assert captured["url"] == "https://accounts.example.com/oauth/token"
+    assert captured["form_data"] == {
+        "grant_type": "client_credentials",
+        "scope": "orders.read",
+    }
+    assert captured["headers"]["Authorization"].startswith("Basic ")
+
+
+def test_oauth_client_credentials_rejects_non_bearer_token(monkeypatch):
+    monkeypatch.setattr(
+        discovery,
+        "safe_http_request",
+        lambda **kwargs: {
+            "status_code": 200,
+            "response": '{"access_token":"abc123","token_type":"MAC"}',
+            "truncated": False,
+        },
+    )
+    import pytest
+    with pytest.raises(ValueError, match="Bearer"):
+        discovery.oauth_client_credentials_token(
+            {
+                "flow": "client_credentials",
+                "token_url": "https://accounts.example.com/oauth/token",
+                "scopes": [],
+            },
+            client_id="client-1",
+            client_secret="secret-1",
+        )

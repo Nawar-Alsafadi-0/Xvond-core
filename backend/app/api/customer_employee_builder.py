@@ -90,6 +90,7 @@ from backend.app.modules.integrations.catalog import (
 from backend.app.modules.integrations.capability_discovery import (
     api_connection_probe,
     discover_openapi_contract,
+    oauth_client_credentials_token,
     public_api_probe,
 )
 
@@ -137,6 +138,8 @@ class EmployeeBuilderDiscoveryAccessRequest(BaseModel):
     api_key: str | None = Field(default=None, min_length=1, max_length=8000)
     username: str | None = Field(default=None, min_length=1, max_length=500)
     password: str | None = Field(default=None, min_length=1, max_length=8000)
+    client_id: str | None = Field(default=None, min_length=1, max_length=1000)
+    client_secret: str | None = Field(default=None, min_length=1, max_length=8000)
 
 
 class EmployeeBuilderSetupAnswerRequest(BaseModel):
@@ -1688,6 +1691,16 @@ def _self_service_builder_journey(
                             {"key": "username", "label": "Username", "type": "text"},
                             {"key": "password", "label": "Password", "type": "password"},
                         ]
+                    elif auth_type == "oauth":
+                        flows = [
+                            item for item in (scheme.get("flows") or [])
+                            if isinstance(item, dict)
+                        ]
+                        if any(item.get("flow") == "client_credentials" for item in flows):
+                            fields = [
+                                {"key": "client_id", "label": "OAuth client ID", "type": "text"},
+                                {"key": "client_secret", "label": "OAuth client secret", "type": "password"},
+                            ]
                     elif auth_type in {"bearer", "api_key_header", "api_key_query"} or customer_access == "api_key":
                         fields = [{
                             "key": "api_key",
@@ -3377,7 +3390,7 @@ def provide_discovered_capability_access(
             for item in (discovery.get("auth_schemes") or [])
             if isinstance(item, dict)
             and str(item.get("auth_type") or "") in {
-                "bearer", "api_key_header", "api_key_query", "basic"
+                "bearer", "api_key_header", "api_key_query", "basic", "oauth"
             }
         ]
         if len(schemes) > 1:
@@ -3419,6 +3432,47 @@ def provide_discovered_capability_access(
                 raise HTTPException(400, "Username and password are required")
             auth_config["username"] = username
             auth_config["password"] = password
+        elif auth_type == "oauth":
+            flows = [
+                item for item in (scheme.get("flows") or [])
+                if isinstance(item, dict)
+            ]
+            client_flow = next(
+                (item for item in flows if item.get("flow") == "client_credentials"),
+                None,
+            )
+            if client_flow is None:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "error": "oauth_authorization_required",
+                        "message": (
+                            "This discovered API requires an interactive OAuth authorization. "
+                            "Xvond will not invent or accept a raw OAuth token."
+                        ),
+                        "authorization_flows": flows,
+                    },
+                )
+            client_id = str(data.client_id or "").strip()
+            client_secret = str(data.client_secret or "")
+            if not client_id or not client_secret:
+                raise HTTPException(400, "OAuth client ID and client secret are required")
+            token = oauth_client_credentials_token(
+                client_flow,
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+            auth_config = {
+                "auth_type": "bearer",
+                "api_key": token["access_token"],
+                "_xvond_oauth": {
+                    "flow": "client_credentials",
+                    "token_url": client_flow.get("token_url"),
+                    "scopes": client_flow.get("scopes") or [],
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                },
+            }
 
         contract = {
             "base_url": base_url,
