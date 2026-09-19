@@ -67,7 +67,47 @@ def _normalized_auth_schemes(document: dict) -> list[dict]:
             elif scheme == "basic":
                 item = {"name": name, "auth_type": "basic"}
         elif scheme_type == "oauth2":
-            item = {"name": name, "auth_type": "oauth"}
+            flows = raw.get("flows") if isinstance(raw.get("flows"), dict) else {}
+            supported_flows: list[dict] = []
+            for flow_name in ("authorizationCode", "clientCredentials"):
+                flow = flows.get(flow_name)
+                if not isinstance(flow, dict):
+                    continue
+                authorization_url = str(flow.get("authorizationUrl") or "").strip()
+                token_url = str(flow.get("tokenUrl") or "").strip()
+                if flow_name == "authorizationCode" and not authorization_url:
+                    continue
+                if not token_url:
+                    continue
+                auth_parsed = urlparse(authorization_url) if authorization_url else None
+                token_parsed = urlparse(token_url)
+                if (
+                    token_parsed.scheme.lower() != "https"
+                    or not token_parsed.hostname
+                    or token_parsed.username
+                    or token_parsed.password
+                ):
+                    continue
+                if auth_parsed is not None and (
+                    auth_parsed.scheme.lower() != "https"
+                    or not auth_parsed.hostname
+                    or auth_parsed.username
+                    or auth_parsed.password
+                ):
+                    continue
+                scopes = flow.get("scopes") if isinstance(flow.get("scopes"), dict) else {}
+                supported_flows.append({
+                    "flow": "authorization_code" if flow_name == "authorizationCode" else "client_credentials",
+                    "authorization_url": authorization_url,
+                    "token_url": token_url,
+                    "scopes": list(scopes.keys())[:50],
+                })
+            if supported_flows:
+                item = {
+                    "name": name,
+                    "auth_type": "oauth",
+                    "flows": supported_flows,
+                }
         if item and item not in result:
             result.append(item)
     return result

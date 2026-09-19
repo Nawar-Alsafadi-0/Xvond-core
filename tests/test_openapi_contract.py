@@ -238,3 +238,61 @@ def test_openapi_extracts_generic_auth_schemes():
         "api_key_name": "X-Partner-Key",
     } in contract["auth_schemes"]
     assert {"name": "BasicAuth", "auth_type": "basic"} in contract["auth_schemes"]
+
+
+def test_openapi_preserves_safe_oauth_authorization_contract():
+    document = {
+        "openapi": "3.0.3",
+        "info": {"title": "OAuth API"},
+        "servers": [{"url": "https://api.example.com"}],
+        "components": {
+            "securitySchemes": {
+                "OAuth": {
+                    "type": "oauth2",
+                    "flows": {
+                        "authorizationCode": {
+                            "authorizationUrl": "https://accounts.example.com/oauth/authorize",
+                            "tokenUrl": "https://accounts.example.com/oauth/token",
+                            "scopes": {"orders.read": "Read orders"},
+                        }
+                    },
+                }
+            }
+        },
+        "paths": {"/orders": {"get": {"operationId": "listOrders"}}},
+    }
+    contract = normalize_openapi_document(document)
+    assert contract["auth_schemes"] == [{
+        "name": "OAuth",
+        "auth_type": "oauth",
+        "flows": [{
+            "flow": "authorization_code",
+            "authorization_url": "https://accounts.example.com/oauth/authorize",
+            "token_url": "https://accounts.example.com/oauth/token",
+            "scopes": ["orders.read"],
+        }],
+    }]
+
+
+def test_openapi_drops_unsafe_oauth_urls():
+    document = {
+        "openapi": "3.0.3",
+        "info": {"title": "Unsafe OAuth API"},
+        "servers": [{"url": "https://api.example.com"}],
+        "components": {
+            "securitySchemes": {
+                "OAuth": {
+                    "type": "oauth2",
+                    "flows": {
+                        "authorizationCode": {
+                            "authorizationUrl": "http://accounts.example.com/oauth/authorize",
+                            "tokenUrl": "https://accounts.example.com/oauth/token",
+                            "scopes": {},
+                        }
+                    },
+                }
+            }
+        },
+        "paths": {"/orders": {"get": {"operationId": "listOrders"}}},
+    }
+    assert normalize_openapi_document(document)["auth_schemes"] == []
