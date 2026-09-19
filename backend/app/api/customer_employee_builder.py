@@ -124,7 +124,6 @@ class EmployeeBuilderIntegrationBindRequest(BaseModel):
     availability_endpoint: str | None = Field(default=None, max_length=500)
     cancel_endpoint: str | None = Field(default=None, max_length=500)
     operations: dict[str, dict] = Field(default_factory=dict)
-    operation_map: dict[str, str] = Field(default_factory=dict)
 
 
 class EmployeeBuilderSetupAnswerRequest(BaseModel):
@@ -631,17 +630,72 @@ def _record_ai_usage(db, *, company_id: int, agent_id: int, selected, response):
     )
 
 
+def _compiler_connection_context(db, *, company_id: int) -> list[dict]:
+    """Expose validated connection capabilities to the compiler without secrets or IDs."""
+    rows = (
+        db.query(CompanyIntegration)
+        .filter(
+            CompanyIntegration.company_id == company_id,
+            CompanyIntegration.enabled.is_(True),
+        )
+        .order_by(CompanyIntegration.id.asc())
+        .limit(20)
+        .all()
+    )
+    result: list[dict] = []
+    executable = executable_integration_types()
+    for item in rows:
+        integration_type = str(item.integration_type or "").strip().lower()
+        definition = get_integration_definition(integration_type) or {}
+        if integration_type not in executable:
+            continue
+        plain = reveal_config(item.config) or {}
+        if not integration_validation_ready(plain):
+            continue
+        operations = integration_packaged_operations(integration_type)
+        raw_operations = plain.get("operations")
+        if isinstance(raw_operations, dict):
+            try:
+                operations.update(_bounded_connection_operations(raw_operations))
+            except HTTPException:
+                operations = {}
+        result.append(
+            {
+                "name": str(item.name or "")[:120],
+                "type": integration_type,
+                "capabilities": [
+                    normalize_requirement_key(value)
+                    for value in (definition.get("requirement_keys") or [])
+                    if normalize_requirement_key(value)
+                ][:20],
+                "operations": {
+                    key: {
+                        "method": str(value.get("method") or "").upper(),
+                        "endpoint": str(value.get("endpoint") or "")[:500],
+                        "input_mode": str(value.get("input_mode") or "")[:20],
+                        "description": str(value.get("description") or "")[:300],
+                    }
+                    for key, value in list(operations.items())[:30]
+                    if isinstance(value, dict)
+                },
+            }
+        )
+        if len(result) >= 12:
+            break
+    return result
+
+
 def _auto_bind_single_packaged_integrations(
     db,
     *,
     company_id: int,
     spec: dict,
 ) -> tuple[dict, list[str]]:
-    """Bind an unambiguous validated packaged connector without asking twice.
+    """Bind one unambiguous validated connector without asking twice.
 
-    This deliberately excludes generic/custom APIs and any connector that needs
-    customer-supplied operation endpoints. Multiple matching connections are
-    left untouched so the owner keeps the choice.
+    Packaged connectors bind by declared capability. Generic HTTP APIs may bind
+    only when the compiler reused an exact operation contract that exists on one
+    validated connection. Multiple matches remain owner-controlled.
     """
 
     updated = deepcopy(spec)
@@ -675,37 +729,75 @@ def _auto_bind_single_packaged_integrations(
         if not key:
             continue
         compatible = compatible_integration_types(key)
-        candidates: list[CompanyIntegration] = []
+        try:
+            required_operations = _bounded_connection_operations(
+                requirement.get("integration_operations")
+                if isinstance(requirement.get("integration_operations"), dict)
+                else {}
+            )
+        except HTTPException:
+            required_operations = {}
+        candidates: list[tuple[CompanyIntegration, dict]] = []
 
         for integration in integrations:
             integration_type = str(integration.integration_type or "").strip().lower()
             definition = get_integration_definition(integration_type) or {}
+            if integration_type not in executable or integration_type not in compatible:
+                continue
+            plain_config = reveal_config(integration.config) or {}
+            if not integration_validation_ready(plain_config):
+                continue
+
             packaged_keys = {
                 normalize_requirement_key(item)
                 for item in (definition.get("requirement_keys") or [])
                 if normalize_requirement_key(item)
             }
-            if key not in packaged_keys:
+            if (
+                key in packaged_keys
+                and not integration_requires_operation_endpoints(integration_type)
+            ):
+                candidates.append(
+                    (integration, integration_packaged_operations(integration_type))
+                )
                 continue
-            if integration_type not in executable or integration_type not in compatible:
+
+            if not required_operations or definition.get("generic_requirements") is not True:
                 continue
-            if integration_requires_operation_endpoints(integration_type):
+            try:
+                configured_operations = _bounded_connection_operations(
+                    plain_config.get("operations")
+                    if isinstance(plain_config.get("operations"), dict)
+                    else {}
+                )
+            except HTTPException:
                 continue
-            plain_config = reveal_config(integration.config) or {}
-            if not integration_validation_ready(plain_config):
-                continue
-            candidates.append(integration)
+            matched: dict[str, dict] = {}
+            for operation_key, required in required_operations.items():
+                configured = configured_operations.get(operation_key)
+                if not isinstance(configured, dict):
+                    matched = {}
+                    break
+                if (
+                    str(configured.get("method") or "").upper()
+                    != str(required.get("method") or "").upper()
+                    or str(configured.get("endpoint") or "")
+                    != str(required.get("endpoint") or "")
+                ):
+                    matched = {}
+                    break
+                matched[operation_key] = dict(configured)
+            if matched and len(matched) == len(required_operations):
+                candidates.append((integration, matched))
 
         if len(candidates) != 1:
             continue
 
-        integration = candidates[0]
+        integration, matched_operations = candidates[0]
         integration_type = str(integration.integration_type or "").strip().lower()
         requirement["integration_id"] = integration.id
         requirement["integration_type"] = integration_type
-        requirement["integration_operations"] = integration_packaged_operations(
-            integration_type
-        )
+        requirement["integration_operations"] = matched_operations
         requirement["fulfillment_mode"] = "external_connection"
         requirement["validation_required"] = True
         requirement["requires_connection"] = True
@@ -901,6 +993,7 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
     company = db.query(Company).filter(Company.id == company_id).first()
     if is_self_service_company(company):
         requested_channels = communication_channels(requested_channels)
+    connection_context = _compiler_connection_context(db, company_id=company_id)
 
     selections = runtime_selections(
         db,
@@ -923,6 +1016,7 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
                 user_message=build_compiler_user_message(
                     job_brief=job_brief,
                     requested_channels=requested_channels,
+                    available_connections=connection_context,
                 ),
                 model=candidate.model,
                 tools=None,
@@ -1030,6 +1124,7 @@ def _compile_staged_employee_spec(
     requested_channels: list[str],
     previous_spec: dict | None,
 ) -> dict:
+    connection_context = _compiler_connection_context(db, company_id=company_id)
     selections = runtime_selections(
         db,
         company_id,
@@ -1048,6 +1143,7 @@ def _compile_staged_employee_spec(
                 user_message=build_compiler_user_message(
                     job_brief=job_brief,
                     requested_channels=requested_channels,
+                    available_connections=connection_context,
                 ),
                 model=candidate.model,
                 tools=None,
@@ -2526,143 +2622,6 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
     return result
 
 
-def _operation_match_tokens(value) -> set[str]:
-    stop = {
-        "a", "an", "the", "to", "for", "of", "and", "or", "api", "http",
-        "action", "operation", "request", "execute", "employee", "integration",
-        "system", "external", "data",
-    }
-    return {
-        token
-        for token in re.findall(r"[a-z0-9]+", str(value or "").lower())
-        if len(token) > 1 and token not in stop
-    }
-
-
-def _resolve_bound_graph_operations(
-    spec: dict,
-    *,
-    requirement_key: str,
-    operations: dict,
-    operation_map: dict | None = None,
-) -> tuple[dict, list[dict]]:
-    """Bind graph action nodes to real imported API operations, fail-closed if ambiguous."""
-
-    updated = deepcopy(spec)
-    available = {
-        normalize_requirement_key(key): dict(value)
-        for key, value in (operations or {}).items()
-        if normalize_requirement_key(key) and isinstance(value, dict)
-    }
-    explicit = {
-        str(node_id).strip(): normalize_requirement_key(operation)
-        for node_id, operation in (operation_map or {}).items()
-        if str(node_id).strip() and normalize_requirement_key(operation)
-    }
-    unresolved: list[dict] = []
-
-    def choose(node: dict, *, locator: str) -> str | None:
-        params = node.get("params") if isinstance(node.get("params"), dict) else {}
-        node_id = str(node.get("id") or "").strip()
-        requested = normalize_requirement_key(params.get("operation"))
-        if requested and requested in available:
-            return requested
-
-        forced = explicit.get(locator) or explicit.get(node_id)
-        if forced:
-            return forced if forced in available else None
-
-        if len(available) == 1:
-            return next(iter(available))
-
-        context_parts = [
-            node_id,
-            node.get("label"),
-            params.get("action_type"),
-            (params.get("arguments") or {}).keys()
-            if isinstance(params.get("arguments"), dict)
-            else "",
-        ]
-        context_tokens = _operation_match_tokens(" ".join(
-            " ".join(str(item) for item in part)
-            if not isinstance(part, str) and hasattr(part, "__iter__")
-            else str(part or "")
-            for part in context_parts
-        ))
-
-        ranked: list[tuple[int, str]] = []
-        for name, config in available.items():
-            name_tokens = _operation_match_tokens(name.replace("_", " "))
-            description_tokens = _operation_match_tokens(config.get("description"))
-            score = (4 * len(context_tokens & name_tokens)) + len(
-                context_tokens & description_tokens
-            )
-            ranked.append((score, name))
-        ranked.sort(reverse=True)
-        if ranked and ranked[0][0] > 0 and (
-            len(ranked) == 1 or ranked[0][0] > ranked[1][0]
-        ):
-            return ranked[0][1]
-        return None
-
-    def visit(graph: dict, *, prefix: str) -> None:
-        nodes = graph.get("nodes") if isinstance(graph, dict) else None
-        if not isinstance(nodes, list):
-            return
-        for index, raw in enumerate(nodes):
-            if not isinstance(raw, dict):
-                continue
-            node_id = str(raw.get("id") or f"node_{index + 1}").strip()
-            locator = f"{prefix}/{node_id}" if prefix else node_id
-            node_type = str(raw.get("type") or "").strip().lower()
-            params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
-            if (
-                node_type == "action"
-                and normalize_requirement_key(params.get("action_type"))
-                == requirement_key
-            ):
-                selected = choose(raw, locator=locator)
-                if selected:
-                    params = dict(params)
-                    params["operation"] = selected
-                    raw["params"] = params
-                else:
-                    unresolved.append(
-                        {
-                            "node_id": node_id,
-                            "locator": locator,
-                            "label": str(raw.get("label") or "")[:200],
-                            "available_operations": sorted(available),
-                        }
-                    )
-            elif node_type == "foreach":
-                nested = params.get("graph")
-                if isinstance(nested, dict):
-                    visit(nested, prefix=locator)
-
-    graph = updated.get("execution_graph")
-    if isinstance(graph, dict):
-        visit(graph, prefix="primary")
-
-    routines = updated.get("execution_routines")
-    if isinstance(routines, list):
-        for index, routine in enumerate(routines):
-            if not isinstance(routine, dict):
-                continue
-            routine_id = normalize_requirement_key(
-                routine.get("id") or routine.get("key") or f"routine_{index + 1}"
-            ) or f"routine_{index + 1}"
-            graph = (
-                routine.get("graph")
-                if isinstance(routine.get("graph"), dict)
-                else routine.get("execution_graph")
-            )
-            if isinstance(graph, dict):
-                visit(graph, prefix=routine_id)
-
-    return updated, unresolved
-
-
 def _relative_endpoint(value: str | None, *, required: bool = False) -> str | None:
     endpoint = str(value or "").strip()
     if not endpoint:
@@ -2984,25 +2943,6 @@ def bind_self_service_integration(
 
         compiled_value = dict(compiled_spec)
         compiled_value["requirements"] = requirements
-        compiled_value, unresolved_operations = _resolve_bound_graph_operations(
-            compiled_value,
-            requirement_key=key,
-            operations=operations,
-            operation_map=data.operation_map,
-        )
-        if unresolved_operations:
-            raise HTTPException(
-                409,
-                detail={
-                    "error": "api_operation_selection_required",
-                    "requirement_key": key,
-                    "message": (
-                        "Xvond found multiple API operations and could not safely "
-                        "choose one for every employee action."
-                    ),
-                    "unresolved": unresolved_operations,
-                },
-            )
 
         if isinstance(pending, dict):
             compiled_value["setup_required"] = [

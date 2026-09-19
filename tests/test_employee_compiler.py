@@ -927,7 +927,7 @@ def test_compiler_preserves_generic_durable_wait_node():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 12
+    assert spec["version"] == 13
     assert [node["type"] for node in nodes] == ["transform", "wait", "ai"]
     assert nodes[1]["params"]["duration"] == 2
     assert nodes[1]["params"]["unit"] == "days"
@@ -980,7 +980,7 @@ def test_compiler_preserves_generic_correlated_event_wait():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 12
+    assert spec["version"] == 13
     assert [node["type"] for node in nodes] == [
         "transform",
         "await_event",
@@ -1148,7 +1148,7 @@ def test_compiler_normalizes_multiple_independent_execution_routines():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 12
+    assert spec["version"] == 13
     assert [item["id"] for item in spec["execution_routines"]] == [
         "morning_summary",
         "lead_review",
@@ -1187,7 +1187,7 @@ def test_compiler_maps_legacy_execution_graph_to_primary_routine():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 12
+    assert spec["version"] == 13
     assert len(spec["execution_routines"]) == 1
     assert spec["execution_routines"][0]["id"] == "primary"
     assert spec["execution_routines"][0]["graph"] == spec["execution_graph"]
@@ -1476,7 +1476,7 @@ def test_compiler_scopes_each_routine_to_only_its_requirements():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 12
+    assert spec["version"] == 13
     assert spec["execution_routines"][0]["requirement_keys"] == [
         "source_a",
         "source_b",
@@ -1561,3 +1561,28 @@ def test_compiler_preserves_safe_dynamic_api_operations_and_drops_secrets():
             "timeout": 12.0,
         }
     }
+
+
+def test_compiler_message_exposes_bounded_connection_capabilities_without_runtime_ids():
+    message = build_compiler_user_message(
+        job_brief="Create orders in my connected vendor system.",
+        requested_channels=[],
+        available_connections=[{
+            "name": "Vendor API",
+            "type": "custom_api",
+            "capabilities": [],
+            "operations": {
+                "create_order": {
+                    "method": "POST",
+                    "endpoint": "/orders",
+                    "input_mode": "json",
+                    "description": "Create an order",
+                }
+            },
+        }],
+    )
+    assert "AVAILABLE VALIDATED CONNECTED SYSTEMS" in message
+    assert "create_order" in message
+    assert "/orders" in message
+    assert "integration_id" not in message
+    assert "api_key" not in message

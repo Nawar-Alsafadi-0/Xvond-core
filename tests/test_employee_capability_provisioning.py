@@ -3587,163 +3587,166 @@ def test_openapi_path_parameter_is_encoded_and_removed_from_payload(database, mo
     assert captured["json_data"] is None
 
 
-def test_bound_api_operations_are_resolved_into_graph_actions():
-    spec = {
-        "requirements": [{"key": "orders"}],
-        "execution_graph": {
-            "version": 1,
-            "trigger": {"type": "manual"},
-            "nodes": [
-                {
-                    "id": "create_order",
-                    "type": "action",
-                    "params": {
-                        "action_type": "orders",
-                        "arguments": {"customer": "$input.customer"},
-                    },
+def test_compiler_connection_context_is_validated_tenant_safe_and_secret_free(database):
+    factory, _ = database
+    with factory() as db:
+        integration = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Vendor API",
+            config={
+                "base_url": "https://api.vendor.example",
+                "validation_endpoint": "/health",
+                "auth_type": "bearer",
+                "api_key": "super-secret",
+                "operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                        "description": "Create order",
+                    }
                 },
-                {
-                    "id": "cancel_order",
-                    "type": "action",
-                    "depends_on": ["create_order"],
-                    "params": {
-                        "action_type": "orders",
-                        "arguments": {"order_id": "$input.order_id"},
-                    },
+                "_xvond_validation": {
+                    "validated": True,
+                    "validated_at": "2026-09-19T16:00:00Z",
                 },
-            ],
-        },
-    }
-    operations = {
-        "create_order": {
-            "method": "POST",
-            "endpoint": "/orders",
-            "description": "Create a new order",
-        },
-        "cancel_order": {
-            "method": "DELETE",
-            "endpoint": "/orders/{order_id}",
-            "description": "Cancel an order",
-        },
-    }
-
-    resolved, unresolved = api._resolve_bound_graph_operations(
-        spec,
-        requirement_key="orders",
-        operations=operations,
-    )
-
-    assert unresolved == []
-    nodes = resolved["execution_graph"]["nodes"]
-    assert nodes[0]["params"]["operation"] == "create_order"
-    assert nodes[1]["params"]["operation"] == "cancel_order"
-
-
-def test_single_bound_api_operation_is_selected_automatically():
-    spec = {
-        "execution_graph": {
-            "version": 1,
-            "trigger": {"type": "manual"},
-            "nodes": [{
-                "id": "sync_vendor",
-                "type": "action",
-                "params": {"action_type": "vendor_sync"},
-            }],
-        }
-    }
-
-    resolved, unresolved = api._resolve_bound_graph_operations(
-        spec,
-        requirement_key="vendor_sync",
-        operations={
-            "sync": {
-                "method": "POST",
-                "endpoint": "/sync",
-            }
-        },
-    )
-
-    assert unresolved == []
-    assert resolved["execution_graph"]["nodes"][0]["params"]["operation"] == "sync"
-
-
-def test_ambiguous_bound_api_operation_fails_closed_until_resolved():
-    spec = {
-        "execution_graph": {
-            "version": 1,
-            "trigger": {"type": "manual"},
-            "nodes": [{
-                "id": "do_vendor_work",
-                "type": "action",
-                "params": {"action_type": "vendor"},
-            }],
-        }
-    }
-    operations = {
-        "alpha": {"method": "POST", "endpoint": "/alpha"},
-        "beta": {"method": "POST", "endpoint": "/beta"},
-    }
-
-    resolved, unresolved = api._resolve_bound_graph_operations(
-        spec,
-        requirement_key="vendor",
-        operations=operations,
-    )
-    assert resolved["execution_graph"]["nodes"][0]["params"].get("operation") is None
-    assert unresolved[0]["node_id"] == "do_vendor_work"
-    assert unresolved[0]["available_operations"] == ["alpha", "beta"]
-
-    resolved, unresolved = api._resolve_bound_graph_operations(
-        spec,
-        requirement_key="vendor",
-        operations=operations,
-        operation_map={"primary/do_vendor_work": "beta"},
-    )
-    assert unresolved == []
-    assert resolved["execution_graph"]["nodes"][0]["params"]["operation"] == "beta"
-
-
-def test_bound_api_operation_resolution_reaches_nested_foreach_graph():
-    spec = {
-        "execution_graph": {
-            "version": 1,
-            "trigger": {"type": "manual"},
-            "nodes": [{
-                "id": "each_order",
-                "type": "foreach",
-                "params": {
-                    "items": "$input.orders",
-                    "graph": {
-                        "version": 1,
-                        "trigger": {"type": "manual"},
-                        "nodes": [{
-                            "id": "create_order",
-                            "type": "action",
-                            "params": {"action_type": "orders"},
-                        }],
-                    },
-                },
-            }],
-        }
-    }
-
-    resolved, unresolved = api._resolve_bound_graph_operations(
-        spec,
-        requirement_key="orders",
-        operations={
-            "create_order": {
-                "method": "POST",
-                "endpoint": "/orders",
-                "description": "Create order",
             },
-            "cancel_order": {
-                "method": "DELETE",
-                "endpoint": "/orders/{order_id}",
-                "description": "Cancel order",
+            enabled=True,
+        )
+        unvalidated = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Unvalidated API",
+            config={
+                "base_url": "https://unvalidated.example",
+                "validation_endpoint": "/health",
+                "operations": {
+                    "unsafe": {"method": "POST", "endpoint": "/unsafe"}
+                },
             },
-        },
-    )
+            enabled=True,
+        )
+        foreign = CompanyIntegration(
+            company_id=2,
+            integration_type="custom_api",
+            name="Other Tenant API",
+            config={
+                "base_url": "https://other.example",
+                "validation_endpoint": "/health",
+                "operations": {
+                    "foreign": {"method": "POST", "endpoint": "/foreign"}
+                },
+                "_xvond_validation": {
+                    "validated": True,
+                    "validated_at": "2026-09-19T16:00:00Z",
+                },
+            },
+            enabled=True,
+        )
+        db.add_all([integration, unvalidated, foreign])
+        db.commit()
 
-    assert unresolved == []
-    nested = resolved["execution_graph"]["nodes"][0]["params"]["graph"]
-    assert nested["nodes"][0]["params"]["operation"] == "create_order"
+        context = api._compiler_connection_context(db, company_id=1)
+
+    assert len(context) == 1
+    assert context[0]["name"] == "Vendor API"
+    assert context[0]["type"] == "custom_api"
+    assert context[0]["operations"]["create_order"]["endpoint"] == "/orders"
+    rendered = json.dumps(context)
+    assert "super-secret" not in rendered
+    assert "api_key" not in rendered
+    assert "integration_id" not in rendered
+    assert "Unvalidated API" not in rendered
+    assert "Other Tenant API" not in rendered
+
+
+def test_exact_generic_api_contract_auto_binds_only_one_validated_match(database):
+    factory, _ = database
+    with factory() as db:
+        integration = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Vendor API",
+            config={
+                "base_url": "https://api.vendor.example",
+                "validation_endpoint": "/health",
+                "operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                    }
+                },
+                "_xvond_validation": {
+                    "validated": True,
+                    "validated_at": "2026-09-19T16:00:00Z",
+                },
+            },
+            enabled=True,
+        )
+        db.add(integration)
+        db.commit()
+        db.refresh(integration)
+
+        spec = {
+            "requirements": [{
+                "key": "vendor_order_creation",
+                "kind": "integration",
+                "status": "connection_required",
+                "requires_connection": True,
+                "fulfillment_mode": "external_connection",
+                "integration_operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                    }
+                },
+            }],
+            "setup_required": ["vendor_order_creation"],
+        }
+        resolved, bound = api._auto_bind_single_packaged_integrations(
+            db,
+            company_id=1,
+            spec=spec,
+        )
+
+        requirement = resolved["requirements"][0]
+        assert bound == ["vendor_order_creation"]
+        assert requirement["integration_id"] == integration.id
+        assert requirement["status"] == "xvond_build"
+        assert requirement["integration_operations"]["create_order"]["endpoint"] == "/orders"
+        assert resolved["setup_required"] == []
+
+        db.add(CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Second Vendor API",
+            config={
+                "base_url": "https://api2.vendor.example",
+                "validation_endpoint": "/health",
+                "operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                    }
+                },
+                "_xvond_validation": {
+                    "validated": True,
+                    "validated_at": "2026-09-19T16:00:00Z",
+                },
+            },
+            enabled=True,
+        ))
+        db.commit()
+
+        ambiguous, ambiguous_bound = api._auto_bind_single_packaged_integrations(
+            db,
+            company_id=1,
+            spec=spec,
+        )
+
+    assert ambiguous_bound == []
+    assert "integration_id" not in ambiguous["requirements"][0]
