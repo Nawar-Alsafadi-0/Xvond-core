@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 from typing import Any
 
 GRAPH_VERSION = 1
@@ -286,6 +287,18 @@ def graph_contract_errors(
                 errors.append(
                     f"{node_id}: wait node requires exactly one of until or duration"
                 )
+            if has_until:
+                try:
+                    parsed_until = datetime.fromisoformat(
+                        str(params.get("until")).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    errors.append(f"{node_id}: wait until must be ISO-8601")
+                else:
+                    if parsed_until.tzinfo is None:
+                        errors.append(
+                            f"{node_id}: wait until must include a timezone offset"
+                        )
             if has_duration:
                 try:
                     duration = float(params.get("duration"))
