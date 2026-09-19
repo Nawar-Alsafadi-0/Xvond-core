@@ -2513,12 +2513,21 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
         path_params = list(dict.fromkeys(
             re.findall(r"{([A-Za-z_][A-Za-z0-9_]{0,63})}", endpoint)
         ))
+        required_query_params = [
+            str(item).strip()
+            for item in (raw.get("required_query_params") or [])
+            if re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_.-]{0,63}",
+                str(item or "").strip(),
+            )
+        ][:50]
         result[name] = {
             "method": method,
             "endpoint": endpoint,
             "input_mode": input_mode,
             "timeout": max(1, min(timeout, 30)),
             "path_params": path_params,
+            "required_query_params": list(dict.fromkeys(required_query_params)),
             "description": str(raw.get("description") or "").strip()[:500],
         }
         if len(result) >= 50:
