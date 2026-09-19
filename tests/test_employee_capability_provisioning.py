@@ -2993,3 +2993,78 @@ def test_routine_observability_exposes_health_duration_and_failed_step(database)
     }
     assert observed["retry"]["safe"] is False
     assert "side-effect checkpointing" in observed["retry"]["reason"]
+
+
+
+def test_routine_observability_recovers_graph_node_from_error_text(database):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live"
+        company.active = True
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+
+        workflow = AutomationWorkflow(
+            id=602,
+            company_id=1,
+            name="Observed graph failure",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "graph_failure",
+                "_xvond_routine_name": "Graph failure",
+            },
+            steps=[],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.flush()
+        db.add(
+            AutomationRun(
+                company_id=1,
+                workflow_id=602,
+                status="failed",
+                input_data={},
+                output_data={
+                    "trace": {
+                        "spans": [
+                            {
+                                "step_index": 0,
+                                "step_type": "graph",
+                                "phase": "execute",
+                                "status": "failed",
+                                "node_id": None,
+                                "duration_ms": 15.0,
+                                "error": (
+                                    "Execution graph node fetch_price (web_fetch) "
+                                    "failed: upstream timeout"
+                                ),
+                            }
+                        ]
+                    }
+                },
+                error_message=(
+                    "Execution graph node fetch_price (web_fetch) "
+                    "failed: upstream timeout"
+                ),
+                created_at=datetime(2026, 9, 19, 12, 0),
+                finished_at=datetime(2026, 9, 19, 12, 0, 1),
+            )
+        )
+        db.commit()
+
+    result = api.customer_employee_routines(1, USER)
+    observed = next(
+        item for item in result["routines"]
+        if item["routine_id"] == "graph_failure"
+    )
+
+    assert observed["failure"]["node_id"] == "fetch_price"
+    assert observed["failure"]["step_type"] == "graph"
+    assert observed["failure"]["error"].startswith(
+        "Execution graph node fetch_price"
+    )
