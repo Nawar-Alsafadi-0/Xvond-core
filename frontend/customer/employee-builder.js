@@ -1048,10 +1048,41 @@
                             </div>
                             <div class="muted">Run #${Number(run.id)} · ${escapeHtml(String(run.created_at || ""))}</div>
                             ${run.error_message ? `<div class="error">${escapeHtml(run.error_message)}</div>` : ""}
+                            ${run.can_retry ? `
+                                <div class="employee-builder-actions">
+                                    <button type="button" data-run-retry="${Number(run.id)}">Retry failed run</button>
+                                </div>
+                                <div class="error" data-run-retry-error="${Number(run.id)}"></div>
+                            ` : ""}
+                            ${run.retry_of_run_id ? `<div class="muted">Retry of run #${Number(run.retry_of_run_id)}</div>` : ""}
                             ${output ? `<pre class="employee-builder-run-output">${escapeHtml(output.slice(0, 6000))}</pre>` : ""}
                         </div>
                     `;
                 }).join("");
+
+                list.querySelectorAll("[data-run-retry]").forEach(button => {
+                    button.addEventListener("click", async () => {
+                        if (button.disabled) return;
+                        const runId = Number(button.dataset.runRetry || 0);
+                        const error = list.querySelector(
+                            `[data-run-retry-error="${runId}"]`
+                        );
+                        if (!runId) return;
+                        if (error) error.textContent = "";
+                        button.disabled = true;
+                        try {
+                            await api(
+                                `/customer/employee-builder/${Number(employee.agent_id)}/automation-runs/${runId}/retry`,
+                                {method: "POST"}
+                            );
+                            await loadExecutionHistory();
+                            await loadRoutineOperations();
+                        } catch (err) {
+                            if (error) error.textContent = err?.message || "Could not retry this run.";
+                            if (document.body.contains(button)) button.disabled = false;
+                        }
+                    });
+                });
             } catch (err) {
                 list.innerHTML = "";
                 if (error) error.textContent = err?.message || "Could not load execution history.";
