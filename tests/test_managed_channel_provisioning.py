@@ -15,6 +15,7 @@ from backend.app.modules.channels.models import AgentChannel
 
 
 ADMIN_UI = Path("frontend/admin/company-control-center.js").read_text(encoding="utf-8")
+ADMIN_APP = Path("frontend/admin/app.js").read_text(encoding="utf-8")
 
 
 @pytest.fixture
@@ -232,3 +233,10 @@ def test_admin_ui_can_complete_managed_requests_without_exposing_provider_creden
     assert "xvondSupportMode()" in ADMIN_UI
     assert "provider credentials stay" in ADMIN_UI.lower()
     assert "access_token" not in ADMIN_UI[ADMIN_UI.index("window.openManagedChannelSetup"):ADMIN_UI.index("window.activateManagedChannel")]
+
+
+def test_admin_dashboard_surfaces_managed_channel_queue():
+    assert "/admin/channels/managed/requests" in ADMIN_APP
+    assert "Managed Channel Requests" in ADMIN_APP
+    assert "managed_channel_request" in ADMIN_APP
+    assert 'tab:"channels"' in ADMIN_APP
