@@ -28,6 +28,13 @@ compose_workflow() {
     docker compose -f "$COMPOSE_FILE" --profile workflow "$@"
 }
 
+initialize_workflow_registry() {
+    compose_workflow up -d workflow-postgres
+    compose_workflow exec -T workflow-postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < ops/n8n/idempotency.sql
+    compose_workflow up -d --no-deps workflow-registry
+}
+
+
 probe_action_gateway() {
     docker exec xvond-workflow-engine node -e '
 const secret = String(process.env.N8N_SHARED_SECRET || "");
@@ -312,6 +319,8 @@ sync_one_workflow() {
         workflow-engine \
         update:workflow --id="$workflow_id" --active=true
 }
+
+initialize_workflow_registry
 
 # Stop runtime while source-controlled workflow state is replaced so database
 # state and registered webhooks cannot drift during deployment.

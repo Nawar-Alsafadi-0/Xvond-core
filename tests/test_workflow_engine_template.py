@@ -107,7 +107,7 @@ def test_universal_channel_send_is_routed_by_xvond_connection_key():
     assert "channel_provision" in code
     payload = json.loads(WORKFLOW_PATH.read_text(encoding="utf-8"))
     nodes = {node["name"]: node for node in payload["nodes"]}
-    assert "xvond_managed_channel_routes" in nodes["Lookup Channel Route"]["parameters"]["query"]
+    assert "XVOND_WORKFLOW_REGISTRY_URL" in nodes["Lookup Channel Route"]["parameters"]["url"]
     assert nodes["Execute Channel Provider"]["parameters"]["url"] == "={{ $json.provider_url }}"
     lookup_code = nodes["Normalize Channel Route Lookup"]["parameters"]["jsCode"]
     assert "_dispatch:'channel_provider'" in lookup_code

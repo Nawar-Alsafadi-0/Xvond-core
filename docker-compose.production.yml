@@ -205,6 +205,30 @@ services:
       timeout: 5s
       retries: 10
 
+  workflow-registry:
+    image: xvond-core:latest
+    container_name: xvond-workflow-registry
+    restart: unless-stopped
+    profiles: ["workflow"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    entrypoint: []
+    command: ["uvicorn", "scripts.workflow_registry_service:app", "--host", "0.0.0.0", "--port", "8090"]
+    environment:
+      WORKFLOW_DB_HOST: workflow-postgres
+      WORKFLOW_DB_PORT: "5432"
+      WORKFLOW_DB_NAME: ${WORKFLOW_DB_NAME:-xvond_workflow}
+      WORKFLOW_DB_USER: ${WORKFLOW_DB_USER:-xvond_workflow}
+      WORKFLOW_DB_PASSWORD: ${WORKFLOW_DB_PASSWORD:?WORKFLOW_DB_PASSWORD is required}
+      WORKFLOW_REGISTRY_SHARED_SECRET: ${WORKFLOW_REGISTRY_SHARED_SECRET:?WORKFLOW_REGISTRY_SHARED_SECRET is required}
+      WORKFLOW_PROVIDER_REGISTRY_KEY: ${WORKFLOW_PROVIDER_REGISTRY_KEY:?WORKFLOW_PROVIDER_REGISTRY_KEY is required}
+    depends_on:
+      workflow-postgres:
+        condition: service_healthy
+
   workflow-engine:
     image: n8nio/n8n:${WORKFLOW_ENGINE_VERSION:?WORKFLOW_ENGINE_VERSION is required}
     container_name: xvond-workflow-engine
@@ -234,6 +258,8 @@ services:
       XVOND_WORKFLOW_DB_NAME: ${WORKFLOW_DB_NAME:-xvond_workflow}
       XVOND_WORKFLOW_DB_USER: ${WORKFLOW_DB_USER:-xvond_workflow}
       XVOND_WORKFLOW_DB_PASSWORD: ${WORKFLOW_DB_PASSWORD:?WORKFLOW_DB_PASSWORD is required}
+      XVOND_WORKFLOW_REGISTRY_URL: http://workflow-registry:8090
+      XVOND_WORKFLOW_REGISTRY_SECRET: ${WORKFLOW_REGISTRY_SHARED_SECRET:?WORKFLOW_REGISTRY_SHARED_SECRET is required}
       XVOND_META_MESSAGING_VERIFY_TOKEN: ${XVOND_META_MESSAGING_VERIFY_TOKEN:-}
       NODE_FUNCTION_ALLOW_BUILTIN: crypto
       N8N_HOST: ${WORKFLOW_HOST:-workflow.xvond.com}
@@ -254,6 +280,8 @@ services:
       workflow-postgres:
         condition: service_healthy
       app:
+        condition: service_healthy
+      workflow-registry:
         condition: service_healthy
     healthcheck:
       test:
