@@ -122,6 +122,7 @@ class EmployeeBuilderSetupAnswerRequest(BaseModel):
 
 class EmployeeBuilderGraphRunRequest(BaseModel):
     input_data: dict = Field(default_factory=dict)
+    routine_id: str | None = Field(default=None, max_length=80)
 
 
 class EmployeeBuilderPermissionRequest(BaseModel):
@@ -3825,6 +3826,7 @@ def apply_pending_live_revision(
 @router.get("/{agent_id}/webhook")
 def customer_employee_webhook(
     agent_id: int,
+    routine_id: str | None = None,
     current_user: User = Depends(require_customer_manager),
 ):
     db = SessionLocal()
@@ -3850,9 +3852,52 @@ def customer_employee_webhook(
         builder = (config.settings or {}).get("employee_builder") or {}
         spec = builder.get("compiled_spec") if isinstance(builder, dict) else None
         delivery = spec.get("delivery") if isinstance(spec, dict) else None
-        graph_trigger = delivery.get("graph_trigger") if isinstance(delivery, dict) else None
-        if not isinstance(graph_trigger, dict) or graph_trigger.get("trigger_type") != "webhook":
-            raise HTTPException(404, "This employee does not use a webhook trigger")
+        graph_triggers = (
+            [
+                item
+                for item in (delivery.get("graph_triggers") or [])
+                if isinstance(item, dict)
+            ]
+            if isinstance(delivery, dict)
+            and isinstance(delivery.get("graph_triggers"), list)
+            else []
+        )
+        if not graph_triggers and isinstance(delivery, dict):
+            legacy = delivery.get("graph_trigger")
+            if isinstance(legacy, dict):
+                graph_triggers = [legacy]
+
+        webhook_triggers = [
+            item for item in graph_triggers
+            if item.get("trigger_type") == "webhook"
+        ]
+        requested_routine = normalize_requirement_key(routine_id) if routine_id else ""
+        if requested_routine:
+            webhook_triggers = [
+                item
+                for item in webhook_triggers
+                if normalize_requirement_key(item.get("routine_id") or "primary")
+                == requested_routine
+            ]
+
+        if not webhook_triggers:
+            raise HTTPException(404, "This employee does not use the requested webhook routine")
+        if not requested_routine and len(webhook_triggers) > 1:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "This employee has multiple webhook routines; choose routine_id.",
+                    "routines": [
+                        {
+                            "routine_id": item.get("routine_id") or "primary",
+                            "routine_name": item.get("routine_name") or "Webhook routine",
+                        }
+                        for item in webhook_triggers
+                    ],
+                },
+            )
+
+        graph_trigger = webhook_triggers[0]
         if graph_trigger.get("status") != "ready":
             raise HTTPException(409, "Webhook trigger is not ready yet")
 
@@ -3874,6 +3919,8 @@ def customer_employee_webhook(
 
         return {
             "workflow_id": workflow.id,
+            "routine_id": graph_trigger.get("routine_id") or "primary",
+            "routine_name": graph_trigger.get("routine_name") or workflow.name,
             "url": f"{settings.PUBLIC_BASE_URL}/webhooks/automation/{workflow.id}",
             "header": "X-Xvond-Webhook-Key",
             "key": automation_webhook_key(
@@ -3990,7 +4037,8 @@ def customer_employee_run_graph(
         if not agent.enabled:
             raise HTTPException(409, "Launch this employee before running its live execution graph")
 
-        workflow = None
+        requested_routine = normalize_requirement_key(data.routine_id) if data.routine_id else ""
+        candidates: list[AutomationWorkflow] = []
         for row in (
             db.query(AutomationWorkflow)
             .filter(
@@ -4002,16 +4050,45 @@ def customer_employee_run_graph(
             .all()
         ):
             config = row.trigger_config if isinstance(row.trigger_config, dict) else {}
+            stored_routine = normalize_requirement_key(
+                config.get("_xvond_routine_id") or "primary"
+            )
             if (
                 config.get("_xvond_source") == "self_service_employee"
                 and int(config.get("_xvond_agent_id") or 0) == int(agent_id)
                 and config.get("_xvond_graph_trigger") is True
+                and (not requested_routine or stored_routine == requested_routine)
             ):
-                workflow = row
-                break
+                candidates.append(row)
 
-        if workflow is None:
-            raise HTTPException(409, "This employee does not have a ready manual execution graph")
+        if not candidates:
+            raise HTTPException(409, "This employee does not have the requested ready manual routine")
+        if not requested_routine and len(candidates) > 1:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "This employee has multiple manual routines; choose routine_id.",
+                    "routines": [
+                        {
+                            "routine_id": (
+                                (row.trigger_config or {}).get("_xvond_routine_id")
+                                or "primary"
+                            ),
+                            "routine_name": (
+                                (row.trigger_config or {}).get("_xvond_routine_name")
+                                or row.name
+                            ),
+                        }
+                        for row in candidates
+                    ],
+                },
+            )
+        workflow = candidates[0]
+        workflow_config = (
+            workflow.trigger_config
+            if isinstance(workflow.trigger_config, dict)
+            else {}
+        )
 
         try:
             run = automation_runtime.execute(
@@ -4026,6 +4103,8 @@ def customer_employee_run_graph(
         return {
             "id": run.id,
             "workflow_id": run.workflow_id,
+            "routine_id": workflow_config.get("_xvond_routine_id") or "primary",
+            "routine_name": workflow_config.get("_xvond_routine_name") or workflow.name,
             "status": run.status,
             "output_data": run.output_data,
             "error_message": run.error_message,
