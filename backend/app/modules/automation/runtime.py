@@ -445,6 +445,17 @@ class AutomationRuntime:
                         run_id=run_id,
                         step_index=index,
                     )
+                except AutomationWaitRequired as wait:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_time",
+                        node_id=wait.node_id,
+                    )
+                    raise
                 except AutomationApprovalRequired as approval:
                     _append_step_span(
                         trace,
@@ -487,6 +498,7 @@ class AutomationRuntime:
                     state.update(result)
 
             run.status = "success"
+            run.resume_at = None
             run.finished_at = _utcnow_naive()
             trace["finished_at"] = _trace_iso(run.finished_at)
             trace["status"] = "success"
@@ -520,6 +532,7 @@ class AutomationRuntime:
             db.add(request)
             db.flush()
             run.status = "waiting_approval"
+            run.resume_at = None
             trace["status"] = "waiting_approval"
             run.output_data = {
                 "state": state,
@@ -546,6 +559,16 @@ class AutomationRuntime:
             db.commit()
             db.refresh(run)
             return run
+        except AutomationWaitRequired as wait:
+            return _store_wait_checkpoint(
+                db,
+                run=run,
+                workflow=workflow,
+                wait=wait,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+            )
         except Exception as original_error:
             error_message = str(original_error)[:2000]
             trace["finished_at"] = _trace_iso()
