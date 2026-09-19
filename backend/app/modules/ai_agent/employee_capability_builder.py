@@ -645,6 +645,7 @@ def _provision_self_service_graph_trigger(
                 "_xvond_routine_id": routine_id,
                 "_xvond_routine_name": (routine_name or routine_id)[:200],
                 "_xvond_requirement_keys": list(requirement_keys or []),
+                "_xvond_runtime_inputs": dict(runtime_inputs or {}),
                 "_xvond_generated": True,
                 **(
                     {"event_name": str(trigger.get("event") or "").strip()[:120]}
