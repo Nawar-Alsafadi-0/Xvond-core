@@ -115,7 +115,7 @@ def test_managed_capability_compiles_to_generic_workflow_action():
     assert action["destination"]["type"] == "xvond_internal"
     assert action["destination"]["adapter"] == "generic_capability"
     assert action["destination"]["capability_key"] == "competitor_price_monitor"
-    assert action["destination"]["delivery_mode"] == "compose"
+    assert action["destination"]["delivery_mode"] == "legacy_plan"
     assert "workflow_engine" in action["destination"]["primitives"]
     assert action["destination"]["allowed_hosts"] == ["prices.example.com"]
     assert action["destination"]["execution_plan"][0]["op"] == "http_get_json"
