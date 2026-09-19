@@ -630,17 +630,72 @@ def _record_ai_usage(db, *, company_id: int, agent_id: int, selected, response):
     )
 
 
+def _compiler_connection_context(db, *, company_id: int) -> list[dict]:
+    """Expose validated connection capabilities to the compiler without secrets or IDs."""
+    rows = (
+        db.query(CompanyIntegration)
+        .filter(
+            CompanyIntegration.company_id == company_id,
+            CompanyIntegration.enabled.is_(True),
+        )
+        .order_by(CompanyIntegration.id.asc())
+        .limit(20)
+        .all()
+    )
+    result: list[dict] = []
+    executable = executable_integration_types()
+    for item in rows:
+        integration_type = str(item.integration_type or "").strip().lower()
+        definition = get_integration_definition(integration_type) or {}
+        if integration_type not in executable:
+            continue
+        plain = reveal_config(item.config) or {}
+        if not integration_validation_ready(plain):
+            continue
+        operations = integration_packaged_operations(integration_type)
+        raw_operations = plain.get("operations")
+        if isinstance(raw_operations, dict):
+            try:
+                operations.update(_bounded_connection_operations(raw_operations))
+            except HTTPException:
+                operations = {}
+        result.append(
+            {
+                "name": str(item.name or "")[:120],
+                "type": integration_type,
+                "capabilities": [
+                    normalize_requirement_key(value)
+                    for value in (definition.get("requirement_keys") or [])
+                    if normalize_requirement_key(value)
+                ][:20],
+                "operations": {
+                    key: {
+                        "method": str(value.get("method") or "").upper(),
+                        "endpoint": str(value.get("endpoint") or "")[:500],
+                        "input_mode": str(value.get("input_mode") or "")[:20],
+                        "description": str(value.get("description") or "")[:300],
+                    }
+                    for key, value in list(operations.items())[:30]
+                    if isinstance(value, dict)
+                },
+            }
+        )
+        if len(result) >= 12:
+            break
+    return result
+
+
 def _auto_bind_single_packaged_integrations(
     db,
     *,
     company_id: int,
     spec: dict,
 ) -> tuple[dict, list[str]]:
-    """Bind an unambiguous validated packaged connector without asking twice.
+    """Bind one unambiguous validated connector without asking twice.
 
-    This deliberately excludes generic/custom APIs and any connector that needs
-    customer-supplied operation endpoints. Multiple matching connections are
-    left untouched so the owner keeps the choice.
+    Packaged connectors bind by declared capability. Generic HTTP APIs may bind
+    only when the compiler reused an exact operation contract that exists on one
+    validated connection. Multiple matches remain owner-controlled.
     """
 
     updated = deepcopy(spec)
@@ -674,37 +729,75 @@ def _auto_bind_single_packaged_integrations(
         if not key:
             continue
         compatible = compatible_integration_types(key)
-        candidates: list[CompanyIntegration] = []
+        try:
+            required_operations = _bounded_connection_operations(
+                requirement.get("integration_operations")
+                if isinstance(requirement.get("integration_operations"), dict)
+                else {}
+            )
+        except HTTPException:
+            required_operations = {}
+        candidates: list[tuple[CompanyIntegration, dict]] = []
 
         for integration in integrations:
             integration_type = str(integration.integration_type or "").strip().lower()
             definition = get_integration_definition(integration_type) or {}
+            if integration_type not in executable or integration_type not in compatible:
+                continue
+            plain_config = reveal_config(integration.config) or {}
+            if not integration_validation_ready(plain_config):
+                continue
+
             packaged_keys = {
                 normalize_requirement_key(item)
                 for item in (definition.get("requirement_keys") or [])
                 if normalize_requirement_key(item)
             }
-            if key not in packaged_keys:
+            if (
+                key in packaged_keys
+                and not integration_requires_operation_endpoints(integration_type)
+            ):
+                candidates.append(
+                    (integration, integration_packaged_operations(integration_type))
+                )
                 continue
-            if integration_type not in executable or integration_type not in compatible:
+
+            if not required_operations or definition.get("generic_requirements") is not True:
                 continue
-            if integration_requires_operation_endpoints(integration_type):
+            try:
+                configured_operations = _bounded_connection_operations(
+                    plain_config.get("operations")
+                    if isinstance(plain_config.get("operations"), dict)
+                    else {}
+                )
+            except HTTPException:
                 continue
-            plain_config = reveal_config(integration.config) or {}
-            if not integration_validation_ready(plain_config):
-                continue
-            candidates.append(integration)
+            matched: dict[str, dict] = {}
+            for operation_key, required in required_operations.items():
+                configured = configured_operations.get(operation_key)
+                if not isinstance(configured, dict):
+                    matched = {}
+                    break
+                if (
+                    str(configured.get("method") or "").upper()
+                    != str(required.get("method") or "").upper()
+                    or str(configured.get("endpoint") or "")
+                    != str(required.get("endpoint") or "")
+                ):
+                    matched = {}
+                    break
+                matched[operation_key] = dict(configured)
+            if matched and len(matched) == len(required_operations):
+                candidates.append((integration, matched))
 
         if len(candidates) != 1:
             continue
 
-        integration = candidates[0]
+        integration, matched_operations = candidates[0]
         integration_type = str(integration.integration_type or "").strip().lower()
         requirement["integration_id"] = integration.id
         requirement["integration_type"] = integration_type
-        requirement["integration_operations"] = integration_packaged_operations(
-            integration_type
-        )
+        requirement["integration_operations"] = matched_operations
         requirement["fulfillment_mode"] = "external_connection"
         requirement["validation_required"] = True
         requirement["requires_connection"] = True
