@@ -3,7 +3,6 @@ import pytest
 from backend.app.modules.integrations.openapi_contract import (
     discover_openapi_contract,
     normalize_openapi_document,
-    openapi_contract_from_document,
     openapi_discovery_urls,
     parse_openapi_text,
 )
@@ -231,7 +230,7 @@ def test_openapi_extracts_generic_auth_schemes():
             }
         },
     }
-    contract = openapi_contract_from_document(document)
+    contract = normalize_openapi_document(document)
     assert {"name": "BearerAuth", "auth_type": "bearer"} in contract["auth_schemes"]
     assert {
         "name": "PartnerKey",
