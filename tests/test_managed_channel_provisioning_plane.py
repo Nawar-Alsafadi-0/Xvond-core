@@ -14,8 +14,8 @@ def _node(name):
 
 def test_workflow_plane_owns_managed_channel_route_registry():
     assert "CREATE TABLE IF NOT EXISTS xvond_managed_channel_routes" in SQL
-    assert "provider_secret TEXT NOT NULL" in SQL
-    assert "provider_config JSONB NOT NULL" in SQL
+    assert "provider_secret_enc TEXT NOT NULL" in SQL
+    assert "provider_config_enc TEXT NOT NULL" in SQL
     assert "PRIMARY KEY (company_id, connection_key)" in SQL
     assert "UNIQUE (channel_id)" in SQL
 
@@ -42,14 +42,15 @@ def test_actions_workflow_provisions_and_resolves_routes_from_registry():
     assert "allowedProviders" in code
     assert "providerSecret.length < 32" in code
 
-    write = _node("Write Channel Route")["parameters"]["query"]
-    assert "INSERT INTO xvond_managed_channel_routes" in write
-    assert "ON CONFLICT (company_id, connection_key) DO UPDATE" in write
+    provision = _node("Provision Channel Route")["parameters"]
+    assert "XVOND_WORKFLOW_REGISTRY_URL" in provision["url"]
+    assert "/v1/routes" in provision["url"]
+    assert "XVOND_WORKFLOW_REGISTRY_SECRET" in str(provision["headerParameters"])
 
-    lookup = _node("Lookup Channel Route")["parameters"]["query"]
-    assert "FROM xvond_managed_channel_routes" in lookup
-    assert "AND channel_id=" in lookup
-    assert "AND active=TRUE" in lookup
+    lookup = _node("Lookup Channel Route")["parameters"]
+    assert "XVOND_WORKFLOW_REGISTRY_URL" in lookup["url"]
+    assert "/v1/routes/" in lookup["url"]
+    assert "XVOND_WORKFLOW_REGISTRY_SECRET" in str(lookup["headerParameters"])
 
 
 def test_channel_provider_uses_registry_result_not_env_route_json():
@@ -60,5 +61,5 @@ def test_channel_provider_uses_registry_result_not_env_route_json():
     assert secret["value"] == "={{ $json.provider_secret }}"
 
     lookup_code = _node("Normalize Channel Route Lookup")["parameters"]["jsCode"]
-    assert "provider_url:String(r.provider_url)" in lookup_code
-    assert "provider_secret:String(r.provider_secret)" in lookup_code
+    assert "provider_url:String(row.provider_url)" in lookup_code
+    assert "provider_secret:String(row.provider_secret)" in lookup_code
