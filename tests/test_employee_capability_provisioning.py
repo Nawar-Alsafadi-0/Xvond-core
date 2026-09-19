@@ -18,7 +18,10 @@ from backend.app.core.database.base import Base
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
 from backend.app.models.company_profile import CompanyProfile
-from backend.app.modules.ai_agent.employee_capability_builder import build_managed_action_config
+from backend.app.modules.ai_agent.employee_capability_builder import (
+    build_managed_action_config,
+    provision_compiled_capabilities,
+)
 from backend.app.modules.ai_agent.employee_compiler import normalize_compiled_spec
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
@@ -1747,3 +1750,142 @@ def test_paused_employee_owner_grant_becomes_authoritative_runtime_policy(databa
         action = reveal_config(_assignment(db).config)["actions"][KEY]
         assert action["confirmation_required"] is False
         assert action["_xvond_permission_mode"] == "automatic"
+
+
+
+def test_multi_routine_provisioning_keeps_same_trigger_routines_independent(database):
+    factory, _ = database
+    spec = {
+        "role": "Multi-routine employee",
+        "scope": "personal",
+        "requirements": [],
+        "permissions": [],
+        "execution_routines": [
+            {
+                "id": "morning_summary",
+                "name": "Morning summary",
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 8,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "morning_done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Morning routine finished."},
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "evening_summary",
+                "name": "Evening summary",
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 18,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "evening_done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Evening routine finished."},
+                        }
+                    ],
+                },
+            },
+        ],
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        prepared, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=1,
+            spec=spec,
+        )
+        db.commit()
+
+        triggers = delivery["graph_triggers"]
+        assert [item["routine_id"] for item in triggers] == [
+            "morning_summary",
+            "evening_summary",
+        ]
+        assert all(item["status"] == "ready" for item in triggers)
+        assert delivery["graph_trigger"]["routine_id"] == "morning_summary"
+        assert prepared["delivery"]["provisioning_version"] == 1
+
+        workflows = (
+            db.query(AutomationWorkflow)
+            .filter(AutomationWorkflow.company_id == 1)
+            .order_by(AutomationWorkflow.id.asc())
+            .all()
+        )
+        assert len(workflows) == 2
+        assert [row.trigger_config["_xvond_routine_id"] for row in workflows] == [
+            "morning_summary",
+            "evening_summary",
+        ]
+        assert workflows[0].trigger_config["schedule"]["hour"] == 8
+        assert workflows[1].trigger_config["schedule"]["hour"] == 18
+        assert workflows[0].steps[0]["graph"]["nodes"][0]["id"] == "morning_done"
+        assert workflows[1].steps[0]["graph"]["nodes"][0]["id"] == "evening_done"
+
+
+def test_legacy_execution_graph_still_provisions_as_primary_routine(database):
+    factory, _ = database
+    spec = {
+        "role": "Legacy employee",
+        "scope": "personal",
+        "requirements": [],
+        "permissions": [],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "done",
+                    "type": "notify",
+                    "depends_on": [],
+                    "params": {"message": "Done."},
+                }
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        prepared, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=1,
+            spec=spec,
+        )
+        db.commit()
+
+        assert len(delivery["graph_triggers"]) == 1
+        assert delivery["graph_triggers"][0]["routine_id"] == "primary"
+        assert delivery["graph_trigger"]["routine_id"] == "primary"
+        assert delivery["graph_trigger"]["trigger_type"] == "manual"
+        workflow = db.get(
+            AutomationWorkflow,
+            delivery["graph_trigger"]["workflow_id"],
+        )
+        assert workflow.trigger_config["_xvond_routine_id"] == "primary"
+        assert prepared["execution_graph"]["nodes"][0]["id"] == "done"
