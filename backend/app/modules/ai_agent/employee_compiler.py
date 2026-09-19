@@ -243,14 +243,14 @@ Use this shape:
       "name": "short human-readable routine name",
       "graph": {
         "version": 1,
-        "trigger": {"type":"manual|schedule|webhook|event","event":"internal event name when type=event","schedule":{"kind":"interval|once|daily|weekly|monthly","source_text":"exact cadence/time words copied from the Job Brief"}},
+        "trigger": {"type":"manual|schedule|webhook|event","event":"internal event name when type=event","source_text":"exact Job Brief words authorizing an event/webhook trigger","schedule":{"kind":"interval|once|daily|weekly|monthly","source_text":"exact cadence/time words copied from the Job Brief"}},
         "nodes": []
       }
     }
   ],
   "execution_graph": {
     "version": 1,
-    "trigger": {"type":"manual|schedule|webhook|event","event":"internal event name when type=event","schedule":{"kind":"interval|once|daily|weekly|monthly","source_text":"exact cadence/time words copied from the Job Brief"}},
+    "trigger": {"type":"manual|schedule|webhook|event","event":"internal event name when type=event","source_text":"exact Job Brief words authorizing an event/webhook trigger","schedule":{"kind":"interval|once|daily|weekly|monthly","source_text":"exact cadence/time words copied from the Job Brief"}},
     "nodes": [
       {
         "id": "stable_node_id",
@@ -279,7 +279,7 @@ Rules:
 - Limit execution_routines to the smallest set that faithfully represents the requested job; never invent extra routines.
 - execution_graph.trigger describes what starts the graph. Use manual when the user starts it explicitly, schedule for recurring/time-based work, webhook for an incoming external JSON event, and event for an internal Xvond event. Never invent a webhook/event trigger when the user did not request event-driven behavior.
 - For a schedule trigger, include trigger.schedule.source_text copied verbatim from the Job Brief words that authorize the cadence/time. Xvond will fail the schedule closed when this grounding is missing or does not occur in the Job Brief.
-- For type=event, set trigger.event to the stable internal event name the graph should consume. Event names are capabilities of the Xvond runtime, not provider-specific webhook URLs.
+- For type=event, set trigger.event to the stable internal event name the graph should consume and include trigger.source_text copied verbatim from the Job Brief words that authorize that event-driven routine. Event names are capabilities of the Xvond runtime, not provider-specific webhook URLs. Xvond also accepts the exact event name itself as grounding when the customer wrote it.
 - Use a wait node only when the Job Brief explicitly requests a pause inside the same job before later steps continue. A wait is not an initial schedule trigger. Put either params.duration plus params.unit (seconds|minutes|hours|days|weeks), or params.until as an ISO-8601 timestamp with timezone. Include params.source_text copied verbatim from the Job Brief words that authorize the wait. Never invent a wait, delay, follow-up period or deadline.
 - Use await_event only when the Job Brief explicitly asks this same job to wait for a future Xvond/internal/provider event before continuing. Put the stable event name in params.event and include params.source_text copied verbatim from the Job Brief words that authorize the wait. Use params.match for correlation when the workflow is waiting for an event belonging to a specific order, lead, payment, booking or other entity; match values may reference $input.* or previous node outputs. Never invent an event wait. Do not use await_event when the event merely starts the job; use execution_graph.trigger type=event for that case.
 - Use generic node types, not use-case names. Examples: ai for reasoning/generation, media for generated visual media, action for a side effect through a requirement/connector, http_get_json for read-only JSON fetches, transform for data shaping, condition for branching gates, notify for an internal owner update.
@@ -524,10 +524,42 @@ def _grounded_runtime_inputs(value: Any, *, job_brief: str) -> dict:
     return result
 
 
-def _ground_execution_graph(value: Any, *, job_brief: str) -> dict:
-    """Remove compiler-invented waits that are not authorized by the Job Brief."""
+def _ground_execution_graph(
+    value: Any,
+    *,
+    job_brief: str,
+    grounded_schedules: list[dict] | None = None,
+) -> dict:
+    """Fail invented autonomous timing/events closed while preserving grounded work."""
 
     source = str(job_brief or "").casefold()
+    schedule_evidence = [
+        deepcopy(item)
+        for item in (grounded_schedules or [])
+        if isinstance(item, dict)
+        and str(item.get("source_text") or "").strip()
+    ]
+
+    def matching_schedule_source(raw_schedule: dict) -> str:
+        comparable = {
+            str(key): value
+            for key, value in raw_schedule.items()
+            if key != "source_text"
+        }
+        if not comparable:
+            return ""
+        for candidate in schedule_evidence:
+            candidate_comparable = {
+                str(key): value
+                for key, value in candidate.items()
+                if key != "source_text"
+            }
+            if all(
+                candidate_comparable.get(key) == value
+                for key, value in comparable.items()
+            ):
+                return _bounded_text(candidate.get("source_text"), limit=500)
+        return ""
 
     def visit(raw_graph: Any) -> dict:
         graph = normalize_execution_graph(raw_graph)
@@ -571,7 +603,15 @@ def _ground_execution_graph(value: Any, *, job_brief: str) -> dict:
             kept.append(node)
 
         trigger = deepcopy(graph.get("trigger") or {"type": "manual"})
-        if str(trigger.get("type") or "").strip().lower() == "schedule":
+        raw_trigger = (
+            raw_graph.get("trigger")
+            if isinstance(raw_graph, dict)
+            and isinstance(raw_graph.get("trigger"), dict)
+            else {}
+        )
+        trigger_type = str(trigger.get("type") or "").strip().lower()
+
+        if trigger_type == "schedule":
             raw_schedule = (
                 deepcopy(trigger.get("schedule"))
                 if isinstance(trigger.get("schedule"), dict)
@@ -579,13 +619,29 @@ def _ground_execution_graph(value: Any, *, job_brief: str) -> dict:
             )
             source_text = _bounded_text(raw_schedule.get("source_text"), limit=500)
             if not source_text or source_text.casefold() not in source:
-                # Preserve the fact that this is intended to be scheduled, but
-                # remove ungrounded timing so provisioning/readiness fails closed
-                # instead of silently inventing autonomous execution.
-                trigger = {"type": "schedule"}
+                inherited_source = matching_schedule_source(raw_schedule)
+                if inherited_source and inherited_source.casefold() in source:
+                    raw_schedule["source_text"] = inherited_source
+                    trigger["schedule"] = raw_schedule
+                else:
+                    # Keep the intended trigger type but remove invented timing.
+                    # Provisioning/readiness will then block launch.
+                    trigger = {"type": "schedule"}
             else:
                 raw_schedule["source_text"] = source_text
                 trigger["schedule"] = raw_schedule
+
+        elif trigger_type == "event":
+            event_name = _bounded_text(trigger.get("event"), limit=120).lower()
+            source_text = _bounded_text(raw_trigger.get("source_text"), limit=500)
+            grounded = bool(
+                (source_text and source_text.casefold() in source)
+                or (event_name and event_name.casefold() in source)
+            )
+            if not grounded:
+                # Internal events can start work automatically, so keep the
+                # intended type but remove the runnable event binding.
+                trigger = {"type": "event"}
 
         return normalize_execution_graph(
             {
@@ -605,6 +661,7 @@ def _normalize_execution_routines(
     payload: dict,
     *,
     job_brief: str,
+    grounded_schedules: list[dict] | None = None,
 ) -> tuple[list[dict], dict]:
     """Normalize independent employee routines while preserving the legacy graph."""
 
@@ -621,7 +678,11 @@ def _normalize_execution_routines(
                 if isinstance(raw.get("graph"), dict)
                 else raw.get("execution_graph")
             )
-            graph = _ground_execution_graph(raw_graph, job_brief=job_brief)
+            graph = _ground_execution_graph(
+                raw_graph,
+                job_brief=job_brief,
+                grounded_schedules=grounded_schedules,
+            )
             if not graph.get("nodes"):
                 continue
 
@@ -655,6 +716,7 @@ def _normalize_execution_routines(
     legacy_graph = _ground_execution_graph(
         payload.get("execution_graph"),
         job_brief=job_brief,
+        grounded_schedules=grounded_schedules,
     )
     if legacy_graph.get("nodes"):
         return (
@@ -980,6 +1042,11 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
     execution_routines, execution_graph = _normalize_execution_routines(
         payload,
         job_brief=job_brief,
+        grounded_schedules=[
+            item.get("schedule")
+            for item in requirements
+            if isinstance(item, dict) and isinstance(item.get("schedule"), dict)
+        ],
     )
 
     return {
