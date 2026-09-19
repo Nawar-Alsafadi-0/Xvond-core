@@ -3585,3 +3585,165 @@ def test_openapi_path_parameter_is_encoded_and_removed_from_payload(database, mo
     assert "expand=items" in captured["url"]
     assert "order_id=" not in captured["url"]
     assert captured["json_data"] is None
+
+
+def test_bound_api_operations_are_resolved_into_graph_actions():
+    spec = {
+        "requirements": [{"key": "orders"}],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "create_order",
+                    "type": "action",
+                    "params": {
+                        "action_type": "orders",
+                        "arguments": {"customer": "$input.customer"},
+                    },
+                },
+                {
+                    "id": "cancel_order",
+                    "type": "action",
+                    "depends_on": ["create_order"],
+                    "params": {
+                        "action_type": "orders",
+                        "arguments": {"order_id": "$input.order_id"},
+                    },
+                },
+            ],
+        },
+    }
+    operations = {
+        "create_order": {
+            "method": "POST",
+            "endpoint": "/orders",
+            "description": "Create a new order",
+        },
+        "cancel_order": {
+            "method": "DELETE",
+            "endpoint": "/orders/{order_id}",
+            "description": "Cancel an order",
+        },
+    }
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="orders",
+        operations=operations,
+    )
+
+    assert unresolved == []
+    nodes = resolved["execution_graph"]["nodes"]
+    assert nodes[0]["params"]["operation"] == "create_order"
+    assert nodes[1]["params"]["operation"] == "cancel_order"
+
+
+def test_single_bound_api_operation_is_selected_automatically():
+    spec = {
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [{
+                "id": "sync_vendor",
+                "type": "action",
+                "params": {"action_type": "vendor_sync"},
+            }],
+        }
+    }
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="vendor_sync",
+        operations={
+            "sync": {
+                "method": "POST",
+                "endpoint": "/sync",
+            }
+        },
+    )
+
+    assert unresolved == []
+    assert resolved["execution_graph"]["nodes"][0]["params"]["operation"] == "sync"
+
+
+def test_ambiguous_bound_api_operation_fails_closed_until_resolved():
+    spec = {
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [{
+                "id": "do_vendor_work",
+                "type": "action",
+                "params": {"action_type": "vendor"},
+            }],
+        }
+    }
+    operations = {
+        "alpha": {"method": "POST", "endpoint": "/alpha"},
+        "beta": {"method": "POST", "endpoint": "/beta"},
+    }
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="vendor",
+        operations=operations,
+    )
+    assert resolved["execution_graph"]["nodes"][0]["params"].get("operation") is None
+    assert unresolved[0]["node_id"] == "do_vendor_work"
+    assert unresolved[0]["available_operations"] == ["alpha", "beta"]
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="vendor",
+        operations=operations,
+        operation_map={"primary/do_vendor_work": "beta"},
+    )
+    assert unresolved == []
+    assert resolved["execution_graph"]["nodes"][0]["params"]["operation"] == "beta"
+
+
+def test_bound_api_operation_resolution_reaches_nested_foreach_graph():
+    spec = {
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [{
+                "id": "each_order",
+                "type": "foreach",
+                "params": {
+                    "items": "$input.orders",
+                    "graph": {
+                        "version": 1,
+                        "trigger": {"type": "manual"},
+                        "nodes": [{
+                            "id": "create_order",
+                            "type": "action",
+                            "params": {"action_type": "orders"},
+                        }],
+                    },
+                },
+            }],
+        }
+    }
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="orders",
+        operations={
+            "create_order": {
+                "method": "POST",
+                "endpoint": "/orders",
+                "description": "Create order",
+            },
+            "cancel_order": {
+                "method": "DELETE",
+                "endpoint": "/orders/{order_id}",
+                "description": "Cancel order",
+            },
+        },
+    )
+
+    assert unresolved == []
+    nested = resolved["execution_graph"]["nodes"][0]["params"]["graph"]
+    assert nested["nodes"][0]["params"]["operation"] == "create_order"
