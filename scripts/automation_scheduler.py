@@ -4,6 +4,7 @@ import signal
 import time
 
 from backend.app.modules.automation.scheduler import (
+    run_due_retries_once,
     run_due_schedules_once,
     run_due_waits_once,
 )
@@ -72,6 +73,23 @@ def main():
                 )
         except Exception:
             logger.exception("Automation wait cycle failed")
+
+        try:
+            retries = run_due_retries_once()
+            if (
+                retries["recovered"]
+                or retries["rescheduled"]
+                or retries["failed"]
+            ):
+                logger.info(
+                    "Automation retry cycle; checked=%s recovered=%s rescheduled=%s failed=%s",
+                    retries["checked"],
+                    retries["recovered"],
+                    retries["rescheduled"],
+                    retries["failed"],
+                )
+        except Exception:
+            logger.exception("Automation retry cycle failed")
 
         try:
             summary = run_due_schedules_once()
