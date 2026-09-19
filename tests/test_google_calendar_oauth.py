@@ -57,7 +57,7 @@ def test_oauth_state_is_encrypted_signed_and_expiring(monkeypatch):
 
 def test_authorization_url_requests_offline_calendar_scopes(monkeypatch):
     _configure_oauth(monkeypatch)
-    state, challenge = oauth.issue_google_calendar_oauth_state(
+    state = oauth.issue_google_calendar_oauth_state(
         user_id=1,
         company_id=2,
         integration_id=3,
