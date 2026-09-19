@@ -1,5 +1,5 @@
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from time import perf_counter
 
@@ -184,6 +184,169 @@ def _approval_checkpoint_matches(
         if expected_scope != expected_node:
             return False
     return str(meta.get("node_id") or "").strip() == expected_node
+
+
+WAIT_UNIT_SECONDS = {
+    "seconds": 1,
+    "minutes": 60,
+    "hours": 60 * 60,
+    "days": 24 * 60 * 60,
+    "weeks": 7 * 24 * 60 * 60,
+}
+MAX_WAIT_SECONDS = 365 * 24 * 60 * 60
+
+
+def _wait_resume_at(params: dict, *, now: datetime | None = None) -> datetime:
+    current = now or _utcnow_naive()
+    raw_until = str(params.get("until") or "").strip()
+    has_duration = params.get("duration") is not None
+    if bool(raw_until) == bool(has_duration):
+        raise ValueError("Wait requires exactly one of until or duration")
+
+    if raw_until:
+        try:
+            parsed = datetime.fromisoformat(raw_until.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("Wait until must be an ISO-8601 timestamp") from exc
+        if parsed.tzinfo is None:
+            raise ValueError("Wait until must include a timezone offset")
+        return parsed.astimezone(UTC).replace(tzinfo=None)
+
+    try:
+        amount = float(params.get("duration"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Wait duration must be numeric") from exc
+    unit = str(params.get("unit") or "seconds").strip().lower()
+    multiplier = WAIT_UNIT_SECONDS.get(unit)
+    if multiplier is None:
+        raise ValueError("Unsupported wait duration unit")
+    seconds = amount * multiplier
+    if seconds <= 0 or seconds > MAX_WAIT_SECONDS:
+        raise ValueError("Wait duration must be positive and at most one year")
+    return current + timedelta(seconds=seconds)
+
+
+class AutomationWaitRequired(RuntimeError):
+    def __init__(
+        self,
+        *,
+        resume_at: datetime,
+        workflow_step_index: int,
+        node_id: str,
+        node_outputs: dict,
+        graph_resume: dict | None = None,
+    ):
+        super().__init__(f"Wait required until {_trace_iso(resume_at)}")
+        self.resume_at = resume_at
+        self.workflow_step_index = int(workflow_step_index)
+        self.node_id = str(node_id)
+        self.node_outputs = deepcopy(dict(node_outputs or {}))
+        self.graph_resume = deepcopy(
+            graph_resume
+            if isinstance(graph_resume, dict)
+            else {
+                "node_id": self.node_id,
+                "node_outputs": self.node_outputs,
+                "wait_completed": True,
+                "resume_at": _trace_iso(resume_at),
+            }
+        )
+
+
+def _store_wait_checkpoint(
+    db,
+    *,
+    run: AutomationRun,
+    workflow: AutomationWorkflow,
+    wait: AutomationWaitRequired,
+    state: dict,
+    step_results: list,
+    trace: dict,
+) -> AutomationRun:
+    run.status = "waiting_time"
+    run.resume_at = wait.resume_at
+    run.error_message = None
+    run.finished_at = None
+    trace["status"] = "waiting_time"
+    trace["finished_at"] = None
+    run.output_data = {
+        "state": state,
+        "steps": step_results,
+        "trace": trace,
+        "wait": {
+            "resume_at": _trace_iso(wait.resume_at),
+            "workflow_step_index": wait.workflow_step_index,
+            "node_id": wait.node_id,
+            "workflow_fingerprint": _checkpoint_fingerprint(workflow.steps or []),
+            "node_outputs": wait.node_outputs,
+            "graph_resume": wait.graph_resume,
+            "status": "waiting_time",
+        },
+    }
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def _store_approval_checkpoint(
+    db,
+    *,
+    run: AutomationRun,
+    workflow: AutomationWorkflow,
+    approval: "AutomationApprovalRequired",
+    state: dict,
+    step_results: list,
+    trace: dict,
+) -> AutomationRun:
+    request = ActionRequest(
+        company_id=run.company_id,
+        agent_id=approval.agent_id,
+        conversation_id=None,
+        action_type=approval.action_type,
+        details={
+            **approval.arguments,
+            "_xvond_automation": {
+                "run_id": run.id,
+                "workflow_id": workflow.id,
+                "workflow_step_index": approval.workflow_step_index,
+                "node_id": approval.node_id,
+                "approval_scope": approval.approval_scope,
+                "workflow_fingerprint": _checkpoint_fingerprint(workflow.steps or []),
+                "execution_key": state.get("_xvond_execution_key"),
+            },
+        },
+        summary=approval.summary,
+        status="awaiting_confirmation",
+    )
+    db.add(request)
+    db.flush()
+    run.status = "waiting_approval"
+    run.resume_at = None
+    run.error_message = None
+    run.finished_at = None
+    trace["status"] = "waiting_approval"
+    trace["finished_at"] = None
+    run.output_data = {
+        "state": state,
+        "steps": step_results,
+        "trace": trace,
+        "approval": {
+            "request_id": request.id,
+            "agent_id": approval.agent_id,
+            "action_type": approval.action_type,
+            "summary": approval.summary,
+            "workflow_step_index": approval.workflow_step_index,
+            "node_id": approval.node_id,
+            "approval_scope": approval.approval_scope,
+            "workflow_fingerprint": _checkpoint_fingerprint(workflow.steps or []),
+            "node_outputs": approval.node_outputs,
+            "graph_resume": approval.graph_resume,
+            "status": "awaiting_confirmation",
+        },
+    }
+    db.commit()
+    db.refresh(run)
+    return run
 
 
 class AutomationApprovalRequired(RuntimeError):
