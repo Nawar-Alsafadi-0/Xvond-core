@@ -3587,3 +3587,113 @@ def test_next_one_time_schedule_disappears_after_execution_time():
     )
     assert before == datetime(2026, 10, 1, 5, 0, tzinfo=UTC)
     assert after is None
+
+
+
+def test_foreach_graph_actions_use_stable_per_item_idempotency_keys(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    calls = []
+
+    def fake_capability(*args, **kwargs):
+        calls.append(
+            {
+                "details": dict(kwargs.get("details") or {}),
+                "idempotency_key": kwargs["idempotency_key"],
+            }
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "execute_generic_capability",
+        fake_capability,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Foreach Idempotency", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Worker",
+                system_prompt="work",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "send_item": {
+                            "enabled": True,
+                            "confirmation_required": False,
+                            "_xvond_permission_mode": "automatic",
+                            "destination": {
+                                "type": "xvond_internal",
+                                "adapter": "generic_capability",
+                            },
+                        }
+                    }
+                },
+            )
+        )
+        db.commit()
+
+        graph = {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "each",
+                    "type": "foreach",
+                    "depends_on": [],
+                    "params": {
+                        "items": [{"id": 1}, {"id": 2}],
+                        "graph": {
+                            "version": 1,
+                            "nodes": [
+                                {
+                                    "id": "send",
+                                    "type": "action",
+                                    "depends_on": [],
+                                    "params": {
+                                        "action_type": "send_item",
+                                        "arguments": {"id": "$item.id"},
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                }
+            ],
+        }
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        for _ in range(2):
+            result = runtime.execute_step(
+                db,
+                1,
+                {"type": "graph", "agent_id": 1, "graph": graph},
+                {"_xvond_execution_key": "stable-foreach-retry"},
+                run_id=1,
+                step_index=0,
+            )
+            assert result["graph_outputs"]["each"]["count"] == 2
+
+    assert len(calls) == 4
+    first_run_keys = [item["idempotency_key"] for item in calls[:2]]
+    second_run_keys = [item["idempotency_key"] for item in calls[2:]]
+
+    assert first_run_keys[0] != first_run_keys[1]
+    assert first_run_keys == second_run_keys
+    assert all(
+        key.startswith("stable-foreach-retry:") and ":graph:" in key
+        for key in first_run_keys
+    )
+    engine.dispose()
