@@ -2368,7 +2368,15 @@ def test_multi_routine_runtime_inputs_are_isolated_by_requirement_scope(database
             "target": "morning-only",
             "morning_secret_name": "morning",
         }
+        assert by_routine["morning"].trigger_config["_xvond_runtime_inputs"] == {
+            "target": "morning-only",
+            "morning_secret_name": "morning",
+        }
         assert by_routine["evening"].trigger_config["input_data"] == {
+            "target": "evening-only",
+            "evening_secret_name": "evening",
+        }
+        assert by_routine["evening"].trigger_config["_xvond_runtime_inputs"] == {
             "target": "evening-only",
             "evening_secret_name": "evening",
         }
