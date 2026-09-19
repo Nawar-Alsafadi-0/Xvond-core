@@ -327,3 +327,126 @@ def test_builder_journey_routes_expired_connection_validation_back_to_setup():
         }
     ]
     assert stage(journey, "test")["status"] == "blocked"
+
+
+
+def test_builder_journey_requires_each_execution_routine_preview():
+    spec = {
+        "requirements": [],
+        "delivery": {"provisioning_version": 1},
+        "execution_routines": [
+            {
+                "id": "morning",
+                "name": "Morning routine",
+                "requirement_keys": [],
+                "graph": {
+                    "version": 1,
+                    "trigger": {"type": "manual"},
+                    "nodes": [
+                        {
+                            "id": "one",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Morning"},
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "evening",
+                "name": "Evening routine",
+                "requirement_keys": [],
+                "graph": {
+                    "version": 1,
+                    "trigger": {"type": "manual"},
+                    "nodes": [
+                        {
+                            "id": "two",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Evening"},
+                        }
+                    ],
+                },
+            },
+        ],
+    }
+    journey = _self_service_builder_journey(
+        agent=SimpleNamespace(enabled=False),
+        has_entitlement=True,
+        compiled_spec=spec,
+        state={
+            "subscription": {"active": True, "status": "active"},
+            "missing_channels": [],
+            "resolved_requirements": [],
+            "provider_ready": True,
+            "ready": True,
+        },
+        builder={
+            "compiled_at": "build-routines",
+            "routine_preview_evidence": {
+                "morning": {
+                    "compiled_at": "build-routines",
+                    "tested_at": "now",
+                }
+            },
+        },
+    )
+
+    test_stage = stage(journey, "test")
+    assert test_stage["status"] == "action_required"
+    assert [item["type"] for item in test_stage["actions"]] == ["preview_routine"]
+    assert test_stage["actions"][0]["key"] == "evening"
+    assert journey["required_routines"] == ["morning", "evening"]
+    assert journey["tested_routines"] == ["morning"]
+    assert stage(journey, "launch")["status"] == "blocked"
+
+
+def test_builder_journey_ignores_routine_preview_evidence_from_old_build():
+    spec = {
+        "requirements": [],
+        "delivery": {"provisioning_version": 1},
+        "execution_routines": [
+            {
+                "id": "monitor",
+                "name": "Monitor",
+                "requirement_keys": [],
+                "graph": {
+                    "version": 1,
+                    "trigger": {"type": "manual"},
+                    "nodes": [
+                        {
+                            "id": "done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Done"},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    journey = _self_service_builder_journey(
+        agent=SimpleNamespace(enabled=False),
+        has_entitlement=True,
+        compiled_spec=spec,
+        state={
+            "subscription": {"active": True, "status": "active"},
+            "missing_channels": [],
+            "resolved_requirements": [],
+            "provider_ready": True,
+            "ready": True,
+        },
+        builder={
+            "compiled_at": "new-build",
+            "routine_preview_evidence": {
+                "monitor": {
+                    "compiled_at": "old-build",
+                    "tested_at": "before",
+                }
+            },
+        },
+    )
+
+    assert journey["tested_routines"] == []
+    assert stage(journey, "test")["actions"][0]["key"] == "monitor"
