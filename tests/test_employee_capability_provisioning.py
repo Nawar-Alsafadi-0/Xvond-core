@@ -956,11 +956,7 @@ def test_self_service_schedule_requires_explicit_automatic_permission(database):
         company.onboarding_source = "self_service"
         db.commit()
 
-    _cache(
-        factory,
-        normalize_compiled_spec(payload, job_brief=brief),
-        owner_permissions={KEY: "automatic"},
-    )
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
     result = api.compile_employee(1, USER)
     requirement = result["spec"]["requirements"][0]
 
