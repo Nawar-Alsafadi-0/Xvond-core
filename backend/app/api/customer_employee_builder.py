@@ -271,6 +271,19 @@ def _routine_preview_defaults(spec: dict, routine: dict) -> dict:
     return defaults
 
 
+def _invalidate_preview_evidence(container: dict) -> None:
+    """Invalidate preview evidence after executable build or setup changes."""
+
+    for key in (
+        "last_tested_at",
+        "last_tested_compiled_at",
+        "chat_tested_at",
+        "chat_tested_compiled_at",
+        "routine_preview_evidence",
+    ):
+        container.pop(key, None)
+
+
 def _routine_preview_evidence(
     container: dict,
     *,
@@ -712,8 +725,7 @@ def _store_provisioned_spec(
     if auto_bound:
         # Executable behavior changed, so evidence from a prior preview cannot
         # authorize launch of the newly connected build.
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
     spec = _effective_compiled_permissions(spec, builder)
     compiled_spec, delivery = provision_compiled_capabilities(db, agent_id=agent.id, spec=spec)
     setup_answers = builder.get("setup_answers") or {}
@@ -2552,8 +2564,7 @@ def auto_resolve_self_service_integrations(
             pending["compiled_spec"] = resolved_spec
             pending["status"] = "built"
             pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-            pending.pop("last_tested_at", None)
-            pending.pop("last_tested_compiled_at", None)
+            _invalidate_preview_evidence(pending)
             builder["pending_revision"] = pending
             settings_value["employee_builder"] = builder
             config.settings = settings_value
@@ -2575,8 +2586,7 @@ def auto_resolve_self_service_integrations(
         builder["missing_information"] = list(
             resolved_spec.get("setup_required") or []
         )
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
         settings_value["employee_builder"] = builder
         config.settings = settings_value
         agent.system_prompt = build_compiled_employee_system_prompt(
@@ -2754,8 +2764,7 @@ def bind_self_service_integration(
                 if normalize_requirement_key(item) != key
             ]
             pending["compiled_spec"] = compiled_value
-            pending.pop("last_tested_at", None)
-            pending.pop("last_tested_compiled_at", None)
+            _invalidate_preview_evidence(pending)
             pending["status"] = "built"
             builder["pending_revision"] = pending
             settings_value["employee_builder"] = builder
@@ -2784,8 +2793,7 @@ def bind_self_service_integration(
         builder["missing_information"] = list(compiled_value.get("setup_required") or [])
         # Connection changes alter executable behavior and therefore invalidate
         # preview evidence for the previous build.
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
         settings_value["employee_builder"] = builder
         config.settings = settings_value
         agent.system_prompt = build_compiled_employee_system_prompt(
@@ -2986,8 +2994,7 @@ def save_self_service_setup_answer(
                 if normalize_requirement_key(item) != key
             ]
             pending["compiled_spec"] = compiled_value
-            pending.pop("last_tested_at", None)
-            pending.pop("last_tested_compiled_at", None)
+            _invalidate_preview_evidence(pending)
             pending["status"] = "built"
             builder["pending_revision"] = pending
             settings_value["employee_builder"] = builder
@@ -3011,8 +3018,7 @@ def save_self_service_setup_answer(
         builder["missing_information"] = list(compiled_value.get("setup_required") or [])
         # Setup data changes the employee's executable behavior. A preview from
         # before this change cannot authorize launch of the updated build.
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
         settings_value["employee_builder"] = builder
         config.settings = settings_value
 
@@ -3175,8 +3181,7 @@ def set_self_service_permission(
         # new build identity. Restrictive changes may be applied while live;
         # automatic escalation was blocked above and must be preview-tested.
         builder["compiled_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
 
         compiled_value = _store_provisioned_spec(
             db,
@@ -3750,9 +3755,14 @@ def test_draft_employee(
             pending["chat_tested_compiled_at"] = pending.get("compiled_at")
             pending["test_count"] = int(pending.get("test_count") or 0) + 1
             if _compiled_execution_routines(pending_spec):
-                pending.pop("last_tested_at", None)
-                pending.pop("last_tested_compiled_at", None)
-                pending["status"] = "partially_tested"
+                _, _, routine_complete = _routine_preview_evidence(
+                    pending,
+                    spec=pending_spec,
+                )
+                if not routine_complete:
+                    pending.pop("last_tested_at", None)
+                    pending.pop("last_tested_compiled_at", None)
+                    pending["status"] = "partially_tested"
             else:
                 pending["last_tested_at"] = now_iso
                 pending["last_tested_compiled_at"] = pending.get("compiled_at")
@@ -3853,8 +3863,13 @@ def test_draft_employee(
             else None
         )
         if _compiled_execution_routines(current_spec):
-            builder.pop("last_tested_at", None)
-            builder.pop("last_tested_compiled_at", None)
+            _, _, routine_complete = _routine_preview_evidence(
+                builder,
+                spec=current_spec or {},
+            )
+            if not routine_complete:
+                builder.pop("last_tested_at", None)
+                builder.pop("last_tested_compiled_at", None)
         else:
             builder["last_tested_at"] = now_iso
             builder["last_tested_compiled_at"] = builder.get("compiled_at")
@@ -3945,8 +3960,7 @@ def build_pending_live_revision(
         pending.update(staged)
         pending["status"] = "built"
         pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-        pending.pop("last_tested_at", None)
-        pending.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(pending)
         builder["pending_revision"] = pending
         settings_value["employee_builder"] = builder
         config.settings = settings_value
