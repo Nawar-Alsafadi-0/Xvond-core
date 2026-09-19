@@ -772,7 +772,7 @@ def test_owner_grant_can_promote_compiler_suggestion_to_automatic():
     assert action["confirmation_required"] is False
 
 
-def test_owner_never_disables_generated_action_contract():
+def test_owner_never_blocks_generated_action_without_overwriting_operator_enablement():
     from backend.app.api.customer_employee_builder import (
         _effective_compiled_permissions,
     )
