@@ -3208,3 +3208,53 @@ def test_resumed_interval_routine_waits_for_next_slot_instead_of_catching_up(mon
     assert next_slot["status"] == "success"
     assert called[0]["_xvond_schedule_slot"] == "2026-09-18T13:05:00Z"
     engine.dispose()
+
+
+
+def test_automation_runtime_merges_routine_defaults_for_all_triggers(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Defaults Company", active=True))
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Scoped defaults",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_runtime_inputs": {
+                    "target": "compiled-default",
+                    "fixed": "from-routine",
+                },
+            },
+            steps=[],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        run = automation_runtime_module.AutomationRuntime().execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={
+                "target": "caller-override",
+                "dynamic": "runtime",
+            },
+        )
+
+        assert run.input_data["target"] == "caller-override"
+        assert run.input_data["fixed"] == "from-routine"
+        assert run.input_data["dynamic"] == "runtime"
+        assert run.input_data["_xvond_execution_key"].startswith(
+            "automation:1:1:run:"
+        )
+
+    engine.dispose()

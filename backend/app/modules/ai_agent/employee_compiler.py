@@ -7,14 +7,17 @@ import re
 from datetime import datetime
 from typing import Any
 
-from backend.app.modules.automation.execution_graph import normalize_execution_graph
+from backend.app.modules.automation.execution_graph import (
+    graph_action_types,
+    normalize_execution_graph,
+)
 from backend.app.modules.channels.catalog import (
     canonical_channel_type,
     list_customer_channel_capabilities,
 )
 
 
-COMPILER_VERSION = 9
+COMPILER_VERSION = 10
 
 GENERIC_PRIMITIVES = {
     "workflow_engine",
@@ -241,6 +244,7 @@ Use this shape:
     {
       "id": "stable_snake_case_routine_id",
       "name": "short human-readable routine name",
+      "requirement_keys": ["only requirement keys used by this routine"],
       "graph": {
         "version": 1,
         "trigger": {"type":"manual|schedule|webhook|event","event":"internal event name when type=event","source_text":"exact Job Brief words authorizing an event/webhook trigger","schedule":{"kind":"interval|once|daily|weekly|monthly","source_text":"exact cadence/time words copied from the Job Brief"}},
@@ -277,6 +281,7 @@ Rules:
 - Do not split sequential steps of the same job into separate routines. If work is one continuous lifecycle (including wait, await_event, approval or foreach checkpoints), keep it inside one graph.
 - For a single executable routine, execution_graph remains valid for backward compatibility. For multiple independent routines, prefer execution_routines and let Xvond derive the legacy primary execution_graph from the first routine.
 - Limit execution_routines to the smallest set that faithfully represents the requested job; never invent extra routines.
+- For each execution_routine, set requirement_keys to only the normalized requirement keys that routine actually needs. Include every requirement referenced by an action node, plus requirements whose runtime_inputs/connections are consumed by that routine. Do not attach unrelated requirements just because they belong to the same employee.
 - execution_graph.trigger describes what starts the graph. Use manual when the user starts it explicitly, schedule for recurring/time-based work, webhook for an incoming external JSON event, and event for an internal Xvond event. Never invent a webhook/event trigger when the user did not request event-driven behavior.
 - For a schedule trigger, include trigger.schedule.source_text copied verbatim from the Job Brief words that authorize the cadence/time. Xvond will fail the schedule closed when this grounding is missing or does not occur in the Job Brief.
 - For type=event, set trigger.event to the stable internal event name the graph should consume and include trigger.source_text copied verbatim from the Job Brief words that authorize that event-driven routine. Event names are capabilities of the Xvond runtime, not provider-specific webhook URLs. Xvond also accepts the exact event name itself as grounding when the customer wrote it.
@@ -662,6 +667,7 @@ def _normalize_execution_routines(
     *,
     job_brief: str,
     grounded_schedules: list[dict] | None = None,
+    known_requirement_keys: set[str] | None = None,
 ) -> tuple[list[dict], dict]:
     """Normalize independent employee routines while preserving the legacy graph."""
 
@@ -686,6 +692,28 @@ def _normalize_execution_routines(
             if not graph.get("nodes"):
                 continue
 
+            allowed_requirement_keys = set(known_requirement_keys or set())
+            explicit_requirement_keys: list[str] = []
+            for raw_key in raw.get("requirement_keys") or []:
+                key = normalize_requirement_key(raw_key)
+                if (
+                    key
+                    and key in allowed_requirement_keys
+                    and key not in explicit_requirement_keys
+                ):
+                    explicit_requirement_keys.append(key)
+
+            # Action nodes are executable references and therefore authoritative
+            # evidence that the routine depends on those requirement contracts.
+            for key in graph_action_types(graph):
+                normalized_key = normalize_requirement_key(key)
+                if (
+                    normalized_key
+                    and normalized_key in allowed_requirement_keys
+                    and normalized_key not in explicit_requirement_keys
+                ):
+                    explicit_requirement_keys.append(normalized_key)
+
             base_id = normalize_requirement_key(
                 raw.get("id")
                 or raw.get("key")
@@ -704,6 +732,7 @@ def _normalize_execution_routines(
                 {
                     "id": routine_id,
                     "name": name or routine_id.replace("_", " "),
+                    "requirement_keys": explicit_requirement_keys,
                     "graph": graph,
                 }
             )
@@ -724,6 +753,9 @@ def _normalize_execution_routines(
                 {
                     "id": "primary",
                     "name": "Primary routine",
+                    # Empty means legacy/shared requirement scope. The runtime
+                    # keeps pre-v10 single-graph employees backward compatible.
+                    "requirement_keys": [],
                     "graph": deepcopy(legacy_graph),
                 }
             ],
@@ -1047,6 +1079,11 @@ def normalize_compiled_spec(payload: dict, *, job_brief: str) -> dict:
             for item in requirements
             if isinstance(item, dict) and isinstance(item.get("schedule"), dict)
         ],
+        known_requirement_keys={
+            str(item.get("key") or "")
+            for item in requirements
+            if isinstance(item, dict) and str(item.get("key") or "")
+        },
     )
 
     return {

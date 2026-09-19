@@ -585,7 +585,22 @@ class AutomationRuntime:
         if not workflow.enabled:
             raise ValueError("Workflow is disabled")
 
-        original_input = dict(input_data or {})
+        trigger_config = (
+            workflow.trigger_config
+            if isinstance(workflow.trigger_config, dict)
+            else {}
+        )
+        routine_defaults = (
+            dict(trigger_config.get("_xvond_runtime_inputs") or {})
+            if isinstance(trigger_config.get("_xvond_runtime_inputs"), dict)
+            else {}
+        )
+        # Compiled routine inputs are defaults, not a second hidden state.
+        # Trigger/manual payload values may intentionally override them.
+        original_input = {
+            **routine_defaults,
+            **dict(input_data or {}),
+        }
         billing_service, billing_metric = _billing_contract(workflow)
         service_limits.record(
             db,

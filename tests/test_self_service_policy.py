@@ -325,3 +325,34 @@ def test_readiness_keeps_legacy_single_graph_trigger_compatible():
     )
 
     assert state["ready"] is True
+
+
+
+def test_readiness_names_conflicting_runtime_inputs_for_routine():
+    spec = _spec(scope="personal")
+    spec["delivery"]["graph_trigger"] = {
+        "routine_id": "monitor",
+        "routine_name": "Price monitor",
+        "status": "runtime_input_conflict",
+        "workflow_id": None,
+        "trigger_type": "schedule",
+        "runtime_input_conflicts": ["target", "url"],
+    }
+    spec["delivery"]["graph_triggers"] = [
+        dict(spec["delivery"]["graph_trigger"])
+    ]
+
+    state = evaluate_readiness(
+        subscribed=True,
+        channel_limit=None,
+        requested_channels=[],
+        enabled_channels=[],
+        compiled_spec=spec,
+        provisioned=True,
+    )
+
+    assert state["ready"] is False
+    assert (
+        "Price monitor: conflicting runtime input keys (target, url)"
+        in state["blockers"]
+    )
