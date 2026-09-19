@@ -699,6 +699,24 @@ def _integration_call(
     if input_mode == "query":
         query_items = []
         source = request_payload if isinstance(request_payload, dict) else {}
+        required_query_params = [
+            str(item).strip()
+            for item in ((op_config or {}).get("required_query_params") or [])
+            if str(item or "").strip()
+        ]
+        missing_query_params = [
+            key
+            for key in required_query_params
+            if key not in source or source.get(key) in (None, "")
+        ]
+        if missing_query_params:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"API operation '{operation}' requires query parameter(s): "
+                    + ", ".join(missing_query_params)
+                ),
+            )
         for key, value in source.items():
             if value is None:
                 continue
