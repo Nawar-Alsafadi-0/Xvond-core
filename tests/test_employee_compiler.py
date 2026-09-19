@@ -927,7 +927,7 @@ def test_compiler_preserves_generic_durable_wait_node():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 8
+    assert spec["version"] == 9
     assert [node["type"] for node in nodes] == ["transform", "wait", "ai"]
     assert nodes[1]["params"]["duration"] == 2
     assert nodes[1]["params"]["unit"] == "days"
@@ -980,7 +980,7 @@ def test_compiler_preserves_generic_correlated_event_wait():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 8
+    assert spec["version"] == 9
     assert [node["type"] for node in nodes] == [
         "transform",
         "await_event",
@@ -1085,3 +1085,291 @@ def test_compiler_keeps_grounded_waits_inside_foreach():
     assert len(nested) == 1
     assert nested[0]["type"] == "wait"
     assert nested[0]["params"]["source_text"] == "انتظر ساعة"
+
+
+
+def test_compiler_normalizes_multiple_independent_execution_routines():
+    job_brief = (
+        "كل يوم الساعة 8 اعمل ملخص صباحي. "
+        "وعندما يصل حدث lead.created حلل الليد بشكل مستقل."
+    )
+    response = """{
+      "role":"Operations employee",
+      "scope":"business",
+      "summary":"Run independent morning and lead routines.",
+      "tasks":[],
+      "requirements":[],
+      "permissions":[],
+      "execution_routines":[
+        {
+          "id":"morning_summary",
+          "name":"Morning summary",
+          "graph":{
+            "version":1,
+            "trigger":{
+              "type":"schedule",
+              "schedule":{
+                "kind":"daily",
+                "hour":8,
+                "minute":0,
+                "timezone":"Asia/Muscat",
+                "source_text":"كل يوم الساعة 8"
+              }
+            },
+            "nodes":[
+              {
+                "id":"summarize",
+                "type":"ai",
+                "depends_on":[],
+                "params":{"prompt":"Prepare the morning summary."}
+              }
+            ]
+          }
+        },
+        {
+          "id":"lead_review",
+          "name":"Lead review",
+          "graph":{
+            "version":1,
+            "trigger":{"type":"event","event":"lead.created"},
+            "nodes":[
+              {
+                "id":"review",
+                "type":"ai",
+                "depends_on":[],
+                "params":{"prompt":"Analyze the new lead.","context":"$input"}
+              }
+            ]
+          }
+        }
+      ],
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+
+    assert spec["version"] == 9
+    assert [item["id"] for item in spec["execution_routines"]] == [
+        "morning_summary",
+        "lead_review",
+    ]
+    assert spec["execution_routines"][0]["graph"]["trigger"]["type"] == "schedule"
+    assert spec["execution_routines"][1]["graph"]["trigger"] == {
+        "type": "event",
+        "event": "lead.created",
+    }
+    assert spec["execution_graph"] == spec["execution_routines"][0]["graph"]
+
+
+def test_compiler_maps_legacy_execution_graph_to_primary_routine():
+    job_brief = "لما شغله يدويًا لخص البيانات"
+    response = """{
+      "role":"Manual analyst",
+      "scope":"personal",
+      "summary":"Summarize supplied data.",
+      "tasks":[],
+      "requirements":[],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{"type":"manual"},
+        "nodes":[
+          {
+            "id":"summarize",
+            "type":"ai",
+            "depends_on":[],
+            "params":{"prompt":"Summarize the supplied data."}
+          }
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+
+    assert spec["version"] == 9
+    assert len(spec["execution_routines"]) == 1
+    assert spec["execution_routines"][0]["id"] == "primary"
+    assert spec["execution_routines"][0]["graph"] == spec["execution_graph"]
+    assert spec["execution_graph"]["nodes"][0]["id"] == "summarize"
+
+
+def test_compiler_grounds_waits_inside_each_independent_routine():
+    job_brief = (
+        "روتين أول انتظر ساعة ثم كمل. "
+        "روتين ثاني انتظر حدث external.ready ثم كمل."
+    )
+    response = """{
+      "role":"Durable worker",
+      "scope":"personal",
+      "summary":"Run two durable routines.",
+      "tasks":[],
+      "requirements":[],
+      "permissions":[],
+      "execution_routines":[
+        {
+          "id":"time_wait",
+          "name":"Time wait",
+          "graph":{
+            "version":1,
+            "trigger":{"type":"manual"},
+            "nodes":[
+              {
+                "id":"pause",
+                "type":"wait",
+                "depends_on":[],
+                "params":{"duration":1,"unit":"hours","source_text":"انتظر ساعة"}
+              }
+            ]
+          }
+        },
+        {
+          "id":"event_wait",
+          "name":"Event wait",
+          "graph":{
+            "version":1,
+            "trigger":{"type":"manual"},
+            "nodes":[
+              {
+                "id":"pause",
+                "type":"await_event",
+                "depends_on":[],
+                "params":{
+                  "event":"external.ready",
+                  "source_text":"انتظر حدث external.ready"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+
+    assert spec["execution_routines"][0]["graph"]["nodes"][0]["type"] == "wait"
+    assert spec["execution_routines"][1]["graph"]["nodes"][0]["type"] == "await_event"
+
+
+
+def test_compiler_fails_ungrounded_schedule_trigger_closed():
+    job_brief = "لخص البيانات عندما أشغلك يدويًا"
+    response = """{
+      "role":"Analyst",
+      "scope":"personal",
+      "summary":"Summarize supplied data.",
+      "tasks":[],
+      "requirements":[],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{
+          "type":"schedule",
+          "schedule":{
+            "kind":"daily",
+            "hour":8,
+            "minute":0,
+            "timezone":"Asia/Muscat",
+            "source_text":"كل يوم الساعة 8"
+          }
+        },
+        "nodes":[
+          {
+            "id":"summarize",
+            "type":"ai",
+            "depends_on":[],
+            "params":{"prompt":"Summarize the supplied data."}
+          }
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+
+    assert spec["execution_graph"]["trigger"] == {"type": "schedule"}
+    assert spec["execution_routines"][0]["graph"]["trigger"] == {"type": "schedule"}
+
+
+
+def test_compiler_inherits_graph_schedule_only_from_grounded_requirement_schedule():
+    job_brief = "Every 60 minutes generate a summary and save it."
+    response = """{
+      "role":"Scheduled worker",
+      "scope":"personal",
+      "summary":"Generate and save a recurring summary.",
+      "tasks":[],
+      "requirements":[
+        {
+          "key":"save_summary",
+          "kind":"custom",
+          "purpose":"Save the generated summary",
+          "primitives":["scheduler","workflow_engine"],
+          "schedule":{
+            "kind":"interval",
+            "every_minutes":60,
+            "source_text":"Every 60 minutes"
+          }
+        }
+      ],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{
+          "type":"schedule",
+          "schedule":{"kind":"interval","every_minutes":60}
+        },
+        "nodes":[
+          {
+            "id":"summarize",
+            "type":"ai",
+            "depends_on":[],
+            "params":{"prompt":"Generate the summary."}
+          }
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+
+    assert spec["execution_graph"]["trigger"]["schedule"] == {
+        "kind": "interval",
+        "every_minutes": 60,
+        "source_text": "Every 60 minutes",
+    }
+
+
+def test_compiler_fails_invented_internal_event_trigger_closed():
+    job_brief = "حلل البيانات فقط عندما أشغلك بنفسي"
+    response = """{
+      "role":"Manual analyst",
+      "scope":"personal",
+      "summary":"Analyze supplied data.",
+      "tasks":[],
+      "requirements":[],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{
+          "type":"event",
+          "event":"lead.created",
+          "source_text":"عندما يصل lead جديد"
+        },
+        "nodes":[
+          {
+            "id":"analyze",
+            "type":"ai",
+            "depends_on":[],
+            "params":{"prompt":"Analyze the supplied data."}
+          }
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+
+    assert spec["execution_graph"]["trigger"] == {"type": "event"}
+    assert spec["execution_routines"][0]["graph"]["trigger"] == {"type": "event"}
