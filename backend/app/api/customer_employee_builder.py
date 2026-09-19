@@ -1668,6 +1668,46 @@ def _self_service_builder_journey(
             elif status == "connection_required":
                 if kind == "channel" and key in missing_channels:
                     continue
+                discovery = (
+                    requirement.get("discovery")
+                    if isinstance(requirement.get("discovery"), dict)
+                    else {}
+                )
+                discovery_status = str(discovery.get("status") or "")
+                customer_access = str(discovery.get("customer_access") or "unknown")
+                auth_schemes = [
+                    item for item in (discovery.get("auth_schemes") or [])
+                    if isinstance(item, dict)
+                ]
+                if discovery_status in {"contract_found", "operation_selection_required"} and customer_access in {"api_key", "account_connection"}:
+                    scheme = auth_schemes[0] if len(auth_schemes) == 1 else {}
+                    auth_type = str(scheme.get("auth_type") or "")
+                    fields: list[dict] = []
+                    if auth_type == "basic":
+                        fields = [
+                            {"key": "username", "label": "Username", "type": "text"},
+                            {"key": "password", "label": "Password", "type": "password"},
+                        ]
+                    elif auth_type in {"bearer", "api_key_header", "api_key_query"} or customer_access == "api_key":
+                        fields = [{
+                            "key": "api_key",
+                            "label": "API key / token",
+                            "type": "password",
+                        }]
+                    setup_actions.append(
+                        _builder_action(
+                            "provide_discovery_access",
+                            f"Authorize {key.replace('_', ' ')}",
+                            target="builder",
+                            key=key,
+                            detail=(
+                                "Xvond already found and prepared the API contract. "
+                                "Provide only the missing credential so Xvond can validate and finish the connection."
+                            ),
+                            fields=fields,
+                        )
+                    )
+                    continue
                 connection_status = str(
                     requirement.get("self_service_connection_status")
                     or self_service_connection_status(requirement)
