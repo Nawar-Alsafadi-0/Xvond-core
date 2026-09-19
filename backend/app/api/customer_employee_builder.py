@@ -3598,6 +3598,75 @@ def preview_employee_routine(
             **deepcopy(data.input_data),
         }
         compiled_at = str(target.get("compiled_at") or "").strip()
+        preview_system_prompt = build_compiled_employee_system_prompt(
+            owner_name=company.name,
+            spec=spec,
+        )
+
+        def preview_ai_executor(*, prompt: str, context, node_scope: str) -> dict:
+            import json
+
+            message = str(prompt or "").strip()
+            if context is not None:
+                try:
+                    context_text = json.dumps(
+                        context,
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                except (TypeError, ValueError):
+                    context_text = str(context)
+                if context_text:
+                    message = (message + "\n\nCONTEXT:\n" + context_text)[:12000]
+            if not message:
+                raise HTTPException(409, f"Preview AI node {node_scope} has no prompt")
+
+            limits_service.check_token_limit(db, company.id)
+            selections = runtime_selections(
+                db,
+                company.id,
+                agent.provider,
+                agent.model,
+                message=message,
+            )
+            if not selections:
+                raise HTTPException(503, "No eligible AI provider/model is available")
+
+            response = None
+            selected = None
+            for candidate in selections:
+                try:
+                    response = ai_engine.generate(
+                        provider_name=candidate.provider,
+                        system_prompt=preview_system_prompt,
+                        user_message=message,
+                        model=candidate.model,
+                        tools=None,
+                    )
+                    selected = candidate
+                    break
+                except ProviderExecutionError:
+                    continue
+            if response is None or selected is None:
+                raise HTTPException(503, "AI provider is temporarily unavailable")
+
+            _record_ai_usage(
+                db,
+                company_id=company.id,
+                agent_id=agent.id,
+                selected=selected,
+                response=response,
+            )
+            return {
+                "ai_response": response.text,
+                "node_scope": node_scope,
+                "usage": {
+                    "input_tokens": response.input_tokens,
+                    "output_tokens": response.output_tokens,
+                    "total_tokens": response.total_tokens,
+                },
+            }
+
         preview_state = {
             **preview_input,
             "_xvond_preview": True,
@@ -3606,6 +3675,7 @@ def preview_employee_routine(
             ),
             "_xvond_preview_outputs": deepcopy(data.simulated_outputs),
             "_xvond_preview_event_payloads": deepcopy(data.event_payloads),
+            "_xvond_preview_ai_executor": preview_ai_executor,
         }
 
         result = automation_runtime.execute_step(
