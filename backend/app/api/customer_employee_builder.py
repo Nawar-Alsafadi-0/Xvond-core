@@ -123,6 +123,7 @@ class EmployeeBuilderIntegrationBindRequest(BaseModel):
     execute_endpoint: str | None = Field(default=None, max_length=500)
     availability_endpoint: str | None = Field(default=None, max_length=500)
     cancel_endpoint: str | None = Field(default=None, max_length=500)
+    operations: dict[str, dict] = Field(default_factory=dict)
 
 
 class EmployeeBuilderSetupAnswerRequest(BaseModel):
@@ -2486,6 +2487,33 @@ def rollback_self_service_employee(
         db.close()
 
 
+def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
+    """Validate owner/API-doc supplied operations for a generic connection."""
+    result: dict[str, dict] = {}
+    if not isinstance(value, dict):
+        return result
+    for raw_name, raw in value.items():
+        name = normalize_requirement_key(raw_name)
+        if not name or not isinstance(raw, dict):
+            continue
+        method = str(raw.get("method") or "POST").strip().upper()
+        if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            raise HTTPException(400, f"Unsupported HTTP method for operation {name}")
+        endpoint = _relative_endpoint(raw.get("endpoint"), required=True)
+        try:
+            timeout = float(raw.get("timeout") or 15)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"Invalid timeout for operation {name}")
+        result[name] = {
+            "method": method,
+            "endpoint": endpoint,
+            "timeout": max(1, min(timeout, 30)),
+        }
+        if len(result) >= 20:
+            break
+    return result
+
+
 def _relative_endpoint(value: str | None, *, required: bool = False) -> str | None:
     endpoint = str(value or "").strip()
     if not endpoint:
@@ -2744,6 +2772,10 @@ def bind_self_service_integration(
         operations = integration_packaged_operations(
             integration.integration_type
         )
+        compiled_operations = requirement.get("integration_operations")
+        if isinstance(compiled_operations, dict):
+            operations.update(_bounded_connection_operations(compiled_operations))
+        operations.update(_bounded_connection_operations(data.operations))
         if execute_endpoint:
             operations["execute"] = {"method": "POST", "endpoint": execute_endpoint}
         if availability_endpoint:
