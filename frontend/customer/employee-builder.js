@@ -244,6 +244,11 @@
             && item?.status === "ready"
             && item?.workflow_id
         );
+        const controllableRoutines = graphTriggers.filter(item =>
+            employee.enabled
+            && item?.workflow_id
+            && ["ready", "disabled"].includes(String(item?.status || ""))
+        );
         const manualGraphReady = manualRoutines.length > 0;
         const stages = Array.isArray(journey.stages) ? journey.stages : [];
         if (!stages.length) return "";
@@ -286,6 +291,41 @@
                 <div id="subscription-plans" class="employee-builder-section hidden"></div>
                 <div id="subscription-error" class="error"></div>
                 <div id="prepare-employee-error" class="error"></div>
+                ${controllableRoutines.length ? `
+                    <div id="employee-builder-routines-panel" class="employee-builder-section">
+                        <div class="employee-builder-current-head">
+                            <div>
+                                <h3>Routines</h3>
+                                <p class="muted">Pause one responsibility without turning off the whole employee.</p>
+                            </div>
+                        </div>
+                        <div class="employee-builder-journey-list">
+                            ${controllableRoutines.map(item => {
+                                const enabled = String(item.status || "") === "ready";
+                                const routineId = String(item.routine_id || "primary");
+                                return `
+                                    <div class="note">
+                                        <div class="employee-builder-current-head">
+                                            <div>
+                                                <strong>${escapeHtml(item.routine_name || routineId.replaceAll("_", " "))}</strong>
+                                                <div class="muted">${escapeHtml(item.trigger_type || "manual")} · ${escapeHtml(routineId)}</div>
+                                            </div>
+                                            ${badge(enabled ? "Running" : "Paused", enabled ? "ready" : "neutral")}
+                                        </div>
+                                        <div class="employee-builder-actions">
+                                            <button
+                                                type="button"
+                                                data-routine-toggle="${escapeHtml(encodeURIComponent(routineId))}"
+                                                data-routine-enabled="${enabled ? "false" : "true"}"
+                                            >${enabled ? "Pause routine" : "Resume routine"}</button>
+                                        </div>
+                                        <div class="error" data-routine-error="${escapeHtml(encodeURIComponent(routineId))}"></div>
+                                    </div>
+                                `;
+                            }).join("")}
+                        </div>
+                    </div>
+                ` : ""}
                 ${manualGraphReady ? `
                     <div id="employee-builder-manual-run-panel" class="employee-builder-section">
                         <h3>Run now</h3>
@@ -805,6 +845,31 @@
                         decodeURIComponent(String(button.dataset.builderKey || ""))
                     );
                 } finally {
+                    if (document.body.contains(button)) button.disabled = false;
+                }
+            });
+        });
+
+        document.querySelectorAll("[data-routine-toggle]").forEach(button => {
+            button.addEventListener("click", async () => {
+                if (button.disabled) return;
+                const encodedRoutine = String(button.dataset.routineToggle || "");
+                const routineId = decodeURIComponent(encodedRoutine);
+                const enabled = String(button.dataset.routineEnabled || "false") === "true";
+                const error = document.querySelector(`[data-routine-error="${encodedRoutine}"]`);
+                if (error) error.textContent = "";
+                button.disabled = true;
+                try {
+                    await api(
+                        `/customer/employee-builder/${Number(employee.agent_id)}/routines/${encodeURIComponent(routineId)}`,
+                        {
+                            method: "PUT",
+                            body: JSON.stringify({enabled}),
+                        }
+                    );
+                    await loadEmployeeBuilder();
+                } catch (err) {
+                    if (error) error.textContent = err?.message || "Could not update this routine.";
                     if (document.body.contains(button)) button.disabled = false;
                 }
             });
