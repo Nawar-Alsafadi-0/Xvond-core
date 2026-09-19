@@ -1,7 +1,9 @@
 import pytest
 
 from backend.app.modules.integrations.openapi_contract import (
+    discover_openapi_contract,
     normalize_openapi_document,
+    openapi_discovery_urls,
     parse_openapi_text,
 )
 
@@ -105,3 +107,103 @@ def test_openapi_ignores_dynamic_server_templates():
     document = _document()
     document["servers"] = [{"url": "https://{tenant}.example.com/v1"}]
     assert normalize_openapi_document(document)["base_url"] is None
+
+
+
+def test_openapi_document_tracks_required_query_parameters():
+    contract = normalize_openapi_document({
+        "openapi": "3.0.3",
+        "paths": {
+            "/search": {
+                "get": {
+                    "operationId": "searchItems",
+                    "parameters": [
+                        {"name": "q", "in": "query", "required": True},
+                        {"name": "page", "in": "query", "required": False},
+                    ],
+                }
+            }
+        },
+    })
+    assert contract["operations"]["search_items"]["required_query_params"] == ["q"]
+
+
+def test_openapi_discovery_stays_on_configured_host_and_finds_standard_path(monkeypatch):
+    calls = []
+
+    def fake_http(**kwargs):
+        calls.append(kwargs["url"])
+        if kwargs["url"].endswith("/swagger.json"):
+            return {
+                "status_code": 200,
+                "truncated": False,
+                "response": """
+                {
+                  "openapi": "3.0.3",
+                  "info": {"title": "Discovered API"},
+                  "servers": [{"url": "https://other.example/v1"}],
+                  "paths": {"/health": {"get": {"operationId": "health"}}}
+                }
+                """,
+            }
+        return {"status_code": 404, "truncated": False, "response": "not found"}
+
+    monkeypatch.setattr(
+        "backend.app.modules.integrations.openapi_contract.safe_http_request",
+        fake_http,
+    )
+
+    contract = discover_openapi_contract("https://api.vendor.example/v1")
+    assert contract["discovery_url"] == "https://api.vendor.example/v1/swagger.json"
+    assert contract["base_url"] is None
+    assert set(contract["operations"]) == {"health"}
+    assert calls[:2] == [
+        "https://api.vendor.example/v1/openapi.json",
+        "https://api.vendor.example/v1/swagger.json",
+    ]
+
+
+def test_openapi_discovery_candidates_are_bounded_to_same_https_origin():
+    urls = openapi_discovery_urls("https://api.vendor.example/v1")
+    assert len(urls) <= 10
+    assert urls[0] == "https://api.vendor.example/v1/openapi.json"
+    assert all(url.startswith("https://api.vendor.example/") for url in urls)
+
+    with pytest.raises(ValueError):
+        openapi_discovery_urls("http://api.vendor.example")
+
+
+def test_openapi_discovery_fails_closed_when_no_contract_is_found(monkeypatch):
+    monkeypatch.setattr(
+        "backend.app.modules.integrations.openapi_contract.safe_http_request",
+        lambda **kwargs: {
+            "status_code": 404,
+            "truncated": False,
+            "response": "missing",
+        },
+    )
+    with pytest.raises(ValueError, match="No OpenAPI/Swagger"):
+        discover_openapi_contract("https://api.vendor.example")
+
+
+
+def test_openapi_discovery_rejects_cross_port_execution_base(monkeypatch):
+    def fake_http(**kwargs):
+        return {
+            "status_code": 200,
+            "truncated": False,
+            "response": """
+            {
+              "openapi": "3.0.3",
+              "servers": [{"url": "https://api.vendor.example:444/v1"}],
+              "paths": {"/health": {"get": {"operationId": "health"}}}
+            }
+            """,
+        }
+
+    monkeypatch.setattr(
+        "backend.app.modules.integrations.openapi_contract.safe_http_request",
+        fake_http,
+    )
+    contract = discover_openapi_contract("https://api.vendor.example/v1")
+    assert contract["base_url"] is None
