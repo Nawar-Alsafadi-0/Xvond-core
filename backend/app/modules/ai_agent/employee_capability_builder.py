@@ -365,6 +365,7 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
             "capability_key": key,
             "delivery_mode": "graph" if graph_backed else "legacy_plan",
             "graph_backed": graph_backed,
+            "primitives": primitives,
             # execution_plan is retained only for pre-graph/tiny legacy contracts.
             # New universal employees execute their real work through the
             # compiled execution graph and use this action as a bounded side-effect
