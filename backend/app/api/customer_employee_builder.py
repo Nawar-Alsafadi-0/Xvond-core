@@ -68,6 +68,7 @@ from backend.app.modules.tools.business_models import ActionRequest
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.integrations.catalog import (
     compatible_integration_types,
+    get_integration_definition,
     executable_integration_types,
     integration_packaged_operations,
     integration_requires_operation_endpoints,
@@ -325,10 +326,113 @@ def _record_ai_usage(db, *, company_id: int, agent_id: int, selected, response):
     )
 
 
+def _auto_bind_single_packaged_integrations(
+    db,
+    *,
+    company_id: int,
+    spec: dict,
+) -> tuple[dict, list[str]]:
+    """Bind an unambiguous validated packaged connector without asking twice.
+
+    This deliberately excludes generic/custom APIs and any connector that needs
+    customer-supplied operation endpoints. Multiple matching connections are
+    left untouched so the owner keeps the choice.
+    """
+
+    updated = deepcopy(spec)
+    requirements = [
+        dict(item) if isinstance(item, dict) else item
+        for item in (updated.get("requirements") or [])
+    ]
+    integrations = (
+        db.query(CompanyIntegration)
+        .filter(
+            CompanyIntegration.company_id == company_id,
+            CompanyIntegration.enabled.is_(True),
+        )
+        .order_by(CompanyIntegration.id.asc())
+        .all()
+    )
+    executable = executable_integration_types()
+    bound_keys: list[str] = []
+
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        if str(requirement.get("status") or "").strip().lower() != "connection_required":
+            continue
+        if str(requirement.get("kind") or "").strip().lower() == "channel":
+            continue
+        if requirement.get("integration_id"):
+            continue
+
+        key = normalize_requirement_key(requirement.get("key"))
+        if not key:
+            continue
+        compatible = compatible_integration_types(key)
+        candidates: list[CompanyIntegration] = []
+
+        for integration in integrations:
+            integration_type = str(integration.integration_type or "").strip().lower()
+            definition = get_integration_definition(integration_type) or {}
+            packaged_keys = {
+                normalize_requirement_key(item)
+                for item in (definition.get("requirement_keys") or [])
+                if normalize_requirement_key(item)
+            }
+            if key not in packaged_keys:
+                continue
+            if integration_type not in executable or integration_type not in compatible:
+                continue
+            if integration_requires_operation_endpoints(integration_type):
+                continue
+            plain_config = reveal_config(integration.config) or {}
+            if not integration_validation_ready(plain_config):
+                continue
+            candidates.append(integration)
+
+        if len(candidates) != 1:
+            continue
+
+        integration = candidates[0]
+        integration_type = str(integration.integration_type or "").strip().lower()
+        requirement["integration_id"] = integration.id
+        requirement["integration_type"] = integration_type
+        requirement["integration_operations"] = integration_packaged_operations(
+            integration_type
+        )
+        requirement["fulfillment_mode"] = "external_connection"
+        requirement["validation_required"] = True
+        requirement["requires_connection"] = True
+        requirement["status"] = "xvond_build"
+        requirement["delivery_mode"] = "compose"
+        bound_keys.append(key)
+
+    updated["requirements"] = requirements
+    if bound_keys:
+        bound = set(bound_keys)
+        updated["setup_required"] = [
+            item
+            for item in (updated.get("setup_required") or [])
+            if normalize_requirement_key(item) not in bound
+        ]
+    return updated, bound_keys
+
+
 def _store_provisioned_spec(
     db, *, company_id: int, agent: AIAgent, config: AgentConfig,
     settings: dict, builder: dict, spec: dict,
 ) -> dict:
+    spec, auto_bound = _auto_bind_single_packaged_integrations(
+        db,
+        company_id=company_id,
+        spec=spec,
+    )
+    if auto_bound:
+        # Executable behavior changed, so evidence from a prior preview cannot
+        # authorize launch of the newly connected build.
+        builder.pop("last_tested_at", None)
+        builder.pop("last_tested_compiled_at", None)
     compiled_spec, delivery = provision_compiled_capabilities(db, agent_id=agent.id, spec=spec)
     setup_answers = builder.get("setup_answers") or {}
     if isinstance(setup_answers, dict):
@@ -645,6 +749,11 @@ def _compile_staged_employee_spec(
             )
             spec = parse_compiler_response(response.text, job_brief=job_brief)
             spec = _carry_forward_requirement_bindings(previous_spec, spec)
+            spec, _auto_bound = _auto_bind_single_packaged_integrations(
+                db,
+                company_id=company_id,
+                spec=spec,
+            )
             _record_ai_usage(
                 db,
                 company_id=company_id,
@@ -1989,6 +2098,130 @@ def _relative_endpoint(value: str | None, *, required: bool = False) -> str | No
     if endpoint.startswith("//") or endpoint.lower().startswith(("http://", "https://")):
         raise HTTPException(400, "Integration operation endpoints must be relative paths")
     return "/" + endpoint.lstrip("/")
+
+
+@router.post("/{agent_id}/connections/auto-resolve")
+def auto_resolve_self_service_integrations(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Reuse unambiguous validated packaged connections after they are added."""
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Automatic connection resolution is available only for Self-Service employees",
+            )
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        if agent.enabled and pending is None:
+            return {
+                "status": "unchanged",
+                "agent_id": agent.id,
+                "bound_requirements": [],
+                "live_employee_unchanged": True,
+            }
+
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
+        if not isinstance(compiled_spec, dict):
+            return {
+                "status": "unchanged",
+                "agent_id": agent.id,
+                "bound_requirements": [],
+                "live_employee_unchanged": bool(agent.enabled),
+            }
+
+        resolved_spec, bound = _auto_bind_single_packaged_integrations(
+            db,
+            company_id=company.id,
+            spec=compiled_spec,
+        )
+        if not bound:
+            return {
+                "status": "unchanged",
+                "agent_id": agent.id,
+                "bound_requirements": [],
+                "live_employee_unchanged": bool(agent.enabled),
+            }
+
+        if isinstance(pending, dict):
+            pending["compiled_spec"] = resolved_spec
+            pending["status"] = "built"
+            pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            pending.pop("last_tested_at", None)
+            pending.pop("last_tested_compiled_at", None)
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": "resolved_pending_revision",
+                "agent_id": agent.id,
+                "bound_requirements": bound,
+                "live_employee_unchanged": True,
+            }
+
+        resolved_spec, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=agent.id,
+            spec=resolved_spec,
+        )
+        builder["compiled_spec"] = resolved_spec
+        builder["delivery"] = delivery
+        builder["missing_information"] = list(
+            resolved_spec.get("setup_required") or []
+        )
+        builder.pop("last_tested_at", None)
+        builder.pop("last_tested_compiled_at", None)
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        agent.system_prompt = build_compiled_employee_system_prompt(
+            owner_name=company.name,
+            spec=resolved_spec,
+        )
+        db.commit()
+        return {
+            "status": "resolved",
+            "agent_id": agent.id,
+            "bound_requirements": bound,
+            "live_employee_unchanged": False,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 @router.post("/{agent_id}/connections/{requirement_key}")
