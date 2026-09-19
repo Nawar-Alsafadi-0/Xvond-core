@@ -528,11 +528,23 @@ def _ground_execution_graph(value: Any, *, job_brief: str) -> dict:
                 else {}
             )
 
-            if node_type in {"wait", "await_event"}:
+            if node_type == "wait":
                 source_text = _bounded_text(params.get("source_text"), limit=500)
                 if not source_text or source_text.casefold() not in source:
                     continue
                 params["source_text"] = source_text
+                node["params"] = params
+            elif node_type == "await_event":
+                source_text = _bounded_text(params.get("source_text"), limit=500)
+                event_name = _bounded_text(params.get("event"), limit=120).lower()
+                grounded = bool(
+                    (source_text and source_text.casefold() in source)
+                    or (event_name and event_name.casefold() in source)
+                )
+                if not grounded:
+                    continue
+                if source_text:
+                    params["source_text"] = source_text
                 node["params"] = params
             elif node_type == "foreach":
                 nested = params.get("graph")
