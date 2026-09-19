@@ -993,6 +993,7 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
     company = db.query(Company).filter(Company.id == company_id).first()
     if is_self_service_company(company):
         requested_channels = communication_channels(requested_channels)
+    connection_context = _compiler_connection_context(db, company_id=company_id)
 
     selections = runtime_selections(
         db,
@@ -1015,6 +1016,7 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
                 user_message=build_compiler_user_message(
                     job_brief=job_brief,
                     requested_channels=requested_channels,
+                    available_connections=connection_context,
                 ),
                 model=candidate.model,
                 tools=None,
@@ -1122,6 +1124,7 @@ def _compile_staged_employee_spec(
     requested_channels: list[str],
     previous_spec: dict | None,
 ) -> dict:
+    connection_context = _compiler_connection_context(db, company_id=company_id)
     selections = runtime_selections(
         db,
         company_id,
@@ -1140,6 +1143,7 @@ def _compile_staged_employee_spec(
                 user_message=build_compiler_user_message(
                     job_brief=job_brief,
                     requested_channels=requested_channels,
+                    available_connections=connection_context,
                 ),
                 model=candidate.model,
                 tools=None,
