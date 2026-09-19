@@ -305,13 +305,7 @@
       "position": [
         1010,
         650
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "xvond-workflow-registry-db",
-          "name": "Xvond Workflow Registry DB"
-        }
-      }
+      ]
     },
     {
       "parameters": {
@@ -339,13 +333,7 @@
       "position": [
         1010,
         800
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "xvond-workflow-registry-db",
-          "name": "Xvond Workflow Registry DB"
-        }
-      }
+      ]
     },
     {
       "parameters": {
