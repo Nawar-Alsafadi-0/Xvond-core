@@ -527,6 +527,17 @@ class AutomationRuntime:
                         run_id=run_id,
                         step_index=index,
                     )
+                except AutomationEventRequired as event_wait:
+                    _append_step_span(
+                        trace,
+                        index=index,
+                        step=step,
+                        started_at=span_started_at,
+                        started_perf=span_started_perf,
+                        status="waiting_event",
+                        node_id=event_wait.node_id,
+                    )
+                    raise
                 except AutomationWaitRequired as wait:
                     _append_step_span(
                         trace,
@@ -581,6 +592,7 @@ class AutomationRuntime:
 
             run.status = "success"
             run.resume_at = None
+            run.resume_event_name = None
             run.finished_at = _utcnow_naive()
             trace["finished_at"] = _trace_iso(run.finished_at)
             trace["status"] = "success"
@@ -615,6 +627,7 @@ class AutomationRuntime:
             db.flush()
             run.status = "waiting_approval"
             run.resume_at = None
+            run.resume_event_name = None
             trace["status"] = "waiting_approval"
             run.output_data = {
                 "state": state,
@@ -641,6 +654,16 @@ class AutomationRuntime:
             db.commit()
             db.refresh(run)
             return run
+        except AutomationEventRequired as event_wait:
+            return _store_event_checkpoint(
+                db,
+                run=run,
+                workflow=workflow,
+                event_wait=event_wait,
+                state=state,
+                step_results=step_results,
+                trace=trace,
+            )
         except AutomationWaitRequired as wait:
             return _store_wait_checkpoint(
                 db,
