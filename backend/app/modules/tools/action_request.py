@@ -22,6 +22,10 @@ from backend.app.modules.integrations.email_imap import (
     EmailReadConnectorError,
     read_imap_messages,
 )
+from backend.app.modules.integrations.google_calendar import (
+    CalendarConnectorError,
+    execute_google_calendar_operation,
+)
 from backend.app.modules.automation.event_outbox import enqueue_automation_event
 from backend.app.modules.tools.base import AgentTool, ToolResult
 from backend.app.modules.tools.business_models import ActionRequest, HumanHandoff
@@ -599,6 +603,26 @@ def _integration_call(
             payload=payload,
             operation=operation,
         )
+
+    if integration_type == "calendar":
+        try:
+            result = execute_google_calendar_operation(
+                config=config,
+                payload=payload,
+                operation=operation,
+                idempotency_key=idempotency_key,
+            )
+        except CalendarConnectorError as exc:
+            return ToolResult(
+                success=False,
+                error=str(exc),
+                data={
+                    "reconciliation_required": (
+                        "outcome is unknown" in str(exc).lower()
+                    ),
+                },
+            )
+        return ToolResult(success=True, data=result)
 
     if integration_type == "webhook":
         url = str(config.get("url") or "").strip()

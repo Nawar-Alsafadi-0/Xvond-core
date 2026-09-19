@@ -88,6 +88,76 @@ def test_instagram_publish_validation_uses_bearer_token_without_exposing_it_in_u
     assert captured["headers"]["Authorization"] == "Bearer secret-token"
 
 
+
+def test_google_calendar_validation_uses_packaged_connector(monkeypatch):
+    captured = {}
+
+    def fake_validate(config, *, timeout):
+        captured["config"] = config
+        captured["timeout"] = timeout
+        return {
+            "validated": True,
+            "mode": "google_calendar_live_read_only_request",
+            "status_code": 200,
+            "calendar_id": "primary",
+            "timezone": "Asia/Muscat",
+        }
+
+    monkeypatch.setattr(api, "validate_google_calendar_connection", fake_validate)
+
+    result = api._validate_live_connection(
+        _integration(
+            "calendar",
+            {
+                "provider": "google",
+                "calendar_id": "primary",
+                "timezone": "Asia/Muscat",
+                "access_token": "secret-token",
+            },
+        )
+    )
+
+    assert result["validated"] is True
+    assert result["mode"] == "google_calendar_live_read_only_request"
+    assert captured["timeout"] == 10.0
+    assert captured["config"]["access_token"] == "secret-token"
+
+
+def test_google_calendar_secrets_are_not_exposed_in_customer_config():
+    item = _integration(
+        "calendar",
+        {
+            "provider": "google",
+            "calendar_id": "primary",
+            "timezone": "Asia/Muscat",
+            "access_token": "access-secret",
+            "refresh_token": "refresh-secret",
+            "client_id": "public-client-id",
+            "client_secret": "client-secret",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-19T00:00:00Z",
+            },
+        },
+    )
+
+    rendered = api._serialize_integration(item)
+
+    assert rendered["config"]["provider"] == "google"
+    assert rendered["config"]["calendar_id"] == "primary"
+    assert rendered["config"]["timezone"] == "Asia/Muscat"
+    assert rendered["config"]["client_id"] == "public-client-id"
+    assert rendered["execution_adapter"] == "google_calendar"
+    assert rendered["requirement_keys"] == ["booking"]
+    assert rendered["allow_generic_alternatives"] is True
+    assert rendered["operation_endpoints"] is False
+    assert "access_token" not in rendered["config"]
+    assert "refresh_token" not in rendered["config"]
+    assert "client_secret" not in rendered["config"]
+    assert {"access_token", "refresh_token", "client_secret"} <= set(
+        rendered["configured_secret_fields"]
+    )
+
 def test_validation_endpoint_must_be_relative(monkeypatch):
     monkeypatch.setattr(api, "validate_public_http_url", lambda url: url)
 

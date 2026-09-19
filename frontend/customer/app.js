@@ -368,18 +368,35 @@ async function renderIntegrations() {
             const definition = definitions.find(item => item.type === type?.value) || definitions[0];
             const host = document.getElementById("customer-integration-fields");
             if (!host) return;
-            host.innerHTML = (definition?.config_fields || []).map(field => `
-                <label>
-                    ${safe(field.label || field.name)}
-                    <input
-                        data-integration-config="${safe(field.name)}"
-                        type="${field.secret ? "password" : "text"}"
-                        autocomplete="off"
-                        ${field.required ? "required" : ""}
-                        placeholder="${field.secret ? "Stored encrypted" : safe(field.label || field.name)}"
-                    >
-                </label>
-            `).join("");
+            host.innerHTML = (definition?.config_fields || []).map(field => {
+                const choices = Array.isArray(field.choices) ? field.choices : [];
+                const defaultValue = field.default == null ? "" : String(field.default);
+                const control = choices.length
+                    ? `<select
+                            data-integration-config="${safe(field.name)}"
+                            ${field.required ? "required" : ""}
+                        >
+                            ${choices.map(value => `
+                                <option value="${safe(value)}" ${String(value) === defaultValue ? "selected" : ""}>
+                                    ${safe(value)}
+                                </option>
+                            `).join("")}
+                        </select>`
+                    : `<input
+                            data-integration-config="${safe(field.name)}"
+                            type="${field.secret ? "password" : "text"}"
+                            autocomplete="off"
+                            ${field.required ? "required" : ""}
+                            ${!field.secret && defaultValue ? `value="${safe(defaultValue)}"` : ""}
+                            placeholder="${field.secret ? "Stored encrypted" : safe(field.label || field.name)}"
+                        >`;
+                return `
+                    <label>
+                        ${safe(field.label || field.name)}
+                        ${control}
+                    </label>
+                `;
+            }).join("");
         };
         type?.addEventListener("change", renderFields);
         renderFields();

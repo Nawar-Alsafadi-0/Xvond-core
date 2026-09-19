@@ -196,24 +196,68 @@ INTEGRATION_CATALOG = {
     },
 
     "calendar": {
-        "name": "Calendar",
-        "description": "External booking/calendar system",
+        "name": "Google Calendar",
+        "execution_adapter": "google_calendar",
+        "requirement_keys": ["booking"],
+        "generic_requirements": False,
+        "allow_generic_alternatives": True,
+        "operation_endpoints": False,
+        "packaged_operations": {
+            "availability": {"adapter": "google_calendar"},
+            "execute": {"adapter": "google_calendar"},
+            "cancel": {"adapter": "google_calendar"},
+        },
+        "description": "Check availability and manage bookings in Google Calendar",
         "config_fields": [
             {
                 "name": "provider",
                 "label": "Provider",
-                "required": True,
+                "required": False,
                 "secret": False,
+                "default": "google",
+                "choices": ["google"],
             },
             {
                 "name": "calendar_id",
                 "label": "Calendar ID",
                 "required": False,
                 "secret": False,
+                "default": "primary",
+            },
+            {
+                "name": "timezone",
+                "label": "Calendar Timezone",
+                "required": True,
+                "secret": False,
+            },
+            {
+                "name": "slot_minutes",
+                "label": "Booking Duration (minutes)",
+                "required": False,
+                "secret": False,
+                "default": 30,
             },
             {
                 "name": "access_token",
-                "label": "Access Token",
+                "label": "Google OAuth Access Token",
+                "required": False,
+                "secret": True,
+            },
+            {
+                "name": "refresh_token",
+                "label": "Google OAuth Refresh Token",
+                "required": False,
+                "secret": True,
+            },
+            {
+                "name": "client_id",
+                "label": "Google OAuth Client ID",
+                "required": False,
+                "secret": False,
+            },
+            {
+                "name": "client_secret",
+                "label": "Google OAuth Client Secret",
                 "required": False,
                 "secret": True,
             },
@@ -313,13 +357,31 @@ def compatible_integration_types(requirement_key: str) -> set[str]:
         }
         and str(definition.get("execution_adapter") or "").strip()
     }
-    if packaged:
-        return packaged
-    return {
+    generic = {
         integration_type
         for integration_type, definition in INTEGRATION_CATALOG.items()
         if definition.get("generic_requirements") is True
         and str(definition.get("execution_adapter") or "").strip()
+    }
+    if packaged:
+        allow_generic = any(
+            definition.get("allow_generic_alternatives") is True
+            for integration_type, definition in INTEGRATION_CATALOG.items()
+            if integration_type in packaged
+        )
+        return packaged | generic if allow_generic else packaged
+    return generic
+
+
+def integration_packaged_operations(integration_type: str) -> dict:
+    definition = get_integration_definition(str(integration_type or "").strip().lower())
+    operations = definition.get("packaged_operations") if definition else None
+    if not isinstance(operations, dict):
+        return {}
+    return {
+        str(key): dict(value)
+        for key, value in operations.items()
+        if isinstance(value, dict)
     }
 
 
@@ -346,9 +408,6 @@ def validate_integration_config(
 
     for field in definition["config_fields"]:
 
-        if not field.get("required"):
-            continue
-
         name = field["name"]
 
         value = config.get(
@@ -357,13 +416,36 @@ def validate_integration_config(
         )
 
         if value is None or str(value).strip() == "":
-            missing.append(name)
+            if field.get("required"):
+                missing.append(name)
+            continue
+
+        choices = field.get("choices")
+        if choices:
+            normalized = str(value).strip().lower()
+            allowed = {str(item).strip().lower() for item in choices}
+            if normalized not in allowed:
+                raise ValueError(
+                    f"Invalid integration configuration for {name}: "
+                    + ", ".join(sorted(allowed))
+                )
 
     if missing:
         raise ValueError(
             "Missing integration configuration: "
             + ", ".join(missing)
         )
+
+    if str(integration_type or "").strip().lower() == "calendar":
+        access_token = str(config.get("access_token") or "").strip()
+        refresh_ready = all(
+            str(config.get(field) or "").strip()
+            for field in ("refresh_token", "client_id", "client_secret")
+        )
+        if not access_token and not refresh_ready:
+            raise ValueError(
+                "Google Calendar requires an access token or OAuth refresh credentials"
+            )
 
     return True
 

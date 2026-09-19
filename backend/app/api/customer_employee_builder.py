@@ -69,6 +69,7 @@ from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.integrations.catalog import (
     compatible_integration_types,
     executable_integration_types,
+    integration_packaged_operations,
     integration_requires_operation_endpoints,
     integration_validation_ready,
 )
@@ -2100,7 +2101,7 @@ def bind_self_service_integration(
         availability_endpoint = _relative_endpoint(data.availability_endpoint)
         cancel_endpoint = _relative_endpoint(data.cancel_endpoint)
 
-        if key == "booking" and integration.integration_type != "webhook":
+        if key == "booking" and execute_required:
             if not availability_endpoint:
                 raise HTTPException(
                     400,
@@ -2112,7 +2113,9 @@ def bind_self_service_integration(
                     "Booking systems need a booking/create endpoint",
                 )
 
-        operations = {}
+        operations = integration_packaged_operations(
+            integration.integration_type
+        )
         if execute_endpoint:
             operations["execute"] = {"method": "POST", "endpoint": execute_endpoint}
         if availability_endpoint:

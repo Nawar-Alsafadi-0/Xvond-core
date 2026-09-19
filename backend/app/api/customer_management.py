@@ -48,6 +48,10 @@ from backend.app.modules.integrations.email_imap import (
     EmailReadConnectorError,
     validate_imap_connection,
 )
+from backend.app.modules.integrations.google_calendar import (
+    CalendarConnectorError,
+    validate_google_calendar_connection,
+)
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.audit.service import audit_service
@@ -90,6 +94,12 @@ def _validate_live_connection(item: CompanyIntegration) -> dict:
         try:
             return validate_smtp_connection(config, timeout=10.0)
         except EmailConnectorError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    if integration_type == "calendar":
+        try:
+            return validate_google_calendar_connection(config, timeout=10.0)
+        except CalendarConnectorError as exc:
             raise HTTPException(409, str(exc)) from exc
 
     if integration_type == "instagram_publish":
@@ -394,6 +404,9 @@ def _serialize_integration(item: CompanyIntegration) -> dict:
         "execution_adapter": definition.get("execution_adapter"),
         "requirement_keys": list(definition.get("requirement_keys") or []),
         "generic_requirements": bool(definition.get("generic_requirements") is True),
+        "allow_generic_alternatives": bool(
+            definition.get("allow_generic_alternatives") is True
+        ),
         "operation_endpoints": bool(definition.get("operation_endpoints") is True),
         "config": public_config(item.config),
         "configured_secret_fields": configured_secret_fields(item.config),
