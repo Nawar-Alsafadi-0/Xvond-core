@@ -254,6 +254,8 @@ Recurring/background Self-Service employees use the production automation schedu
 
 The generic execution graph also supports durable in-job waits. A `wait` node may pause the same AutomationRun for a bounded relative duration or until an explicit timezone-aware timestamp. Xvond persists the checkpoint and `resume_at`, the scheduler resumes the same run when due, and previously completed graph work is not replayed. This is a general runtime primitive for any employee; it is not tied to follow-up, content, monitoring, sales or another named use case.
 
+The graph can also pause on a future correlated event with `await_event`. Xvond persists the event name and match contract on the same AutomationRun; the event dispatcher resumes only matching waiting runs, injects the received event payload into that node's output, and continues without replaying earlier graph work. Use a trigger event when an event starts a job; use `await_event` when an already-running job must wait for a later event before continuing.
+
 Release/runtime truth:
 
 - scheduler runs the same reviewed application image as the API and WhatsApp worker
