@@ -927,8 +927,64 @@ def test_compiler_preserves_generic_durable_wait_node():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 7
+    assert spec["version"] == 8
     assert [node["type"] for node in nodes] == ["transform", "wait", "ai"]
     assert nodes[1]["params"]["duration"] == 2
     assert nodes[1]["params"]["unit"] == "days"
     assert nodes[1]["params"]["source_text"] == "انتظر يومين"
+
+
+
+def test_compiler_preserves_generic_correlated_event_wait():
+    job_brief = "ابدأ المهمة وانتظر حدث external.result.ready لنفس job_id ثم كمل"
+    response = """{
+      "role":"Event-driven worker",
+      "scope":"business",
+      "summary":"Start work and continue when the correlated result arrives.",
+      "tasks":[{"name":"Process","description":"Wait for result","trigger":"manual"}],
+      "requirements":[],
+      "permissions":[],
+      "execution_graph":{
+        "version":1,
+        "trigger":{"type":"manual"},
+        "nodes":[
+          {
+            "id":"start",
+            "type":"transform",
+            "depends_on":[],
+            "params":{"values":{"job_id":"$input.job_id"}}
+          },
+          {
+            "id":"wait_result",
+            "type":"await_event",
+            "depends_on":["start"],
+            "params":{
+              "event":"external.result.ready",
+              "match":{"job_id":"$nodes.start.job_id"}
+            }
+          },
+          {
+            "id":"continue",
+            "type":"ai",
+            "depends_on":["wait_result"],
+            "params":{
+              "prompt":"Continue from the received result.",
+              "context":"$nodes.wait_result.payload"
+            }
+          }
+        ]
+      },
+      "setup_questions":[]
+    }"""
+
+    spec = parse_compiler_response(response, job_brief=job_brief)
+    nodes = spec["execution_graph"]["nodes"]
+
+    assert spec["version"] == 8
+    assert [node["type"] for node in nodes] == [
+        "transform",
+        "await_event",
+        "ai",
+    ]
+    assert nodes[1]["params"]["event"] == "external.result.ready"
+    assert nodes[1]["params"]["match"]["job_id"] == "$nodes.start.job_id"

@@ -2821,3 +2821,193 @@ def test_nested_foreach_wait_resumes_without_replaying_completed_work(monkeypatc
         assert each["count"] == 2
 
     engine.dispose()
+
+
+
+def test_await_event_contract_supports_generic_correlation():
+    assert graph_contract_errors(
+        {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "wait_for_result",
+                    "type": "await_event",
+                    "depends_on": [],
+                    "params": {
+                        "event": "external.result.ready",
+                        "match": {"job_id": "$input.job_id"},
+                    },
+                }
+            ],
+        }
+    ) == []
+
+    errors = graph_contract_errors(
+        {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "bad_wait",
+                    "type": "await_event",
+                    "depends_on": [],
+                    "params": {"event": ""},
+                }
+            ],
+        }
+    )
+    assert any("valid event name" in item for item in errors)
+
+
+def test_correlated_event_resumes_same_run_without_replaying_prior_work(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = lambda: Session(engine, autoflush=False)
+    calls = {"fetch": 0}
+
+    monkeypatch.setattr(event_dispatch_module, "SessionLocal", factory)
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_request(**kwargs):
+        calls["fetch"] += 1
+        return {
+            "status_code": 200,
+            "response": '{"submitted":true}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+
+    with factory() as db:
+        db.add(
+            Company(
+                id=1,
+                name="Event Wait",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Event-driven worker",
+                system_prompt="Continue after a correlated event.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Correlated event continuation",
+            trigger_type="manual",
+            trigger_config={"_xvond_agent_id": 1},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "submit",
+                                "type": "http_get_json",
+                                "depends_on": [],
+                                "params": {"url": "https://example.com/start"},
+                            },
+                            {
+                                "id": "await_result",
+                                "type": "await_event",
+                                "depends_on": ["submit"],
+                                "params": {
+                                    "event": "external.result.ready",
+                                    "match": {"job_id": "$input.job_id"},
+                                },
+                            },
+                            {
+                                "id": "final",
+                                "type": "transform",
+                                "depends_on": ["await_result"],
+                                "params": {
+                                    "values": {
+                                        "status": "$nodes.await_result.payload.status"
+                                    }
+                                },
+                            },
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        waiting = automation_runtime_module.automation_runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={
+                "_xvond_execution_key": "event-wait-test",
+                "job_id": "job-123",
+            },
+        )
+        run_id = waiting.id
+        assert waiting.status == "waiting_event"
+        assert waiting.resume_event_name == "external.result.ready"
+        assert waiting.output_data["event_wait"]["match"] == {"job_id": "job-123"}
+        assert calls["fetch"] == 1
+
+    unrelated = event_dispatch_module.dispatch_automation_event(
+        company_id=1,
+        event_name="external.result.ready",
+        event_id="evt-unrelated",
+        payload={"job_id": "job-999", "status": "done"},
+    )
+    assert unrelated["resumed_waits"] == []
+
+    with factory() as db:
+        still_waiting = db.query(AutomationRun).filter(AutomationRun.id == run_id).one()
+        assert still_waiting.status == "waiting_event"
+
+    matched = event_dispatch_module.dispatch_automation_event(
+        company_id=1,
+        event_name="external.result.ready",
+        event_id="evt-matched",
+        payload={"job_id": "job-123", "status": "done"},
+    )
+
+    assert matched["resumed_waits"][0]["run_id"] == run_id
+    assert matched["resumed_waits"][0]["status"] == "success"
+    assert calls["fetch"] == 1
+
+    with factory() as db:
+        finished = db.query(AutomationRun).filter(AutomationRun.id == run_id).one()
+        assert finished.status == "success"
+        assert finished.resume_event_name is None
+        outputs = finished.output_data["steps"][-1]["result"]["graph_outputs"]
+        assert outputs["await_result"]["event_id"] == "evt-matched"
+        assert outputs["await_result"]["payload"]["status"] == "done"
+        assert outputs["final"]["status"] == "done"
+
+    engine.dispose()

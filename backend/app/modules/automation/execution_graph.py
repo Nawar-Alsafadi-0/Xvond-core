@@ -23,6 +23,7 @@ ALLOWED_GRAPH_NODE_TYPES = {
     "state_write",
     "state_delete",
     "wait",
+    "await_event",
 }
 
 GRAPH_COMPARE_OPERATORS = {"eq", "neq", "gt", "gte", "lt", "lte", "contains", "in"}
@@ -279,6 +280,28 @@ def graph_contract_errors(
         elif node_type == "notify":
             if not str(params.get("message") or label).strip():
                 errors.append(f"{node_id}: notify node requires message or label")
+
+        elif node_type == "await_event":
+            event_name = str(params.get("event") or "").strip().lower()
+            if not event_name or len(event_name) > 120:
+                errors.append(f"{node_id}: await_event requires a valid event name")
+            match = params.get("match")
+            if match is not None and not isinstance(match, dict):
+                errors.append(f"{node_id}: await_event match must be an object")
+            elif isinstance(match, dict):
+                if len(match) > 20:
+                    errors.append(f"{node_id}: await_event match exceeds 20 fields")
+                for raw_path, expected in match.items():
+                    path = str(raw_path or "").strip()
+                    if not path or len(path) > 200:
+                        errors.append(
+                            f"{node_id}: await_event match field is invalid"
+                        )
+                        continue
+                    if not isinstance(expected, (str, int, float, bool)) and expected is not None:
+                        errors.append(
+                            f"{node_id}: await_event match values must be scalar"
+                        )
 
         elif node_type == "wait":
             has_until = bool(str(params.get("until") or "").strip())
