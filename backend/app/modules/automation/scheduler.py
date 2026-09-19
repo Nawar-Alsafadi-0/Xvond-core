@@ -287,10 +287,20 @@ def run_due_workflow(workflow_id: int, *, now: datetime | None = None) -> dict:
             }
 
         current = now or _utcnow()
+        schedule_started_at = workflow.created_at
+        resumed_at = str(trigger_config.get("_xvond_resumed_at") or "").strip()
+        if resumed_at:
+            try:
+                schedule_started_at = datetime.fromisoformat(
+                    resumed_at.replace("Z", "+00:00")
+                )
+            except ValueError:
+                schedule_started_at = workflow.created_at
+
         slot = latest_due_slot(
             schedule,
             now=current,
-            created_at=workflow.created_at,
+            created_at=schedule_started_at,
         )
         if slot is None:
             db.rollback()
