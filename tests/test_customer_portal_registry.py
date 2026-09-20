@@ -17,6 +17,7 @@ def test_ai_agents_portal_is_capability_aware():
         "dashboard",
         "business-profile",
         "agents",
+        "channels",
         "chat",
         "usage",
         "conversations",
@@ -29,6 +30,7 @@ def test_ai_agents_portal_is_capability_aware():
     assert "employee-builder" not in _ids(basic)
     assert next(item for item in basic if item["id"] == "business-profile")["group"] == "Company"
     assert next(item for item in basic if item["id"] == "agents")["group"] == "AI Workforce"
+    assert next(item for item in basic if item["id"] == "channels")["loader"] == "channels"
     assert next(item for item in basic if item["id"] == "conversations")["group"] == "Customer Operations"
     assert next(item for item in basic if item["id"] == "conversations")["label"] == "Inbox"
     assert next(item for item in basic if item["id"] == "customers")["loader"] == "customers"
@@ -44,6 +46,7 @@ def test_ai_agents_portal_is_capability_aware():
         "dashboard",
         "business-profile",
         "agents",
+        "channels",
         "chat",
         "usage",
         "conversations",
