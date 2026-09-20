@@ -74,6 +74,37 @@ def sanitize_json_contract(value: Any, *, _depth: int = 0) -> dict:
     return result
 
 
+def _shape_free_json(value: Any, *, path: str, _depth: int = 0) -> Any:
+    if _depth > MAX_JSON_CONTRACT_DEPTH:
+        raise ValueError(f"{path} exceeds maximum JSON depth")
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        if len(value) > MAX_JSON_CONTRACT_ITEMS:
+            raise ValueError(
+                f"{path} accepts at most {MAX_JSON_CONTRACT_ITEMS} items"
+            )
+        return [
+            _shape_free_json(item, path=f"{path}[{index}]", _depth=_depth + 1)
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, dict):
+        if len(value) > MAX_JSON_CONTRACT_FIELDS:
+            raise ValueError(
+                f"{path} accepts at most {MAX_JSON_CONTRACT_FIELDS} fields"
+            )
+        return {
+            str(key): _shape_free_json(
+                item,
+                path=f"{path}.{key}",
+                _depth=_depth + 1,
+            )
+            for key, item in value.items()
+            if isinstance(key, str) and len(key) <= 64
+        }
+    raise ValueError(f"{path} contains an unsupported JSON value")
+
+
 def shape_json_value(value: Any, contract: dict, *, path: str = "$") -> Any:
     """Validate and shape a JSON value using the bounded declarative contract."""
     contract = sanitize_json_contract(contract)
@@ -92,7 +123,7 @@ def shape_json_value(value: Any, contract: dict, *, path: str = "$") -> Any:
                 if key in value
             }
             if properties
-            else dict(value)
+            else _shape_free_json(value, path=path)
         )
         missing = [
             key
