@@ -432,7 +432,7 @@ Highest-priority remaining external/product work:
 4. Re-activate Tap Payments, configure the live Tap key/Merchant ID and webhook/redirect paths, run sandbox then one real `CAPTURED` Self-Service charge, and confirm whether Save Card/recurring capability is enabled before turning on automatic renewals.
 5. Run the final Self-Service market gate for signup -> Job Brief -> Smart Intake -> plan/payment -> build -> setup -> launch -> conversation/action -> handoff/resume on the exact channels being sold.
 6. Run one Managed-customer market gate through Xvond Admin to prove operator-built and Self-Service employees converge on the same runtime without sharing lifecycle UX.
-7. After those external gates pass, the reviewed release can be truthfully exposed as the public/global Xvond AI Employee launch. Microsoft Teams now has a packaged Bot Framework binding. Email has a Mailgun packaged binding; SMS has a Twilio packaged binding; Slack and Custom/API also have packaged source-controlled bindings. All managed providers still require real tenant provisioning and external acceptance before sale. All still require real external acceptance before sale.
+7. After those external gates pass, the reviewed release can be truthfully exposed as the public/global Xvond AI Employee launch. Microsoft Teams now has a packaged Bot Framework binding. Email has a Mailgun packaged binding; SMS has a Twilio packaged binding; Slack and Custom/API also have packaged source-controlled bindings. All managed providers still require real tenant provisioning and external acceptance before sale.
 
 
 ## Branch model
