@@ -420,6 +420,7 @@ def test_expired_generic_oauth_refreshes_before_business_action(
     connected_database,
     monkeypatch,
 ):
+    monkeypatch.setattr(action_runtime, "validate_public_http_url", lambda url: url)
     factory = connected_database
     with factory() as db:
         integration = db.get(CompanyIntegration, 11)
@@ -568,6 +569,7 @@ def test_expired_client_credentials_oauth_reacquires_token_before_action(
     connected_database,
     monkeypatch,
 ):
+    monkeypatch.setattr(action_runtime, "validate_public_http_url", lambda url: url)
     factory = connected_database
     with factory() as db:
         integration = db.get(CompanyIntegration, 11)
