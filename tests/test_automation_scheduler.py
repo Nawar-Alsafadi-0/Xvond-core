@@ -4359,3 +4359,126 @@ def test_automatic_safe_retry_stops_after_bounded_attempts(monkeypatch):
 
     engine.dispose()
 
+def test_graph_runtime_repeat_passes_previous_result_and_stops(monkeypatch):
+    seen = []
+    runtime = automation_runtime_module.AutomationRuntime()
+    original = runtime.execute_step
+
+    def dispatch(db, company_id, step, state, *, run_id, step_index):
+        if step.get("type") == "graph":
+            return original(
+                db, company_id, step, state,
+                run_id=run_id, step_index=step_index,
+            )
+        if step.get("type") == "scheduled_action":
+            cursor = (step.get("arguments") or {}).get("cursor")
+            seen.append(cursor)
+            next_cursor = None if cursor == 2 else cursor + 1
+            return {"cursor": cursor, "next": next_cursor}
+        raise AssertionError(step.get("type"))
+
+    monkeypatch.setattr(runtime, "execute_step", dispatch)
+
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 1,
+            "graph": {
+                "version": 1,
+                "nodes": [{
+                    "id": "pages",
+                    "type": "repeat",
+                    "params": {
+                        "max_iterations": 5,
+                        "initial": {"next": 0},
+                        "until": {
+                            "path": "graph_last.next",
+                            "operator": "eq",
+                            "value": None,
+                        },
+                        "graph": {
+                            "version": 1,
+                            "nodes": [{
+                                "id": "fetch",
+                                "type": "action",
+                                "params": {
+                                    "action_type": "list_records",
+                                    "arguments": {"cursor": "$previous.next"},
+                                },
+                            }],
+                        },
+                    },
+                }],
+            },
+        },
+        state={"_xvond_execution_key": "repeat-pagination"},
+        run_id=1,
+        step_index=0,
+    )
+
+    repeat = result["graph_outputs"]["pages"]
+    assert seen == [0, 1, 2]
+    assert repeat["count"] == 3
+    assert repeat["stopped"] is True
+    assert repeat["limit_reached"] is False
+    assert repeat["last"]["graph_last"]["next"] is None
+
+
+def test_graph_runtime_repeat_reports_limit_reached(monkeypatch):
+    runtime = automation_runtime_module.AutomationRuntime()
+    original = runtime.execute_step
+
+    def dispatch(db, company_id, step, state, *, run_id, step_index):
+        if step.get("type") == "graph":
+            return original(
+                db, company_id, step, state,
+                run_id=run_id, step_index=step_index,
+            )
+        if step.get("type") == "scheduled_action":
+            return {"done": False}
+        raise AssertionError(step.get("type"))
+
+    monkeypatch.setattr(runtime, "execute_step", dispatch)
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 1,
+            "graph": {
+                "version": 1,
+                "nodes": [{
+                    "id": "bounded",
+                    "type": "repeat",
+                    "params": {
+                        "max_iterations": 2,
+                        "until": {
+                            "path": "graph_last.done",
+                            "operator": "eq",
+                            "value": True,
+                        },
+                        "graph": {
+                            "version": 1,
+                            "nodes": [{
+                                "id": "work",
+                                "type": "action",
+                                "params": {
+                                    "action_type": "bounded_work",
+                                    "arguments": {"iteration": "$index"},
+                                },
+                            }],
+                        },
+                    },
+                }],
+            },
+        },
+        state={"_xvond_execution_key": "repeat-limit"},
+        run_id=1,
+        step_index=0,
+    )
+    repeat = result["graph_outputs"]["bounded"]
+    assert repeat["count"] == 2
+    assert repeat["stopped"] is False
+    assert repeat["limit_reached"] is True
