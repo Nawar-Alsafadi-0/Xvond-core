@@ -107,6 +107,20 @@ def verify_google_calendar_oauth_state(
     if not token:
         raise GoogleCalendarOAuthError("Invalid Google Calendar OAuth state")
     try:
+        # Fernet authenticates the decoded token bytes, but permissive base64
+        # decoders may ignore some trailing input. Require the exact canonical
+        # URL-safe base64 representation so a modified OAuth state is rejected
+        # even when it decodes to the original authenticated bytes.
+        decoded_token = base64.b64decode(
+            token.encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
+        if not secrets.compare_digest(
+            token,
+            base64.urlsafe_b64encode(decoded_token).decode("ascii"),
+        ):
+            raise InvalidToken
         payload = json.loads(
             _state_cipher().decrypt(token.encode("ascii")).decode("utf-8")
         )
