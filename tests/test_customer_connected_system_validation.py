@@ -1342,3 +1342,132 @@ def test_generic_api_root_json_array_rejects_invalid_items(
         )
     assert too_many.success is False
     assert "at most 2" in too_many.error
+
+def test_generic_api_nested_json_is_validated_and_shaped(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    operation = {
+        "method": "POST",
+        "endpoint": "/orders",
+        "input_mode": "json",
+        "required_json_fields": ["customer", "items"],
+        "json_fields": [
+            {
+                "key": "customer",
+                "required": True,
+                "type": "object",
+                "schema": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "phone": {"type": "string"},
+                    },
+                },
+            },
+            {
+                "key": "items",
+                "required": True,
+                "type": "array",
+                "schema": {
+                    "type": "array",
+                    "max_items": 2,
+                    "items": {
+                        "type": "object",
+                        "required": ["sku"],
+                        "properties": {
+                            "sku": {"type": "string"},
+                            "quantity": {"type": "integer"},
+                        },
+                    },
+                },
+            },
+        ],
+    }
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "operations": {"execute": operation},
+            "auth_type": "none",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+        }
+        db.commit()
+
+    captured = {}
+    monkeypatch.setattr(action_runtime, "validate_public_http_url", lambda url: url)
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status_code": 201,
+            "response": '{"id":"order-1"}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(action_runtime, "safe_http_request", fake_request)
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "orders",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "operations": {"execute": operation},
+                }
+            },
+            {
+                "details": {
+                    "customer": {
+                        "name": "Nawar",
+                        "phone": "123",
+                        "ignored": "drop",
+                    },
+                    "items": [
+                        {"sku": "A", "quantity": 2, "ignored": "drop"},
+                    ],
+                    "ignored_root": "drop",
+                }
+            },
+            "execute",
+            idempotency_key="nested-json-1",
+        )
+
+    assert result.success is True
+    assert captured["json_data"] == {
+        "customer": {"name": "Nawar", "phone": "123"},
+        "items": [{"sku": "A", "quantity": 2}],
+    }
+
+    with factory() as db:
+        invalid = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "orders",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "operations": {"execute": operation},
+                }
+            },
+            {
+                "details": {
+                    "customer": {"phone": "123"},
+                    "items": [{"sku": "A"}],
+                }
+            },
+            "execute",
+            idempotency_key="nested-json-2",
+        )
+
+    assert invalid.success is False
+    assert "$.customer is missing required field(s): name" in invalid.error

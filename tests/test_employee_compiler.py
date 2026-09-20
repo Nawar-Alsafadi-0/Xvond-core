@@ -1854,3 +1854,61 @@ def test_compiler_preserves_root_json_array_request_contract():
         "sku",
         "quantity",
     ]
+
+def test_compiler_preserves_nested_json_request_schema():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Order employee",
+            "requirements": [
+                {
+                    "key": "orders",
+                    "kind": "integration",
+                    "purpose": "Create an external order",
+                    "fulfillment_mode": "external_connection",
+                    "integration_operations": {
+                        "execute": {
+                            "method": "POST",
+                            "endpoint": "/orders",
+                            "input_mode": "json",
+                            "required_json_fields": ["customer"],
+                            "json_fields": [
+                                {
+                                    "key": "customer",
+                                    "required": True,
+                                    "type": "object",
+                                    "schema": {
+                                        "type": "object",
+                                        "required": ["name"],
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "preferences": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            },
+                                        },
+                                    },
+                                }
+                            ],
+                        }
+                    },
+                }
+            ],
+        },
+        job_brief="Create an external order.",
+    )
+
+    field = (
+        spec["requirements"][0]["integration_operations"]["execute"]["json_fields"][0]
+    )
+    assert field["schema"] == {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "preferences": {
+                "type": "array",
+                "max_items": 100,
+                "items": {"type": "string"},
+            },
+        },
+        "required": ["name"],
+    }
