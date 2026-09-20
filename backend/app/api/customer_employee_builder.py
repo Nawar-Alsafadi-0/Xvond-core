@@ -600,6 +600,25 @@ def _employee_for_company(db, company_id: int, agent_id: int | None = None) -> A
     return query.order_by(AIAgent.id.desc()).first()
 
 
+def _employee_for_workspace(
+    db,
+    company_id: int,
+    agent_id: int | None = None,
+) -> AIAgent | None:
+    if agent_id is None:
+        return _existing_employee(db, company_id)
+    return (
+        db.query(AIAgent)
+        .join(AgentConfig, AgentConfig.agent_id == AIAgent.id)
+        .filter(
+            AIAgent.company_id == company_id,
+            AIAgent.id == agent_id,
+            AgentConfig.agent_type == "employee",
+        )
+        .first()
+    )
+
+
 def _employee_config_or_404(db, agent: AIAgent) -> AgentConfig:
     config = db.query(AgentConfig).filter(AgentConfig.agent_id == agent.id).first()
     if config is None or config.agent_type != "employee":
@@ -1515,6 +1534,10 @@ def _self_service_builder_journey(
     state = dict(state or {})
     builder = dict(builder or {})
     subscription = dict(state.get("subscription") or {})
+    commercial_gating = (
+        settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION
+        and not settings.SELF_SERVICE_FREE_EXPERIMENT
+    )
     compiled = isinstance(compiled_spec, dict)
     provisioned = bool(
         compiled
@@ -1546,7 +1569,7 @@ def _self_service_builder_journey(
         "Your job description is saved as the source of truth for this employee.",
     )
 
-    if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+    if commercial_gating:
         subscription_status = str(subscription.get("status") or "")
         if subscription.get("active"):
             add_stage(
@@ -1578,7 +1601,7 @@ def _self_service_builder_journey(
             "complete",
             "Xvond compiled the job and provisioned its employee capability plan.",
         )
-    elif has_entitlement or not settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+    elif has_entitlement or not commercial_gating:
         add_stage(
             "build",
             "Build",
@@ -2010,7 +2033,7 @@ def _self_service_builder_journey(
                 else "The current conversational employee build has been preview-tested safely."
             ),
         )
-    elif provisioned and (has_entitlement or not settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION) and setup_complete:
+    elif provisioned and (has_entitlement or not commercial_gating) and setup_complete:
         if routine_required:
             preview_actions = [
                 _builder_action(
@@ -2385,7 +2408,11 @@ def create_employee(
             "agent_id": agent.id,
             "name": agent.name,
             "enabled": agent.enabled,
-            "subscription_required_for_go_live": bool(settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION and not has_entitlement),
+            "subscription_required_for_go_live": bool(
+                settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION
+                and not settings.SELF_SERVICE_FREE_EXPERIMENT
+                and not has_entitlement
+            ),
             "subscription_required_for_compile": bool(not has_entitlement and not is_self_service),
             "blueprint": blueprint.as_dict(),
             "readiness": blueprint_readiness(blueprint),
@@ -2717,6 +2744,8 @@ def refine_self_service_employee(
 
 
 def _has_ai_agents_entitlement_for_user(current_user: User) -> bool:
+    if settings.SELF_SERVICE_FREE_EXPERIMENT:
+        return True
     db = SessionLocal()
     try:
         return _has_ai_agents_entitlement(db, current_user.company_id)
@@ -5281,7 +5310,7 @@ def launch_self_service_employee(
         # Existing AI Agents plan still owns employee capacity. The self-service
         # workspace currently owns one employee, so its active subscription is
         # the commercial entitlement for this employee.
-        if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+        if commercial_gating:
             limits_service.check_agent_limit(db, company.id)
 
         target_channel_types = [
@@ -5343,7 +5372,7 @@ def launch_self_service_employee(
                     },
                 )
             if not channel.enabled:
-                if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+                if commercial_gating:
                     limits_service.check_channel_limit(db, company.id)
                 channel.enabled = True
                 db.flush()
@@ -5566,7 +5595,7 @@ def preview_employee_routine(
             if not message:
                 raise HTTPException(409, f"Preview AI node {node_scope} has no prompt")
 
-            if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+            if commercial_gating:
                 limits_service.check_token_limit(db, company.id)
             selections = runtime_selections(
                 db,
@@ -5718,7 +5747,7 @@ def test_draft_employee(
             else None
         )
         if pending_spec is not None:
-            if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+            if commercial_gating:
                 if not _has_ai_agents_entitlement(db, current_user.company_id):
                     raise HTTPException(
                         403,
