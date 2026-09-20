@@ -70,3 +70,23 @@ def test_exchange_sends_pkce_verifier(monkeypatch):
     assert token["refresh_token"] == "refresh"
     assert captured["form_data"]["code_verifier"] == "verifier"
     assert captured["method"] == "POST"
+
+
+def test_authorization_state_binds_pending_integration(monkeypatch):
+    monkeypatch.setattr(oauth, "validate_public_http_url", lambda value: value)
+    result = oauth.create_oauth_authorization(
+        {
+            "flow": "authorization_code",
+            "authorization_url": "https://accounts.example.com/oauth/authorize",
+            "token_url": "https://accounts.example.com/oauth/token",
+        },
+        client_id="client-1",
+        redirect_uri="https://xvond.example/customer/employee-builder/oauth/callback",
+        state_secret="state-secret",
+        company_id=3,
+        agent_id=4,
+        requirement_key="orders_api",
+        integration_id=55,
+    )
+    payload = oauth.consume_oauth_state(result["state"], state_secret="state-secret")
+    assert payload["integration_id"] == 55
