@@ -17,6 +17,10 @@ from backend.app.modules.channels.whatsapp_models import WhatsAppSession
 from backend.app.modules.integrations.catalog import integration_validation_ready
 from backend.app.modules.integrations.capability_discovery import oauth_client_credentials_token
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.integrations.json_contract import (
+    sanitize_json_contract,
+    shape_json_value,
+)
 from backend.app.modules.files.models import EmployeeFileAsset
 from backend.app.modules.integrations.http_api_auth import apply_http_api_auth
 from backend.app.modules.integrations.oauth_authorization import (
@@ -54,6 +58,29 @@ CONFIRM_WORDS = {
     "تأكيد", "ثبت", "اوكي", "أوكي",
 }
 NEGATIVE_PREFIXES = ("لا", "no", "not", "don't", "dont", "مو", "مش")
+SAFE_DYNAMIC_HEADER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
+BLOCKED_DYNAMIC_HEADERS = {
+    "authorization", "proxy-authorization", "cookie", "set-cookie", "host",
+    "content-length", "transfer-encoding", "connection", "upgrade", "expect",
+    "content-type", "idempotency-key", "x-xvond-idempotency-key",
+}
+
+
+def _json_field_contract(field: dict) -> dict:
+    nested = sanitize_json_contract(field.get("schema"))
+    if nested:
+        return nested
+    value_type = str(field.get("type") or "").strip().lower()
+    if value_type not in {"object", "array", "string", "integer", "number", "boolean"}:
+        return {}
+    contract = {"type": value_type}
+    fmt = str(field.get("format") or "").strip().lower()[:40]
+    if fmt:
+        contract["format"] = fmt
+    enum = field.get("enum")
+    if isinstance(enum, list):
+        contract["enum"] = enum[:20]
+    return sanitize_json_contract(contract)
 
 
 def _field_specs(action: dict) -> list[dict]:
@@ -807,6 +834,61 @@ def _integration_call(
             ),
         )
 
+    raw_header_params = (op_config or {}).get("header_params")
+    raw_header_params = raw_header_params if isinstance(raw_header_params, list) else []
+    raw_required_header_params = (op_config or {}).get("required_header_params")
+    raw_required_header_params = (
+        raw_required_header_params
+        if isinstance(raw_required_header_params, list)
+        else []
+    )
+    declared_header_params: list[str] = []
+    required_header_params: list[str] = []
+    for raw_name in [*raw_header_params, *raw_required_header_params]:
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        if (
+            not SAFE_DYNAMIC_HEADER_RE.fullmatch(name)
+            or name.lower() in BLOCKED_DYNAMIC_HEADERS
+        ):
+            return ToolResult(
+                success=False,
+                error=f"API operation '{operation}' contains an unsafe header parameter",
+            )
+        if name.lower() not in {item.lower() for item in declared_header_params}:
+            declared_header_params.append(name)
+    for raw_name in raw_required_header_params:
+        name = str(raw_name or "").strip()
+        if name and name.lower() not in {item.lower() for item in required_header_params}:
+            required_header_params.append(name)
+
+    header_source = request_payload if isinstance(request_payload, dict) else {}
+    missing_header_params = [
+        name
+        for name in required_header_params
+        if name not in header_source or header_source.get(name) in (None, "")
+    ]
+    if missing_header_params:
+        return ToolResult(
+            success=False,
+            error=(
+                f"API operation '{operation}' requires header parameter(s): "
+                + ", ".join(missing_header_params)
+            ),
+            data={"missing_fields": missing_header_params},
+        )
+    for name in declared_header_params:
+        if name not in header_source or header_source.get(name) is None:
+            continue
+        value = header_source.get(name)
+        if not isinstance(value, (str, int, float, bool)):
+            return ToolResult(
+                success=False,
+                error=f"Header parameter '{name}' must be a scalar value",
+            )
+        headers[name] = str(value)
+
     input_mode = str(
         (op_config or {}).get("input_mode") or ("query" if method == "GET" else "json")
     ).strip().lower()
@@ -850,6 +932,24 @@ def _integration_call(
                 ),
                 data={"missing_fields": missing_json_fields},
             )
+        for field in raw_json_fields:
+            if not isinstance(field, dict):
+                continue
+            key = str(field.get("key") or "").strip()
+            if not key or key not in source:
+                continue
+            contract = _json_field_contract(field)
+            if not contract:
+                continue
+            try:
+                source[key] = shape_json_value(
+                    source[key],
+                    contract,
+                    path=f"$.{key}",
+                )
+            except ValueError as exc:
+                return ToolResult(success=False, error=str(exc))
+        request_payload = source
 
     if input_mode == "json_array":
         source = request_payload if isinstance(request_payload, dict) else {}
@@ -925,6 +1025,23 @@ def _integration_call(
                         ),
                         data={"item_index": index, "missing_fields": missing},
                     )
+                for field in raw_item_fields:
+                    if not isinstance(field, dict):
+                        continue
+                    field_key = str(field.get("key") or "").strip()
+                    if not field_key or field_key not in shaped:
+                        continue
+                    contract = _json_field_contract(field)
+                    if not contract:
+                        continue
+                    try:
+                        shaped[field_key] = shape_json_value(
+                            shaped[field_key],
+                            contract,
+                            path=f"$[{index}].{field_key}",
+                        )
+                    except ValueError as exc:
+                        return ToolResult(success=False, error=str(exc))
                 normalized_items.append(shaped)
                 continue
 

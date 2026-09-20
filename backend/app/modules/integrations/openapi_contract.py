@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import yaml
 
 from backend.app.core.http_security import safe_http_request
+from backend.app.modules.integrations.json_contract import sanitize_json_contract
 
 
 MAX_OPENAPI_RESPONSE_BYTES = 1_000_000
@@ -130,6 +131,21 @@ def _static_https_server_url(document: dict) -> str | None:
 
 
 _BODY_FIELD_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}")
+_HEADER_PARAM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
+_BLOCKED_DYNAMIC_HEADERS = {
+    "authorization", "proxy-authorization", "cookie", "set-cookie", "host",
+    "content-length", "transfer-encoding", "connection", "upgrade", "expect",
+    "content-type", "idempotency-key", "x-xvond-idempotency-key",
+}
+
+
+def _safe_dynamic_header_name(value: Any) -> str | None:
+    name = str(value or "").strip()
+    if not _HEADER_PARAM_RE.fullmatch(name):
+        return None
+    if name.lower() in _BLOCKED_DYNAMIC_HEADERS:
+        return None
+    return name
 
 
 def _local_schema_ref(document: dict, schema: dict) -> dict:
@@ -364,6 +380,53 @@ def _request_body_contract(
 
     return "none", {}
 
+def _openapi_json_contract(document: dict, schema: dict, *, _depth: int = 0) -> dict:
+    if _depth > 4:
+        return {}
+    resolved = _local_schema_ref(document, schema) or schema
+    if not isinstance(resolved, dict):
+        return {}
+    kind = _schema_kind(document, resolved)
+    if kind not in {"object", "array", "string", "integer", "number", "boolean"}:
+        return {}
+
+    contract: dict[str, Any] = {"type": kind}
+    fmt = str(resolved.get("format") or "").strip().lower()[:40]
+    if fmt:
+        contract["format"] = fmt
+    enum = resolved.get("enum")
+    if isinstance(enum, list):
+        bounded_enum = [
+            item for item in enum[:20]
+            if isinstance(item, (str, int, float, bool)) or item is None
+        ]
+        if bounded_enum:
+            contract["enum"] = bounded_enum
+
+    if kind == "object":
+        properties, required = _object_schema_parts(document, resolved)
+        nested = {}
+        for key, raw in list(properties.items())[:50]:
+            child = _openapi_json_contract(document, raw, _depth=_depth + 1)
+            if child:
+                nested[key] = child
+        if nested:
+            contract["properties"] = nested
+            required = [item for item in required if item in nested]
+        if required:
+            contract["required"] = required[:50]
+    elif kind == "array":
+        items = resolved.get("items")
+        child = _openapi_json_contract(
+            document, items, _depth=_depth + 1
+        ) if isinstance(items, dict) else {}
+        if not child:
+            return {}
+        contract["items"] = child
+        contract["max_items"] = 100
+
+    return sanitize_json_contract(contract)
+
 def _json_field_metadata(document: dict, schema: dict) -> tuple[list[str], list[dict]]:
     properties, required = _object_schema_parts(document, schema)
     fields: list[dict] = []
@@ -389,6 +452,10 @@ def _json_field_metadata(document: dict, schema: dict) -> tuple[list[str], list[
             ]
             if bounded_enum:
                 field["enum"] = bounded_enum
+        if _schema_kind(document, value) in {"object", "array"}:
+            nested_contract = _openapi_json_contract(document, value)
+            if nested_contract:
+                field["schema"] = nested_contract
         fields.append(field)
         if len(fields) >= 50:
             break
@@ -543,6 +610,29 @@ def normalize_openapi_document(document: dict) -> dict:
             parameters = [*inherited_parameters]
             if isinstance(operation.get("parameters"), list):
                 parameters.extend(operation["parameters"])
+            parameters = [
+                _local_schema_ref(document, item) or item
+                for item in parameters[:100]
+                if isinstance(item, dict)
+            ]
+
+            header_parameters = [
+                item
+                for item in parameters
+                if str(item.get("in") or "").strip().lower() == "header"
+                and _safe_dynamic_header_name(item.get("name"))
+            ]
+            header_params = [
+                _safe_dynamic_header_name(item.get("name"))
+                for item in header_parameters
+            ]
+            header_params = [item for item in header_params if item]
+            required_header_params = [
+                _safe_dynamic_header_name(item.get("name"))
+                for item in header_parameters
+                if item.get("required") is True
+            ]
+            required_header_params = [item for item in required_header_params if item]
 
             query_parameters = [
                 item
@@ -623,6 +713,8 @@ def normalize_openapi_document(document: dict) -> dict:
                 "input_mode": input_mode,
                 "timeout": 15,
                 "path_params": list(dict.fromkeys(placeholders)),
+                "header_params": list(dict.fromkeys(header_params)),
+                "required_header_params": list(dict.fromkeys(required_header_params)),
                 "query_params": list(dict.fromkeys(query_params)),
                 "required_query_params": list(dict.fromkeys(required_query_params)),
                 "required_json_fields": required_body_fields if input_mode == "json" else [],
