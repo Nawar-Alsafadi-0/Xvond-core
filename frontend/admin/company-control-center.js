@@ -143,44 +143,113 @@ async function wsOptional(path,fallback,label=null,issues=null,timeoutMs=8000){
 }
 
 async function loadCompanyControlCenter(companyId,tab=null){
-  simpleCompanyId=Number(companyId);xvondWorkspace.companyId=Number(companyId);if(tab)xvondWorkspace.tab=tab;
+  simpleCompanyId=Number(companyId);
+  xvondWorkspace.companyId=Number(companyId);
+  if(tab)xvondWorkspace.tab=tab;
   const loadIssues=[];
+
   const viewController=new AbortController();
   const viewTimer=setTimeout(()=>viewController.abort(),8000);
   let view;
   try{view=await api(`/admin/company-view/${companyId}`,{signal:viewController.signal})}
   finally{clearTimeout(viewTimer)}
-  const [channelResult,moduleResult,catalog,integrations,requests,conversations,usage,profile,setup,handoffs,audit,serviceBilling,servicePlans,users,readiness,unresolved]=await Promise.all([
-    wsOptional(`/admin/channels/companies/${companyId}`,{channels:[]},'Channels',loadIssues),
-    wsOptional(`/admin/companies/${companyId}/modules`,{modules:[]},'Company capabilities',loadIssues),
-    wsOptional('/admin/agent-actions/templates/catalog',{templates:[]},'Action catalog',loadIssues),
-    wsOptional(`/admin/integrations/companies/${companyId}`,{integrations:[]},'Integrations',loadIssues),
-    wsOptional(`/admin/agent-actions/companies/${companyId}/requests`,{requests:[]},'Operations',loadIssues),
-    wsOptional(`/admin/operations/companies/${companyId}/conversations`,{conversations:[]},'Conversations',loadIssues),
-    wsOptional(`/admin/operations/companies/${companyId}/usage`,{summary:{},usage:[]},'Usage',loadIssues),
-    wsOptional(`/admin/company-profile/${companyId}`,{company_name:view.company?.name||''},'Company profile',loadIssues),
-    wsOptional('/admin/setup/catalog',{},'Setup catalog',loadIssues),
-    wsOptional(`/admin/handoff/companies/${companyId}/sessions`,{sessions:[]},'Handoff sessions',loadIssues),
-    wsOptional(`/admin/audit/?company_id=${companyId}&limit=100`,{logs:[],total:0},'Audit trail',loadIssues),
-    wsOptional(`/admin/service-billing/companies/${companyId}`,{services:[]},'Billing',loadIssues),
-    wsOptional('/admin/service-billing/plans',{plans:[]},'Plan catalog',loadIssues),
-    wsOptional(`/admin/company-users/companies/${companyId}`,{users:[]},'Company users',loadIssues),
-    wsOptional(`/admin/production/companies/${companyId}/readiness`,null,'Managed delivery readiness',loadIssues),
-    wsOptional(`/admin/operations/companies/${companyId}/external-unresolved`,{requests:[]},'External reconciliation',loadIssues)
+
+  const [channelResult,moduleResult,profile,readiness,serviceBilling]=await Promise.all([
+    wsOptional(`/admin/channels/companies/${companyId}`,{channels:[]},'Channels',loadIssues,6000),
+    wsOptional(`/admin/companies/${companyId}/modules`,{modules:[]},'Company capabilities',loadIssues,6000),
+    wsOptional(`/admin/company-profile/${companyId}`,{company_name:view.company?.name||''},'Company profile',loadIssues,6000),
+    wsOptional(`/admin/production/companies/${companyId}/readiness`,null,'Managed delivery readiness',loadIssues,6000),
+    wsOptional(`/admin/service-billing/companies/${companyId}`,{services:[]},'Billing',loadIssues,6000)
   ]);
-  const agentMeta=await Promise.all((view.agents||[]).map(async agent=>{
-    const [agentProfile,knowledge,actions]=await Promise.all([
-      wsOptional(`/admin/ai-employee-profile/companies/${companyId}/${agent.id}`,{name:agent.name},`${agent.name} profile`,loadIssues),
-      wsOptional(`/admin/ai-employees/companies/${companyId}/${agent.id}/knowledge`,{items:[]},`${agent.name} knowledge`,loadIssues),
-      wsOptional(`/admin/agent-actions/${agent.id}`,{actions:[],ready:false},`${agent.name} actions`,loadIssues)
-    ]);
-    return {agent,profile:agentProfile,knowledge:knowledge.items||[],actions:actions.actions||[],operationsReady:!!actions.ready};
-  }));
-  const billingServices=serviceBilling.services||[];
-  xvondWorkspace.data={view,channels:channelResult.channels||[],modules:moduleResult.modules||[],catalog,integrations:integrations.integrations||[],requests:requests.requests||[],conversations:conversations.conversations||[],usage,profile,setup,handoffs:handoffs.sessions||[],audit:audit.logs||[],billingServices,plans:servicePlans.plans||[],users:(users.users&&users.users.length?users.users:view.users)||[],readiness,unresolved:unresolved.requests||[],agentMeta,loadIssues};
+
+  xvondWorkspace.data={
+    view,
+    channels:channelResult.channels||[],
+    modules:moduleResult.modules||[],
+    catalog:{templates:[]},
+    integrations:[],
+    requests:[],
+    conversations:[],
+    usage:{summary:{},usage:[]},
+    profile,
+    setup:{},
+    handoffs:[],
+    audit:[],
+    billingServices:serviceBilling.services||[],
+    plans:[],
+    users:view.users||[],
+    readiness,
+    unresolved:[],
+    agentMeta:(view.agents||[]).map(agent=>({agent,profile:{name:agent.name},knowledge:[],actions:[],operationsReady:false})),
+    loadIssues,
+    loadedTabs:new Set(['overview'])
+  };
   renderCompanyControlCenter();
+  if(xvondWorkspace.tab!=='overview') await hydrateWorkspaceTab(xvondWorkspace.tab);
 }
 
+async function hydrateWorkspaceTab(tab){
+  const d=xvondWorkspace.data;
+  if(!d||d.loadedTabs?.has(tab))return;
+  const companyId=xvondWorkspace.companyId;
+  const issues=d.loadIssues||[];
+  try{
+    if(tab==='agents'||tab==='knowledge'||tab==='operations'){
+      const rows=await Promise.all((d.view.agents||[]).map(async agent=>{
+        const [agentProfile,knowledge,actions]=await Promise.all([
+          wsOptional(`/admin/ai-employee-profile/companies/${companyId}/${agent.id}`,{name:agent.name},`${agent.name} profile`,issues,6000),
+          wsOptional(`/admin/ai-employees/companies/${companyId}/${agent.id}/knowledge`,{items:[]},`${agent.name} knowledge`,issues,6000),
+          wsOptional(`/admin/agent-actions/${agent.id}`,{actions:[],ready:false},`${agent.name} actions`,issues,6000)
+        ]);
+        return {agent,profile:agentProfile,knowledge:knowledge.items||[],actions:actions.actions||[],operationsReady:!!actions.ready};
+      }));
+      d.agentMeta=rows;
+    }
+    if(tab==='integrations'){
+      const result=await wsOptional(`/admin/integrations/companies/${companyId}`,{integrations:[]},'Integrations',issues,6000);
+      d.integrations=result.integrations||[];
+    }
+    if(tab==='operations'){
+      const [requests,unresolved,catalog]=await Promise.all([
+        wsOptional(`/admin/agent-actions/companies/${companyId}/requests`,{requests:[]},'Operations',issues,6000),
+        wsOptional(`/admin/operations/companies/${companyId}/external-unresolved`,{requests:[]},'External reconciliation',issues,6000),
+        wsOptional('/admin/agent-actions/templates/catalog',{templates:[]},'Action catalog',issues,6000)
+      ]);
+      d.requests=requests.requests||[];
+      d.unresolved=unresolved.requests||[];
+      d.catalog=catalog;
+    }
+    if(tab==='conversations'){
+      const [conversations,handoffs]=await Promise.all([
+        wsOptional(`/admin/operations/companies/${companyId}/conversations`,{conversations:[]},'Conversations',issues,6000),
+        wsOptional(`/admin/handoff/companies/${companyId}/sessions`,{sessions:[]},'Handoff sessions',issues,6000)
+      ]);
+      d.conversations=conversations.conversations||[];
+      d.handoffs=handoffs.sessions||[];
+    }
+    if(tab==='usage'){
+      d.usage=await wsOptional(`/admin/operations/companies/${companyId}/usage`,{summary:{},usage:[]},'Usage',issues,6000);
+    }
+    if(tab==='billing'){
+      const plans=await wsOptional('/admin/service-billing/plans',{plans:[]},'Plan catalog',issues,6000);
+      d.plans=plans.plans||[];
+    }
+    if(tab==='users'){
+      const users=await wsOptional(`/admin/company-users/companies/${companyId}`,{users:[]},'Company users',issues,6000);
+      d.users=(users.users&&users.users.length?users.users:d.view.users)||[];
+    }
+    if(tab==='logs'){
+      const audit=await wsOptional(`/admin/audit/?company_id=${companyId}&limit=100`,{logs:[],total:0},'Audit trail',issues,6000);
+      d.audit=audit.logs||[];
+    }
+    if(tab==='company'){
+      d.setup=await wsOptional('/admin/setup/catalog',{},'Setup catalog',issues,6000);
+    }
+  }finally{
+    d.loadedTabs?.add(tab);
+    renderCompanyControlCenter();
+  }
+}
 function renderCompanyControlCenter(){
   const d=xvondWorkspace.data;if(!d)return;const c=d.view.company,p=d.profile||{};
   const selfService=String(c.onboarding_source||'managed')==='self_service';
@@ -195,7 +264,7 @@ function renderCompanyControlCenter(){
   const managedActions=selfService?'':`<button class="primary-button" onclick="openCompanyIdentityEditor()">Edit Company</button>`;
   document.getElementById('company-detail').innerHTML=`<div class="workspace-shell"><div class="workspace-hero"><div><div class="workspace-eyebrow">${sourceLabel}</div><h2>${f(c.name)}</h2><div class="workspace-subtitle">${f(p.business_type||'Business type not set')}${p.country?` · ${f(p.country)}`:''}</div></div><div class="workspace-hero-actions">${sourcePill}${wsPill(c.active?'Runtime Active':'Runtime Stopped',c.active?'good':'bad')}${managedActions}</div></div><div class="workspace-tabs">${tabs.map(([key,label])=>`<button class="workspace-tab ${xvondWorkspace.tab===key?'active':''}" onclick="switchWorkspaceTab('${key}')">${label}</button>`).join('')}</div><div id="workspace-content">${renderWorkspaceTab()}</div></div>`;
 }
-function switchWorkspaceTab(tab){xvondWorkspace.tab=tab;renderCompanyControlCenter()}
+async function switchWorkspaceTab(tab){xvondWorkspace.tab=tab;renderCompanyControlCenter();await hydrateWorkspaceTab(tab)}
 function renderWorkspaceTab(){switch(xvondWorkspace.tab){case'company':return renderCompanyProfileTab();case'capabilities':return renderCapabilitiesTab();case'agents':return renderAgentsTab();case'knowledge':return renderKnowledgeTab();case'channels':return renderChannelsTab();case'operations':return renderOperationsTab();case'integrations':return renderIntegrationsTab();case'conversations':return renderConversationsTab();case'usage':return renderUsageTab();case'users':return renderUsersTab();case'billing':return renderBillingTab();case'logs':return renderLogsTab();default:return renderOverviewTab()}}
 
 function renderOverviewTab(){
