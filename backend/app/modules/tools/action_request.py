@@ -624,6 +624,8 @@ def _integration_response_value(result: dict):
     if not isinstance(raw, str):
         return raw
     if len(raw) > MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS:
+        raw = raw[:MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS]
+    if bool(result.get("truncated")):
         return raw
     text = raw.strip()
     if not text:
@@ -921,6 +923,7 @@ def _integration_call(
             headers=headers,
             json_data=request_payload if input_mode == "json" else None,
             timeout=float((op_config or {}).get("timeout") or 15),
+            max_response_bytes=MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS,
         )
     except Exception as exc:
         return ToolResult(success=False, error=str(exc))
