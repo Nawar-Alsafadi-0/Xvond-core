@@ -42,7 +42,6 @@ from backend.app.api.admin_service_billing import router as admin_service_billin
 from backend.app.api.internal_workflow_actions import router as internal_workflow_actions_router
 from backend.app.api.internal_channel_gateway import router as internal_channel_gateway_router
 from backend.app.api.public_channels import router as public_channels_router
-from backend.app.api.public_employee_builder import router as public_employee_builder_router
 from backend.app.api.public_billing import router as public_billing_router
 from backend.app.api.public_media import router as public_media_router
 from backend.app.api.public_automation_webhooks import router as public_automation_webhooks_router
@@ -52,7 +51,6 @@ from backend.app.api.ai_agents import router as ai_agents_router
 from backend.app.api.company_modules import router as company_modules_router
 from backend.app.api.customer_action_requests import router as customer_action_requests_router
 from backend.app.api.customer_agents import router as customer_agents_router
-from backend.app.api.customer_employee_builder import router as customer_employee_builder_router
 from backend.app.api.customer_business import router as customer_business_router
 from backend.app.api.customer_inbox import router as customer_inbox_router
 from backend.app.api.customer_meta_whatsapp import router as customer_meta_whatsapp_router
@@ -237,7 +235,6 @@ for r in [
     internal_channel_gateway_router,
     ai_agents_router,
     public_channels_router,
-    public_employee_builder_router,
     public_billing_router,
     public_media_router,
     public_automation_webhooks_router,
@@ -247,7 +244,6 @@ for r in [
     company_modules_router,
     customer_action_requests_router,
     customer_agents_router,
-    customer_employee_builder_router,
     customer_business_router,
     customer_inbox_router,
     customer_meta_whatsapp_router,
@@ -317,12 +313,6 @@ def customer_ui():
     )
 
 
-@app.get("/build")
-def public_employee_builder():
-    return RedirectResponse(
-        url=f"/static/public/employee-builder.html?v={CUSTOMER_PORTAL_VERSION}"
-    )
-
 
 @app.get("/checkout")
 def checkout():
@@ -331,7 +321,7 @@ def checkout():
 
 @app.get("/billing/return")
 def billing_return():
-    return RedirectResponse(url="/customer-ui#employee-builder")
+    return RedirectResponse(url="/customer-ui")
 
 
 @app.get("/privacy")
