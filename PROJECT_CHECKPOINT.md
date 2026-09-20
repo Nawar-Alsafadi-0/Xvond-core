@@ -366,6 +366,14 @@ Production deploy additionally:
 - requires the canonical `PUBLIC_BASE_URL/health/ready` to succeed over HTTPS with healthy production JSON
 - supports customer-specific production acceptance after cutover
 
+## Open-ended generalization gate
+
+Xvond has a live compiler acceptance gate at `scripts/generalization_acceptance.py`. It compiles a diverse set of unrelated Job Briefs through the same production AI Employee Compiler used by Self-Service, without creating or launching customer employees.
+
+The gate fails closed when a compiler result returns unsupported work, has no executable graph/routine, violates the execution-graph contract, or references an action without a matching requirement contract. This is a release-level check for the core product promise: Xvond composes novel digital work from generic primitives rather than predefined employee templates.
+
+Production deploy can run it after cutover with `GENERALIZATION_ACCEPTANCE=true` plus `ACCEPTANCE_COMPANY_ID` and `ACCEPTANCE_AGENT_ID`. It does not replace real provider/channel acceptance.
+
 ## Market launch gate
 
 Xvond now has a fail-closed final customer-path gate at `scripts/market_launch_gate.py`. It builds on the production acceptance gate instead of duplicating platform health checks.
@@ -426,7 +434,7 @@ Repository state through the Replit-like Self-Service build loop, Market Launch 
 
 Highest-priority remaining external/product work:
 
-1. Deploy the reviewed `main` release on the canonical production server and pass the production acceptance gate.
+1. Deploy the reviewed `main` release on the canonical production server and pass the production acceptance gate plus the live open-ended compiler generalization gate.
 2. Configure production Workflow Engine route registries/secrets and provision one real Telegram bot; prove Telegram inbound -> Xvond employee -> durable provider-confirmed outbound -> handoff -> Return to AI.
 3. Configure Meta Messaging app permissions/subscriptions and real Instagram/Messenger routes; validate raw-body signature handling and one real inbound/outbound round trip for each launch channel.
 4. Re-activate Tap Payments, configure the live Tap key/Merchant ID and webhook/redirect paths, run sandbox then one real `CAPTURED` Self-Service charge, and confirm whether Save Card/recurring capability is enabled before turning on automatic renewals.
