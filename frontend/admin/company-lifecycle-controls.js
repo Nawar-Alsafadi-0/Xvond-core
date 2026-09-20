@@ -52,32 +52,30 @@ function xvondInjectLifecycleControls(){
   if(typeof xvondWorkspace==='undefined'||!xvondWorkspace?.data?.view?.company)return;
   const hero=document.querySelector('#company-detail .workspace-hero');
   if(!hero)return;
+  // This function runs from a MutationObserver watching #company-detail.
+  // Rewriting an existing panel would create another observed mutation and
+  // keep the browser in an endless observer -> innerHTML -> observer loop.
+  if(hero.querySelector('[data-xvond-lifecycle-controls]'))return;
   const company=xvondWorkspace.data.view.company;
   const selfService=String(company.onboarding_source||'managed')==='self_service';
   if(selfService){
-    let panel=hero.querySelector('[data-xvond-lifecycle-controls]');
-    if(!panel){
-      panel=document.createElement('div');
-      panel.dataset.xvondLifecycleControls='1';
-      panel.className='workspace-panel';
-      panel.style.marginTop='12px';
-      panel.style.width='100%';
-      hero.appendChild(panel);
-    }
-    const lifecycle=String(company.lifecycle_status||'onboarding').toLowerCase();
-    const runtime=company.active===true;
-    panel.innerHTML=`<div class='workspace-panel-head'><div><h3>Self-Service Workspace State</h3><p>Account lifecycle and employee runtime are shown separately. Customer launch uses the self-service readiness policy, not Managed Delivery gates.</p></div>${wsPill(xvondLifecycleLabel(lifecycle),xvondLifecycleKind(lifecycle))}</div><div class='workspace-grid two-col'><div><label>Delivery model</label><div>${wsPill('Self-Service','good')}</div><p class='meta'>The customer builds and launches employees through the Xvond platform.</p></div><div><label>Runtime</label><div>${wsPill(runtime?'Running':'Stopped',runtime?'good':'bad')}</div><p class='meta'>Runtime is controlled by self-service employee readiness and launch state.</p>${runtime?'<button class="table-button" onclick="xvondEmergencyStop()">Emergency Stop</button>':''}</div></div>`;
-    return;
-  }
-  let panel=hero.querySelector('[data-xvond-lifecycle-controls]');
-  if(!panel){
-    panel=document.createElement('div');
+    const panel=document.createElement('div');
     panel.dataset.xvondLifecycleControls='1';
     panel.className='workspace-panel';
     panel.style.marginTop='12px';
     panel.style.width='100%';
     hero.appendChild(panel);
+    const lifecycle=String(company.lifecycle_status||'onboarding').toLowerCase();
+    const runtime=company.active===true;
+    panel.innerHTML=`<div class='workspace-panel-head'><div><h3>Self-Service Workspace State</h3><p>Account lifecycle and employee runtime are shown separately. Customer launch uses the self-service readiness policy, not Managed Delivery gates.</p></div>${wsPill(xvondLifecycleLabel(lifecycle),xvondLifecycleKind(lifecycle))}</div><div class='workspace-grid two-col'><div><label>Delivery model</label><div>${wsPill('Self-Service','good')}</div><p class='meta'>The customer builds and launches employees through the Xvond platform.</p></div><div><label>Runtime</label><div>${wsPill(runtime?'Running':'Stopped',runtime?'good':'bad')}</div><p class='meta'>Runtime is controlled by self-service employee readiness and launch state.</p>${runtime?'<button class="table-button" onclick="xvondEmergencyStop()">Emergency Stop</button>':''}</div></div>`;
+    return;
   }
+  const panel=document.createElement('div');
+  panel.dataset.xvondLifecycleControls='1';
+  panel.className='workspace-panel';
+  panel.style.marginTop='12px';
+  panel.style.width='100%';
+  hero.appendChild(panel);
   const lifecycle=String(company.lifecycle_status||'onboarding').toLowerCase();
   const runtime=company.active===true;
   panel.innerHTML=`

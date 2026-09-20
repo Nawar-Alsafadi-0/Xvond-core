@@ -46,7 +46,7 @@ def test_company_workspace_exposes_delivery_source_and_canonical_self_service_re
 
 def test_admin_workspace_degrades_gracefully_when_noncritical_sections_fail():
     assert "const loadIssues=[]" in CONTROL_CENTER
-    assert "const view=await api(`/admin/company-view/${companyId}`)" in CONTROL_CENTER
+    assert "view=await api(`/admin/company-view/${companyId}`,{signal:viewController.signal})" in CONTROL_CENTER
     assert "wsOptional(`/admin/channels/companies/${companyId}`" in CONTROL_CENTER
     assert "Admin data partially unavailable" in POLISH
     assert "workspace remains usable" in POLISH
