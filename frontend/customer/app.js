@@ -5,6 +5,40 @@ let portalNavigation = [];
 let agents = [];
 let chatConversationId = null;
 
+function setCustomerNavigationOpen(open) {
+    const expanded = Boolean(open && window.matchMedia("(max-width: 720px)").matches);
+    const toggle = document.getElementById("customer-menu-toggle");
+    const scrim = document.getElementById("customer-nav-scrim");
+    document.body.classList.toggle("customer-nav-open", expanded);
+    toggle?.setAttribute("aria-expanded", String(expanded));
+    toggle?.setAttribute("aria-label", expanded ? "Close navigation" : "Open navigation");
+    if (toggle) toggle.querySelector("span").textContent = expanded ? "×" : "☰";
+    if (scrim) scrim.tabIndex = expanded ? 0 : -1;
+}
+
+function initializeCustomerShell() {
+    const toggle = document.getElementById("customer-menu-toggle");
+    const scrim = document.getElementById("customer-nav-scrim");
+    const sidebar = document.getElementById("customer-sidebar");
+    const desktopQuery = window.matchMedia("(min-width: 721px)");
+    toggle?.addEventListener("click", () => {
+        setCustomerNavigationOpen(!document.body.classList.contains("customer-nav-open"));
+    });
+    scrim?.addEventListener("click", () => setCustomerNavigationOpen(false));
+    sidebar?.addEventListener("click", event => {
+        if (event.target.closest("button, a")) setCustomerNavigationOpen(false);
+    });
+    document.addEventListener("keydown", event => {
+        if (event.key === "Escape" && document.body.classList.contains("customer-nav-open")) {
+            setCustomerNavigationOpen(false);
+            toggle?.focus();
+        }
+    });
+    desktopQuery.addEventListener?.("change", event => {
+        if (event.matches) setCustomerNavigationOpen(false);
+    });
+}
+
 function safe(value) {
     const element = document.createElement("div");
     element.textContent = value ?? "";
@@ -12,6 +46,7 @@ function safe(value) {
 }
 
 function clearSession() {
+    setCustomerNavigationOpen(false);
     localStorage.removeItem("xvond_customer_token");
     token = null;
     currentUser = null;
@@ -699,6 +734,7 @@ async function loadConversation(agentId, conversationId) {
 }
 
 async function openPage(name, button) {
+    setCustomerNavigationOpen(false);
     document.querySelectorAll(".page").forEach(page => page.classList.add("hidden"));
     document.querySelectorAll(".nav-item").forEach(item => item.classList.remove("active"));
     const target = document.getElementById(`page-${name}`);
@@ -996,4 +1032,5 @@ async function changeCustomerPassword() {
     }
 }
 
+initializeCustomerShell();
 if (token) startPortal();

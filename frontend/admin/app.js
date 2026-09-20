@@ -9,6 +9,23 @@ const XVOND_ADMIN_WORKSPACE_TABS=new Set([
   "operations","integrations","conversations","usage","users","billing","logs"
 ]);
 
+function setAdminNavigationOpen(open){
+  const expanded=Boolean(open&&window.matchMedia("(max-width: 900px)").matches),toggle=document.getElementById("admin-menu-toggle"),scrim=document.getElementById("admin-nav-scrim");
+  document.body.classList.toggle("admin-nav-open",expanded);
+  toggle?.setAttribute("aria-expanded",String(expanded));
+  toggle?.setAttribute("aria-label",expanded?"Close navigation":"Open navigation");
+  if(toggle)toggle.querySelector("span").textContent=expanded?"×":"☰";
+  if(scrim)scrim.tabIndex=expanded?0:-1;
+}
+function initializeAdminShell(){
+  const toggle=document.getElementById("admin-menu-toggle"),scrim=document.getElementById("admin-nav-scrim"),sidebar=document.getElementById("admin-sidebar"),desktopQuery=window.matchMedia("(min-width: 901px)");
+  toggle?.addEventListener("click",()=>setAdminNavigationOpen(!document.body.classList.contains("admin-nav-open")));
+  scrim?.addEventListener("click",()=>setAdminNavigationOpen(false));
+  sidebar?.addEventListener("click",event=>{if(event.target.closest("button, a"))setAdminNavigationOpen(false)});
+  document.addEventListener("keydown",event=>{if(event.key==="Escape"&&document.body.classList.contains("admin-nav-open")){setAdminNavigationOpen(false);toggle?.focus()}});
+  desktopQuery.addEventListener?.("change",event=>{if(event.matches)setAdminNavigationOpen(false)});
+}
+
 // Remove browser-readable bearer tokens left by older Xvond builds.
 localStorage.removeItem("xvond_admin_token");
 localStorage.removeItem("xvond_admin_user");
@@ -16,7 +33,7 @@ localStorage.removeItem("xvond_admin_user");
 function escapeAdmin(value){return String(value??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;")}
 function escapeProduction(value){return escapeAdmin(value)}
 function authHeaders(){return {"Content-Type":"application/json"}}
-function clearAdminSession(){token=null;currentAdminUser=null;document.body.dataset.xvondRole="";document.getElementById("app")?.classList.add("hidden");document.getElementById("login-screen")?.classList.remove("hidden")}
+function clearAdminSession(){setAdminNavigationOpen(false);token=null;currentAdminUser=null;document.body.dataset.xvondRole="";document.getElementById("app")?.classList.add("hidden");document.getElementById("login-screen")?.classList.remove("hidden")}
 function adminNumber(value){const n=Number(value||0);return Number.isFinite(n)?n.toLocaleString():String(value??0)}
 function adminMoney(value){const n=Number(value||0);return Number.isFinite(n)?n.toFixed(3):"0.000"}
 function adminLifecycleLabel(value){const status=String(value||"onboarding").toLowerCase();const labels={onboarding:"Onboarding",testing:"Testing",live:"Live",paused:"Paused",suspended:"Suspended",cancelled:"Cancelled",archived:"Archived"};return labels[status]||status}
@@ -63,6 +80,7 @@ async function resumeAdminSession(){
 }
 
 async function showPage(name,button=null){
+  setAdminNavigationOpen(false);
   document.querySelectorAll(".page").forEach(item=>item.classList.add("hidden"));const page=document.getElementById(`page-${name}`);if(page)page.classList.remove("hidden");
   document.querySelectorAll(".nav-item").forEach(item=>item.classList.remove("active"));if(button)button.classList.add("active");
   document.getElementById("page-title").textContent=name==="companies"?"Companies":name==="company-detail"?"Company":"Dashboard";
@@ -181,4 +199,5 @@ async function sendAgentTestMessage(companyId,agentId){
   try{const result=await api(`/admin/companies/${companyId}/agents/${agentId}/test-chat`,{method:"POST",body:JSON.stringify({message,conversation_id:agentTestConversationId})});agentTestConversationId=result.conversation_id;transcript.innerHTML+=`<div class="test-message test-user"><strong>You</strong><div>${escapeAdmin(message)}</div></div><div class="test-message test-assistant"><strong>AI Employee</strong><div>${escapeAdmin(result.response?.content||"")}</div><small>${Number(result.usage?.total_tokens||0)} tokens · ${Number(result.usage?.latency_ms||0)} ms</small></div>`;input.value="";transcript.scrollTop=transcript.scrollHeight}catch(error){transcript.innerHTML+=`<div class="test-message test-error"><strong>Error</strong><div>${escapeAdmin(error.message)}</div></div>`}finally{button.disabled=false;button.textContent="Send Message"}
 }
 
+initializeAdminShell();
 resumeAdminSession();
