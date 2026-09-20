@@ -25,3 +25,11 @@ def test_meta_asset_response_never_exposes_access_token():
     assert public["page_id"] == "123"
     assert public["instagram_id"] == "456"
     assert "page_access_token" not in public
+
+
+
+def test_meta_channel_action_model():
+    from backend.app.api.customer_meta_channels import MetaChannelAction
+    item = MetaChannelAction(agent_id=7, channel_type="instagram")
+    assert item.agent_id == 7
+    assert item.channel_type == "instagram"
