@@ -626,7 +626,7 @@ def test_openapi_multipart_request_does_not_fall_back_to_json():
     assert set(contract["operations"]) == {"health"}
 
 
-def test_swagger_formdata_urlencoded_request_is_supported_but_multipart_is_not():
+def test_swagger_formdata_urlencoded_is_supported_and_binary_multipart_is_not():
     urlencoded = normalize_openapi_document(
         {
             "swagger": "2.0",
@@ -716,3 +716,77 @@ def test_openapi_root_array_json_request_stays_fail_closed():
     )
 
     assert set(contract["operations"]) == {"health"}
+
+def test_openapi_scalar_multipart_request_is_supported_without_binary_fields():
+    contract = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "paths": {
+                "/submit": {
+                    "post": {
+                        "operationId": "submitForm",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {
+                                        "type": "object",
+                                        "required": ["title", "count"],
+                                        "properties": {
+                                            "title": {"type": "string"},
+                                            "count": {"type": "integer"},
+                                            "published": {"type": "boolean"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    operation = contract["operations"]["submit_form"]
+    assert operation["input_mode"] == "multipart"
+    assert operation["required_form_fields"] == ["title", "count"]
+    assert [item["key"] for item in operation["form_fields"]] == [
+        "title",
+        "count",
+        "published",
+    ]
+
+
+def test_swagger_scalar_multipart_formdata_is_supported():
+    contract = normalize_openapi_document(
+        {
+            "swagger": "2.0",
+            "consumes": ["multipart/form-data"],
+            "paths": {
+                "/submit": {
+                    "post": {
+                        "operationId": "submitForm",
+                        "parameters": [
+                            {
+                                "name": "title",
+                                "in": "formData",
+                                "required": True,
+                                "type": "string",
+                            },
+                            {
+                                "name": "count",
+                                "in": "formData",
+                                "required": False,
+                                "type": "integer",
+                            },
+                        ],
+                    }
+                }
+            },
+        }
+    )
+
+    operation = contract["operations"]["submit_form"]
+    assert operation["input_mode"] == "multipart"
+    assert operation["required_form_fields"] == ["title"]
+    assert [item["key"] for item in operation["form_fields"]] == ["title", "count"]

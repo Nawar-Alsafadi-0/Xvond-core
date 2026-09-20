@@ -2920,7 +2920,7 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
         input_mode = str(
             raw.get("input_mode") or ("query" if method == "GET" else "json")
         ).strip().lower()
-        if input_mode not in {"json", "form", "query", "none"}:
+        if input_mode not in {"json", "form", "multipart", "query", "none"}:
             raise HTTPException(400, f"Invalid input mode for operation {name}")
         path_params = list(dict.fromkeys(
             re.findall(r"{([A-Za-z_][A-Za-z0-9_]{0,63})}", endpoint)

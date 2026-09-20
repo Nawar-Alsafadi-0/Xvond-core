@@ -207,6 +207,24 @@ def _object_schema_parts(document: dict, schema: dict, *, depth: int = 0) -> tup
     return properties, required
 
 
+def _multipart_scalar_schema_supported(document: dict, schema: dict) -> bool:
+    if _schema_kind(document, schema) != "object":
+        return False
+    properties, _ = _object_schema_parts(document, schema)
+    if not properties:
+        return False
+    allowed_types = {"string", "integer", "number", "boolean"}
+    for raw in properties.values():
+        value = _local_schema_ref(document, raw) or raw
+        value_type = str(value.get("type") or "").strip().lower()
+        value_format = str(value.get("format") or "").strip().lower()
+        if value_type not in allowed_types:
+            return False
+        if value_format == "binary":
+            return False
+    return True
+
+
 def _request_body_contract(
     document: dict,
     operation: dict,
@@ -214,9 +232,9 @@ def _request_body_contract(
 ) -> tuple[str, dict]:
     """Return one bounded request media contract.
 
-    JSON and application/x-www-form-urlencoded are executable today. Multipart
-    and other media types stay fail-closed until Xvond has a dedicated binary
-    upload/streaming contract instead of pretending they are JSON.
+    JSON and application/x-www-form-urlencoded are executable. Multipart is
+    executable only for declared scalar fields; binary/file/object/array payloads
+    stay fail-closed until Xvond has a dedicated owned-file upload contract.
     """
     request_body = operation.get("requestBody")
     if isinstance(request_body, dict):
@@ -245,8 +263,17 @@ def _request_body_contract(
             if isinstance(schema, dict):
                 return "form", schema
 
-        # Never downgrade multipart, XML, arbitrary binary or unknown body
-        # formats to JSON. That would silently execute the wrong provider call.
+        multipart = content.get("multipart/form-data")
+        if isinstance(multipart, dict):
+            schema = multipart.get("schema")
+            if (
+                isinstance(schema, dict)
+                and _multipart_scalar_schema_supported(document, schema)
+            ):
+                return "multipart", schema
+
+        # Never downgrade binary multipart, XML, arbitrary binary or unknown
+        # body formats to JSON. That would silently execute the wrong provider call.
         return "unsupported", {}
 
     # Swagger 2.0 body/formData contracts.
@@ -281,7 +308,11 @@ def _request_body_contract(
         and str(parameter.get("in") or "").strip().lower() == "formdata"
     ]
     if form_parameters:
-        if consumes and "application/x-www-form-urlencoded" not in consumes:
+        multipart_mode = bool(consumes and "multipart/form-data" in consumes)
+        if consumes and not (
+            "application/x-www-form-urlencoded" in consumes
+            or multipart_mode
+        ):
             return "unsupported", {}
         properties: dict[str, dict] = {}
         required: list[str] = []
@@ -289,10 +320,14 @@ def _request_body_contract(
             key = str(parameter.get("name") or "").strip()
             if not _BODY_FIELD_RE.fullmatch(key):
                 continue
-            field: dict[str, Any] = {
-                "type": str(parameter.get("type") or "string").strip().lower()[:20]
-            }
+            field_type = str(parameter.get("type") or "string").strip().lower()[:20]
             fmt = str(parameter.get("format") or "").strip().lower()[:40]
+            if multipart_mode and (
+                field_type not in {"string", "integer", "number", "boolean"}
+                or fmt == "binary"
+            ):
+                return "unsupported", {}
+            field: dict[str, Any] = {"type": field_type}
             if fmt:
                 field["format"] = fmt
             description = str(parameter.get("description") or "").strip()[:300]
@@ -312,7 +347,7 @@ def _request_body_contract(
                 required.append(key)
         if not properties:
             return "unsupported", {}
-        return "form", {
+        return ("multipart" if multipart_mode else "form"), {
             "type": "object",
             "properties": properties,
             "required": required,
@@ -510,12 +545,12 @@ def normalize_openapi_document(document: dict) -> dict:
             )
             if request_mode == "unsupported":
                 continue
-            if method == "GET" and request_mode in {"json", "form"}:
+            if method == "GET" and request_mode in {"json", "form", "multipart"}:
                 # GET request bodies are not portable enough for the generic
                 # adapter; fail closed instead of manufacturing semantics.
                 continue
             if (
-                request_mode in {"json", "form"}
+                request_mode in {"json", "form", "multipart"}
                 and _schema_kind(document, request_schema) != "object"
             ):
                 # The action contract carries structured detail objects. Root
@@ -531,7 +566,7 @@ def normalize_openapi_document(document: dict) -> dict:
 
             if method == "GET":
                 input_mode = "query"
-            elif request_mode in {"json", "form"}:
+            elif request_mode in {"json", "form", "multipart"}:
                 input_mode = request_mode
             elif has_query_parameters:
                 input_mode = "query"
@@ -554,8 +589,8 @@ def normalize_openapi_document(document: dict) -> dict:
                 "required_query_params": list(dict.fromkeys(required_query_params)),
                 "required_json_fields": required_body_fields if input_mode == "json" else [],
                 "json_fields": body_fields if input_mode == "json" else [],
-                "required_form_fields": required_body_fields if input_mode == "form" else [],
-                "form_fields": body_fields if input_mode == "form" else [],
+                "required_form_fields": required_body_fields if input_mode in {"form", "multipart"} else [],
+                "form_fields": body_fields if input_mode in {"form", "multipart"} else [],
                 **response_metadata,
                 "description": str(
                     operation.get("summary")
