@@ -2456,26 +2456,14 @@ def revise_self_service_job_brief(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
-            raise HTTPException(
-                409,
-                "Xvond Managed employees must use the managed delivery flow",
-            )
-
-        agent = (
-            db.query(AIAgent)
-            .filter(
-                AIAgent.id == agent_id,
-                AIAgent.company_id == company.id,
-            )
-            .first()
+        agent, config = _self_service_employee_or_404(
+            db,
+            company=company,
+            agent_id=agent_id,
         )
-        if agent is None:
-            raise HTTPException(404, "AI employee not found")
 
         # Keep the same lock order as compilation: config first, then agent.
         # This serializes revision with launch/build without creating a lock cycle.
-        config = _employee_config_or_404(db, agent)
         db.refresh(config, with_for_update=True)
         db.refresh(agent, with_for_update=True)
         if agent.enabled:
@@ -2613,19 +2601,11 @@ def refine_self_service_employee(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
-            raise HTTPException(409, "Natural-language refinement is available only for Self-Service employees")
-        agent = (
-            db.query(AIAgent)
-            .filter(
-                AIAgent.id == agent_id,
-                AIAgent.company_id == company.id,
-            )
-            .first()
+        agent, config = _self_service_employee_or_404(
+            db,
+            company=company,
+            agent_id=agent_id,
         )
-        if agent is None:
-            raise HTTPException(404, "AI employee not found")
-        config = _employee_config_or_404(db, agent)
         db.refresh(config, with_for_update=True)
         db.refresh(agent, with_for_update=True)
         builder = dict((config.settings or {}).get("employee_builder") or {})
@@ -2776,15 +2756,11 @@ def self_service_employee_versions(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
-            raise HTTPException(409, "Version history is available only for Self-Service employees")
-        agent = db.query(AIAgent).filter(
-            AIAgent.id == agent_id,
-            AIAgent.company_id == company.id,
-        ).first()
-        if agent is None:
-            raise HTTPException(404, "AI employee not found")
-        config = _employee_config_or_404(db, agent)
+        agent, config = _self_service_employee_or_404(
+            db,
+            company=company,
+            agent_id=agent_id,
+        )
         builder = dict((config.settings or {}).get("employee_builder") or {})
         return {
             "agent_id": agent.id,
@@ -2803,15 +2779,11 @@ def rollback_self_service_employee(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
-            raise HTTPException(409, "Rollback is available only for Self-Service employees")
-        agent = db.query(AIAgent).filter(
-            AIAgent.id == agent_id,
-            AIAgent.company_id == company.id,
-        ).first()
-        if agent is None:
-            raise HTTPException(404, "AI employee not found")
-        config = _employee_config_or_404(db, agent)
+        agent, config = _self_service_employee_or_404(
+            db,
+            company=company,
+            agent_id=agent_id,
+        )
         db.refresh(config, with_for_update=True)
         db.refresh(agent, with_for_update=True)
 
@@ -5211,10 +5183,6 @@ def compile_employee(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
-            service_limits.entitlement(db, current_user.company_id, "ai_agents")
-            limits_service.check_token_limit(db, current_user.company_id)
-
         agent = db.query(AIAgent).filter(
             AIAgent.id == agent_id,
             AIAgent.company_id == current_user.company_id,
@@ -5222,6 +5190,9 @@ def compile_employee(
         if agent is None:
             raise HTTPException(404, "AI employee not found")
         config = _employee_config_or_404(db, agent)
+        if not is_self_service_employee(company, config):
+            service_limits.entitlement(db, current_user.company_id, "ai_agents")
+            limits_service.check_token_limit(db, current_user.company_id)
 
         compiled_spec = _compile_employee_spec(
             db,
