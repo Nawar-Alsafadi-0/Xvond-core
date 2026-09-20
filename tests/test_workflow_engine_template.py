@@ -158,7 +158,7 @@ def test_telegram_provider_normalizes_updates_and_returns_provider_message_ident
     assert "external_contact_id" in normalize
     assert "external_message_id" in normalize
     assert "channel_type:'telegram'" in normalize
-    assert "XVOND_TELEGRAM_ROUTES_JSON" in normalize
+    assert "XVOND_WORKFLOW_REGISTRY_URL" in normalize
     assert "bot_token" not in normalize
 
     outbound = nodes["Validate Telegram Send"]["parameters"]["jsCode"]
@@ -169,10 +169,11 @@ def test_telegram_provider_normalizes_updates_and_returns_provider_message_ident
     emitted = outbound.split("return [{json:{", 1)[-1]
     assert "bot_token:" not in emitted
 
-    send = str(nodes["Telegram sendMessage"]["parameters"])
+    send = nodes["Telegram sendMessage"]["parameters"]["jsCode"]
     assert "api.telegram.org" in send
     assert "sendMessage" in send
-    assert "XVOND_TELEGRAM_ROUTES_JSON" in send
+    assert "XVOND_WORKFLOW_REGISTRY_URL" in send
+    assert "provider_config?.bot_token" in send
 
     result = nodes["Normalize Telegram Send Result"]["parameters"]["jsCode"]
     assert "provider_message_id" in result
@@ -191,9 +192,9 @@ def test_telegram_provider_route_credentials_are_not_written_into_workflow_execu
     assert "provider_secret:" not in emitted
     assert "route_key:routeKey" in emitted
 
-    send_url = nodes["Telegram sendMessage"]["parameters"]["url"]
-    assert "XVOND_TELEGRAM_ROUTES_JSON" in send_url
-    assert ".bot_token" in send_url
+    send_code = nodes["Telegram sendMessage"]["parameters"]["jsCode"]
+    assert "XVOND_WORKFLOW_REGISTRY_URL" in send_code
+    assert "provider_config?.bot_token" in send_code
 
 
 def test_meta_messaging_provider_verifies_raw_body_signature_and_normalizes_messages():
@@ -210,7 +211,7 @@ def test_meta_messaging_provider_verifies_raw_body_signature_and_normalizes_mess
     assert "x-hub-signature-256" in code.lower()
     assert "createHmac('sha256'" in code
     assert "timingSafeEqual" in code
-    assert "XVOND_META_MESSAGING_ROUTES_JSON" in code
+    assert "XVOND_WORKFLOW_REGISTRY_URL" in code
     assert "message?.mid" in code
     assert "event?.sender?.id" in code
     assert "message.is_echo === true" in code
@@ -236,10 +237,10 @@ def test_meta_messaging_provider_sends_instagram_and_messenger_without_secret_pr
     assert "provider_secret:" not in emitted
     assert "route_key:routeKey" in emitted
 
-    send = str(nodes["Send Meta Message"]["parameters"])
+    send = nodes["Send Meta Message"]["parameters"]["jsCode"]
     assert "graph.instagram.com" in send
     assert "graph.facebook.com" in send
-    assert "XVOND_META_MESSAGING_ROUTES_JSON" in send
+    assert "XVOND_WORKFLOW_REGISTRY_URL" in send
     assert "Authorization" in send
     assert "Bearer" in send
     assert "messaging_type" in send

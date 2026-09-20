@@ -219,6 +219,10 @@ def _ensure_agent_config(db, agent: AIAgent) -> AgentConfig:
             agent_id=agent.id,
             agent_type="custom",
             settings={
+                "employee_builder": {
+                    "onboarding_source": "managed",
+                    "delivery_mode": "managed",
+                },
                 "dialect": "auto",
                 "response_length": "concise",
                 "clarification_style": "smart",
