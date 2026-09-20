@@ -33,6 +33,11 @@ def test_workflow_template_is_valid_and_uses_expected_webhook_contract():
     assert "provider_not_configured" in code
     assert "missing_idempotency_key" in code
     assert "Return to Xvond" in nodes
+    assert "Return Directly?" in nodes
+    direct = payload["connections"]["Return Directly?"]["main"]
+    assert direct[0][0]["node"] == "Return to Xvond"
+    assert direct[1][0]["node"] == "Xvond Internal?"
+    assert "_dispatch: 'return'" in code
 
 
 def test_registered_actions_are_declared_in_master_workflow():
