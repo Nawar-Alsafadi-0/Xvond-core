@@ -1529,29 +1529,30 @@ def _self_service_builder_journey(
         "Your job description is saved as the source of truth for this employee.",
     )
 
-    subscription_status = str(subscription.get("status") or "")
-    if subscription.get("active"):
-        add_stage(
-            "plan",
-            "Plan",
-            "complete",
-            f"{subscription.get('plan_name') or 'AI Employee plan'} is active.",
-        )
-    elif subscription_status == "pending_payment":
-        add_stage(
-            "plan",
-            "Plan",
-            "waiting",
-            "Payment pending. The selected paid plan is waiting for payment or Xvond approval.",
-        )
-    else:
-        add_stage(
-            "plan",
-            "Plan",
-            "action_required",
-            "Choose the AI Employee plan that will own runtime entitlement and limits.",
-            [_builder_action("choose_plan", "Choose plan", target="subscription")],
-        )
+    if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+        subscription_status = str(subscription.get("status") or "")
+        if subscription.get("active"):
+            add_stage(
+                "plan",
+                "Plan",
+                "complete",
+                f"{subscription.get('plan_name') or 'AI Employee plan'} is active.",
+            )
+        elif subscription_status == "pending_payment":
+            add_stage(
+                "plan",
+                "Plan",
+                "waiting",
+                "Payment pending. The selected paid plan is waiting for payment or Xvond approval.",
+            )
+        else:
+            add_stage(
+                "plan",
+                "Plan",
+                "action_required",
+                "Choose the AI Employee plan that will own runtime entitlement and limits.",
+                [_builder_action("choose_plan", "Choose plan", target="subscription")],
+            )
 
     if provisioned:
         add_stage(
@@ -1560,7 +1561,7 @@ def _self_service_builder_journey(
             "complete",
             "Xvond compiled the job and provisioned its employee capability plan.",
         )
-    elif has_entitlement:
+    elif has_entitlement or not settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
         add_stage(
             "build",
             "Build",
@@ -1992,7 +1993,7 @@ def _self_service_builder_journey(
                 else "The current conversational employee build has been preview-tested safely."
             ),
         )
-    elif provisioned and has_entitlement and setup_complete:
+    elif provisioned and (has_entitlement or not settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION) and setup_complete:
         if routine_required:
             preview_actions = [
                 _builder_action(
@@ -2324,7 +2325,7 @@ def create_employee(
             "agent_id": agent.id,
             "name": agent.name,
             "enabled": agent.enabled,
-            "subscription_required_for_go_live": not has_entitlement,
+            "subscription_required_for_go_live": bool(settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION and not has_entitlement),
             "subscription_required_for_compile": bool(not has_entitlement and not is_self_service),
             "blueprint": blueprint.as_dict(),
             "readiness": blueprint_readiness(blueprint),
@@ -5222,7 +5223,8 @@ def launch_self_service_employee(
         # Existing AI Agents plan still owns employee capacity. The self-service
         # workspace currently owns one employee, so its active subscription is
         # the commercial entitlement for this employee.
-        limits_service.check_agent_limit(db, company.id)
+        if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+            limits_service.check_agent_limit(db, company.id)
 
         target_channel_types = [
             item for item in (state.get("slot_channels") or []) if item != "xvond"
@@ -5283,7 +5285,8 @@ def launch_self_service_employee(
                     },
                 )
             if not channel.enabled:
-                limits_service.check_channel_limit(db, company.id)
+                if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+                    limits_service.check_channel_limit(db, company.id)
                 channel.enabled = True
                 db.flush()
 
@@ -5505,7 +5508,8 @@ def preview_employee_routine(
             if not message:
                 raise HTTPException(409, f"Preview AI node {node_scope} has no prompt")
 
-            limits_service.check_token_limit(db, company.id)
+            if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+                limits_service.check_token_limit(db, company.id)
             selections = runtime_selections(
                 db,
                 company.id,
@@ -5656,15 +5660,16 @@ def test_draft_employee(
             else None
         )
         if pending_spec is not None:
-            if not _has_ai_agents_entitlement(db, current_user.company_id):
-                raise HTTPException(
-                    403,
-                    detail={
-                        "message": "Subscribe to test a staged live revision",
-                        "subscription_required": True,
-                    },
-                )
-            limits_service.check_token_limit(db, current_user.company_id)
+            if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+                if not _has_ai_agents_entitlement(db, current_user.company_id):
+                    raise HTTPException(
+                        403,
+                        detail={
+                            "message": "Subscribe to test a staged live revision",
+                            "subscription_required": True,
+                        },
+                    )
+                limits_service.check_token_limit(db, current_user.company_id)
             selections = runtime_selections(
                 db,
                 current_user.company_id,
@@ -5743,8 +5748,9 @@ def test_draft_employee(
         has_entitlement = _has_ai_agents_entitlement(db, current_user.company_id)
         is_self_service = str(company.onboarding_source or "managed") == "self_service"
         free_tests_remaining = None
-        if has_entitlement:
-            limits_service.check_token_limit(db, current_user.company_id)
+        if has_entitlement or (is_self_service and not settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION):
+            if has_entitlement:
+                limits_service.check_token_limit(db, current_user.company_id)
             _compile_employee_spec(
                 db,
                 company_id=current_user.company_id,
