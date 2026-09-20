@@ -514,6 +514,14 @@ def normalize_openapi_document(document: dict) -> dict:
                 # GET request bodies are not portable enough for the generic
                 # adapter; fail closed instead of manufacturing semantics.
                 continue
+            if (
+                request_mode in {"json", "form"}
+                and _schema_kind(document, request_schema) != "object"
+            ):
+                # The action contract carries structured detail objects. Root
+                # arrays/scalars need a separate payload contract; pretending
+                # they are objects would send the provider the wrong shape.
+                continue
 
             required_body_fields, body_fields = _json_field_metadata(
                 document,
