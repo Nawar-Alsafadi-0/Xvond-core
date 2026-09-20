@@ -80,6 +80,7 @@ from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord
 from backend.app.modules.tools.models import AgentToolAssignment
 from backend.app.modules.tools.business_models import ActionRequest
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.integrations.json_contract import sanitize_json_contract
 from backend.app.modules.files.models import EmployeeFileAsset
 from backend.app.modules.integrations.catalog import (
     compatible_integration_types,
@@ -3000,6 +3001,9 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
                 ]
                 if bounded_enum:
                     field["enum"] = bounded_enum
+            nested_schema = sanitize_json_contract(item.get("schema"))
+            if nested_schema:
+                field["schema"] = nested_schema
             json_fields.append(field)
 
         required_form_fields = [
@@ -3111,6 +3115,9 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
                     ]
                     if bounded_enum:
                         field["enum"] = bounded_enum
+                nested_schema = sanitize_json_contract(item.get("schema"))
+                if nested_schema:
+                    field["schema"] = nested_schema
                 bounded.append(field)
             return bounded
 
