@@ -2191,6 +2191,8 @@ def list_self_service_employees(
         )
         employees = []
         for agent, config in rows:
+            if not is_self_service_employee(company, config):
+                continue
             builder = (config.settings or {}).get("employee_builder") or {}
             spec = builder.get("compiled_spec") if isinstance(builder, dict) else None
             employees.append({
@@ -2228,7 +2230,8 @@ def current_employee(
         company = _company_or_404(db, current_user.company_id)
         self_service_state = None
         builder_journey = None
-        if is_self_service_company(company):
+        self_service_agent = is_self_service_employee(company, config)
+        if self_service_agent:
             compiled_spec = self_service_spec_view(compiled_spec)
             self_service_state = self_service_readiness(
                 db,
@@ -2244,7 +2247,7 @@ def current_employee(
                 builder=builder if isinstance(builder, dict) else {},
             )
         display_channels = list(builder.get("requested_channels", []))
-        if is_self_service_company(company):
+        if self_service_agent:
             display_channels = communication_channels(display_channels)
 
         pending_view = None
@@ -2256,7 +2259,7 @@ def current_employee(
         )
         if pending is not None:
             pending_spec = pending.get("compiled_spec")
-            if is_self_service_company(company) and isinstance(pending_spec, dict):
+            if self_service_agent and isinstance(pending_spec, dict):
                 pending_spec = self_service_spec_view(pending_spec)
             pending_compiled_at = str(pending.get("compiled_at") or "").strip()
             pending_tested = bool(
@@ -2292,12 +2295,8 @@ def current_employee(
                 "missing_information": builder.get("missing_information", []),
                 "compiled": isinstance(compiled_spec, dict),
                 "compiled_spec": compiled_spec if isinstance(compiled_spec, dict) else None,
-                "can_compile": bool(has_entitlement or is_self_service_company(company)),
-                "delivery_mode": (
-                    "self_service"
-                    if is_self_service_company(company)
-                    else "managed"
-                ),
+                "can_compile": bool(has_entitlement or self_service_agent),
+                "delivery_mode": "self_service" if self_service_agent else "managed",
                 "self_service_readiness": self_service_state,
                 "builder_journey": builder_journey,
                 "last_tested_at": builder.get("last_tested_at"),
@@ -2329,19 +2328,9 @@ def create_employee(
     try:
         company = _company_or_404(db, current_user.company_id)
         has_entitlement = _has_ai_agents_entitlement(db, company.id)
-        is_self_service = str(company.onboarding_source or "managed") == "self_service"
-        if not has_entitlement and not is_self_service:
-            service_limits.entitlement(db, company.id, "ai_agents")
-
-        existing = _existing_employee(db, company.id)
-        if existing is not None and not is_self_service:
-            raise HTTPException(
-                409,
-                detail={
-                    "message": "This managed workspace already has an AI employee",
-                    "agent_id": existing.id,
-                },
-            )
+        # This customer-facing Builder always creates a Self-Service project.
+        # Managed delivery is created and maintained through the admin flow.
+        is_self_service = True
 
         try:
             blueprint = _build_final_blueprint(data)
@@ -2368,12 +2357,8 @@ def create_employee(
                 "missing_information": list(blueprint.missing_information),
                 "setup_answers": {},
                 "owner_permissions": {},
-                "onboarding_source": company.onboarding_source,
-                "delivery_mode": (
-                    "self_service"
-                    if is_self_service
-                    else "managed"
-                ),
+                "onboarding_source": "self_service",
+                "delivery_mode": "self_service",
                 "compiled_spec": None,
             },
             "dialect": "auto",
