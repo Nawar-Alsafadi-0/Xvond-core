@@ -170,7 +170,7 @@
             const encodedKey = encodeURIComponent(String(action?.key || ""));
             const fields = Array.isArray(action?.fields) ? action.fields : [];
             return `
-                <div class="employee-builder-setup-answer" data-discovery-access="${encodedKey}">
+                <div class="employee-builder-setup-answer" data-discovery-access="${encodedKey}" data-oauth-interactive="${action?.oauth_interactive === true ? "true" : "false"}">
                     <strong>${escapeHtml(action?.label || "Authorize discovered API")}</strong>
                     ${action?.detail ? `<p class="muted">${escapeHtml(action.detail)}</p>` : ""}
                     ${fields.map(field => {
@@ -182,7 +182,7 @@
                             </label>
                         `;
                     }).join("")}
-                    <button type="button" data-save-discovery-access="${encodedKey}">Authorize and continue</button>
+                    <button type="button" data-save-discovery-access="${encodedKey}">${action?.oauth_interactive === true ? "Connect account" : "Authorize and continue"}</button>
                     <div class="error" data-discovery-access-error="${encodedKey}"></div>
                 </div>
             `;
@@ -1481,11 +1481,33 @@
                 button.disabled = true;
                 if (error) error.textContent = "";
                 try {
-                    await api(
-                        `/customer/employee-builder/${Number(employee.agent_id)}/discover/${encodeURIComponent(key)}/access`,
-                        {method: "POST", body: JSON.stringify(payload)}
-                    );
-                    await loadEmployeeBuilder();
+                    const interactiveOAuth = String(wrapper?.dataset?.oauthInteractive || "false") === "true";
+                    if (interactiveOAuth) {
+                        const result = await api(
+                            `/customer/employee-builder/${Number(employee.agent_id)}/discover/${encodeURIComponent(key)}/oauth/start`,
+                            {method: "POST", body: JSON.stringify(payload)}
+                        );
+                        const authorizationUrl = String(result?.authorization_url || "");
+                        if (!authorizationUrl) throw new Error("OAuth authorization URL is missing.");
+                        const popup = window.open(authorizationUrl, "xvond-oauth", "popup,width=620,height=760");
+                        if (!popup) throw new Error("Allow pop-ups to connect this account.");
+                        const onOAuthMessage = async event => {
+                            if (event.origin !== window.location.origin || event?.data?.type !== "xvond-oauth") return;
+                            window.removeEventListener("message", onOAuthMessage);
+                            if (event.data.status === "connected") {
+                                await loadEmployeeBuilder();
+                            } else if (error) {
+                                error.textContent = "Account authorization was not completed.";
+                            }
+                        };
+                        window.addEventListener("message", onOAuthMessage);
+                    } else {
+                        await api(
+                            `/customer/employee-builder/${Number(employee.agent_id)}/discover/${encodeURIComponent(key)}/access`,
+                            {method: "POST", body: JSON.stringify(payload)}
+                        );
+                        await loadEmployeeBuilder();
+                    }
                 } catch (err) {
                     if (error) error.textContent = err?.message || "Could not validate this credential.";
                 } finally {

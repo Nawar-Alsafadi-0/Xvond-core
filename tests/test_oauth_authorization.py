@@ -25,7 +25,8 @@ def test_authorization_uses_signed_state_and_pkce(monkeypatch):
     assert payload["company_id"] == 7
     assert payload["agent_id"] == 9
     assert payload["requirement_key"] == "orders_api"
-    assert payload["code_verifier"]
+    assert "code_verifier" not in payload
+    assert result["code_verifier"]
 
 
 def test_tampered_oauth_state_is_rejected(monkeypatch):
@@ -65,8 +66,43 @@ def test_exchange_sends_pkce_verifier(monkeypatch):
         },
         code="code-1",
         client_secret="secret-1",
+        code_verifier="verifier",
     )
     assert token["access_token"] == "token"
     assert token["refresh_token"] == "refresh"
     assert captured["form_data"]["code_verifier"] == "verifier"
     assert captured["method"] == "POST"
+
+
+def test_authorization_state_binds_pending_integration(monkeypatch):
+    monkeypatch.setattr(oauth, "validate_public_http_url", lambda value: value)
+    result = oauth.create_oauth_authorization(
+        {
+            "flow": "authorization_code",
+            "authorization_url": "https://accounts.example.com/oauth/authorize",
+            "token_url": "https://accounts.example.com/oauth/token",
+        },
+        client_id="client-1",
+        redirect_uri="https://xvond.example/customer/employee-builder/oauth/callback",
+        state_secret="state-secret",
+        company_id=3,
+        agent_id=4,
+        requirement_key="orders_api",
+        integration_id=55,
+    )
+    payload = oauth.consume_oauth_state(result["state"], state_secret="state-secret")
+    assert payload["integration_id"] == 55
+
+
+def test_exchange_rejects_missing_pkce_verifier():
+    with pytest.raises(ValueError, match="PKCE verifier"):
+        oauth.exchange_authorization_code(
+            state_payload={
+                "token_url": "https://accounts.example.com/oauth/token",
+                "redirect_uri": "https://xvond.example/oauth/callback",
+                "client_id": "client-1",
+            },
+            code="code-1",
+            client_secret="secret-1",
+            code_verifier="",
+        )

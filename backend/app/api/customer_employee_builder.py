@@ -2,7 +2,8 @@ from copy import deepcopy
 import re
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from backend.app.core.ai.engine import ProviderExecutionError, ai_engine
@@ -92,6 +93,11 @@ from backend.app.modules.integrations.capability_discovery import (
     discover_openapi_contract,
     oauth_client_credentials_token,
     public_api_probe,
+)
+from backend.app.modules.integrations.oauth_authorization import (
+    consume_oauth_state,
+    create_oauth_authorization,
+    exchange_authorization_code,
 )
 
 router = APIRouter(
@@ -1686,6 +1692,7 @@ def _self_service_builder_journey(
                     scheme = auth_schemes[0] if len(auth_schemes) == 1 else {}
                     auth_type = str(scheme.get("auth_type") or "")
                     fields: list[dict] = []
+                    oauth_interactive = False
                     if auth_type == "basic":
                         fields = [
                             {"key": "username", "label": "Username", "type": "text"},
@@ -1696,7 +1703,10 @@ def _self_service_builder_journey(
                             item for item in (scheme.get("flows") or [])
                             if isinstance(item, dict)
                         ]
-                        if any(item.get("flow") == "client_credentials" for item in flows):
+                        oauth_interactive = any(
+                            item.get("flow") == "authorization_code" for item in flows
+                        )
+                        if oauth_interactive or any(item.get("flow") == "client_credentials" for item in flows):
                             fields = [
                                 {"key": "client_id", "label": "OAuth client ID", "type": "text"},
                                 {"key": "client_secret", "label": "OAuth client secret", "type": "password"},
@@ -1718,6 +1728,7 @@ def _self_service_builder_journey(
                                 "Provide only the missing credential so Xvond can validate and finish the connection."
                             ),
                             fields=fields,
+                            oauth_interactive=bool(auth_type == "oauth" and oauth_interactive),
                         )
                     )
                     continue
@@ -3286,6 +3297,409 @@ def discover_self_service_capability(
             "operation_count": len(operations),
             "unresolved_operations": unresolved,
         }
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+
+@router.post("/{agent_id}/discover/{requirement_key}/oauth/start")
+def start_discovered_oauth_authorization(
+    agent_id: int,
+    requirement_key: str,
+    data: EmployeeBuilderDiscoveryAccessRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Start provider-neutral OAuth authorization for a discovered API."""
+    key = normalize_requirement_key(requirement_key)
+    if not key:
+        raise HTTPException(400, "Capability requirement key is invalid")
+    client_id = str(data.client_id or "").strip()
+    client_secret = str(data.client_secret or "")
+    if not client_id or not client_secret:
+        raise HTTPException(400, "OAuth client ID and client secret are required")
+    if not settings.PUBLIC_BASE_URL:
+        raise HTTPException(409, "PUBLIC_BASE_URL is required for OAuth authorization")
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "OAuth setup is available only for Self-Service employees")
+        agent = (
+            db.query(AIAgent)
+            .filter(AIAgent.id == int(agent_id), AIAgent.company_id == company.id)
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        config = _employee_config_or_404(db, agent)
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        if agent.enabled and pending is None:
+            raise HTTPException(409, "Stage a live revision before changing discovered connections")
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
+        if not isinstance(compiled_spec, dict):
+            raise HTTPException(409, "Build the employee before authorizing this capability")
+
+        requirement = next(
+            (
+                item
+                for item in (compiled_spec.get("requirements") or [])
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HTTPException(404, "Capability requirement not found")
+        discovery = requirement.get("discovery")
+        if not isinstance(discovery, dict):
+            raise HTTPException(409, "This requirement has no discovered API contract")
+        operations = _bounded_connection_operations(
+            requirement.get("integration_operations")
+            if isinstance(requirement.get("integration_operations"), dict)
+            else {}
+        )
+        base_url = str(discovery.get("base_url") or "").strip().rstrip("/")
+        if not base_url or not operations:
+            raise HTTPException(409, "Discovered API contract is incomplete")
+
+        oauth_schemes = [
+            item
+            for item in (discovery.get("auth_schemes") or [])
+            if isinstance(item, dict)
+            and str(item.get("auth_type") or "") == "oauth"
+        ]
+        if len(oauth_schemes) != 1:
+            raise HTTPException(409, "A single OAuth scheme is required for generic authorization")
+        flows = [
+            item
+            for item in (oauth_schemes[0].get("flows") or [])
+            if isinstance(item, dict)
+            and item.get("flow") == "authorization_code"
+        ]
+        if len(flows) != 1:
+            raise HTTPException(409, "This API does not expose one supported authorization-code flow")
+
+        # A retry for the same employee requirement supersedes the previous
+        # disabled OAuth attempt. Removing it keeps setup idempotent and prevents
+        # abandoned popups from consuming the customer's integration allowance.
+        stale_pending = (
+            db.query(CompanyIntegration)
+            .filter(
+                CompanyIntegration.company_id == company.id,
+                CompanyIntegration.integration_type == "custom_api",
+                CompanyIntegration.enabled.is_(False),
+            )
+            .all()
+        )
+        for candidate in stale_pending:
+            candidate_config = reveal_config(candidate.config or {})
+            candidate_pending = (
+                candidate_config.get("_xvond_oauth_pending")
+                if isinstance(candidate_config.get("_xvond_oauth_pending"), dict)
+                else {}
+            )
+            if (
+                int(candidate_pending.get("agent_id") or 0) == agent.id
+                and normalize_requirement_key(candidate_pending.get("requirement_key")) == key
+            ):
+                db.delete(candidate)
+        db.flush()
+
+        current = (
+            db.query(CompanyIntegration)
+            .filter(CompanyIntegration.company_id == company.id)
+            .count()
+        )
+        service_limits.check_current(db, company.id, "ai_agents", "integrations", current)
+
+        redirect_uri = (
+            f"{settings.PUBLIC_BASE_URL}"
+            f"/customer/employee-builder/oauth/callback"
+        )
+        integration_config = {
+            "base_url": base_url,
+            "operations": operations,
+            "_xvond_oauth_pending": {
+                "agent_id": agent.id,
+                "requirement_key": key,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "flow": flows[0],
+                "redirect_uri": redirect_uri,
+            },
+            "_xvond_discovery": {
+                "source": discovery.get("source"),
+                "docs_url": discovery.get("docs_url"),
+                "requirement_key": key,
+            },
+        }
+        integration = CompanyIntegration(
+            company_id=company.id,
+            integration_type="custom_api",
+            name=(
+                str(discovery.get("service_hint") or "").strip()
+                or str(discovery.get("contract_title") or "").strip()
+                or key.replace("_", " ").title()
+            )[:200],
+            config=integration_config,
+            enabled=False,
+        )
+        db.add(integration)
+        db.flush()
+
+        authorization = create_oauth_authorization(
+            flows[0],
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            state_secret=settings.GENERIC_OAUTH_STATE_SECRET,
+            company_id=company.id,
+            agent_id=agent.id,
+            requirement_key=key,
+            integration_id=integration.id,
+        )
+        integration_config["_xvond_oauth_pending"]["pkce_verifier_secret"] = authorization["code_verifier"]
+        integration.config = integration_config
+        db.commit()
+        return {
+            "status": "authorization_required",
+            "authorization_url": authorization["authorization_url"],
+            "expires_in": authorization["expires_in"],
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.get("/oauth/callback", response_class=HTMLResponse)
+def finish_discovered_oauth_authorization(
+    code: str | None = Query(default=None, max_length=8000),
+    state: str | None = Query(default=None, max_length=20000),
+    error: str | None = Query(default=None, max_length=1000),
+    current_user: User = Depends(require_customer_manager),
+):
+    """Finish a signed generic OAuth authorization and attach it to the employee."""
+    if error:
+        return HTMLResponse(
+            "<html><body><h3>Connection cancelled</h3>"
+            "<script>if(window.opener){window.opener.postMessage({type:'xvond-oauth',status:'error'},window.location.origin);}window.close();</script>"
+            "</body></html>",
+            status_code=400,
+        )
+    if not code or not state:
+        raise HTTPException(400, "OAuth callback is missing code or state")
+
+    db = SessionLocal()
+    try:
+        payload = consume_oauth_state(
+            state,
+            state_secret=settings.GENERIC_OAUTH_STATE_SECRET,
+        )
+        company_id = int(payload.get("company_id") or 0)
+        if company_id != int(current_user.company_id):
+            raise HTTPException(403, "OAuth state does not belong to the current customer")
+        agent_id = int(payload.get("agent_id") or 0)
+        integration_id = int(payload.get("integration_id") or 0)
+        key = normalize_requirement_key(payload.get("requirement_key"))
+        if not company_id or not agent_id or not integration_id or not key:
+            raise HTTPException(400, "OAuth state is incomplete")
+
+        integration = (
+            db.query(CompanyIntegration)
+            .filter(
+                CompanyIntegration.id == integration_id,
+                CompanyIntegration.company_id == company_id,
+            )
+            .first()
+        )
+        if integration is None:
+            raise HTTPException(404, "Pending OAuth integration was not found")
+        raw_config = reveal_config(integration.config or {})
+        pending_oauth = (
+            raw_config.get("_xvond_oauth_pending")
+            if isinstance(raw_config.get("_xvond_oauth_pending"), dict)
+            else {}
+        )
+        if (
+            int(pending_oauth.get("agent_id") or 0) != agent_id
+            or normalize_requirement_key(pending_oauth.get("requirement_key")) != key
+        ):
+            raise HTTPException(409, "OAuth state does not match the pending integration")
+
+        token = exchange_authorization_code(
+            state_payload=payload,
+            code=code,
+            client_secret=str(pending_oauth.get("client_secret") or ""),
+            code_verifier=str(pending_oauth.get("pkce_verifier_secret") or ""),
+        )
+        operations = _bounded_connection_operations(raw_config.get("operations") or {})
+        base_url = str(raw_config.get("base_url") or "").strip().rstrip("/")
+        auth_config = {
+            "auth_type": "bearer",
+            "api_key": token["access_token"],
+        }
+        evidence = api_connection_probe(
+            {"base_url": base_url, "operations": operations},
+            auth_config=auth_config,
+        )
+        if not evidence:
+            raise HTTPException(
+                409,
+                "Xvond could not safely validate the authorized account with a read-only operation",
+            )
+
+        integration.config = {
+            "base_url": base_url,
+            "validation_endpoint": str(evidence.get("endpoint") or ""),
+            "operations": operations,
+            "_xvond_validation": evidence,
+            "_xvond_discovery": raw_config.get("_xvond_discovery") or {},
+            "auth_type": "bearer",
+            "api_key": token["access_token"],
+            "_xvond_oauth": {
+                "flow": "authorization_code",
+                "token_url": payload.get("token_url"),
+                "scopes": (pending_oauth.get("flow") or {}).get("scopes") or [],
+                "client_id": pending_oauth.get("client_id"),
+                "client_secret": pending_oauth.get("client_secret"),
+                "refresh_token": token.get("refresh_token"),
+                "expires_in": token.get("expires_in"),
+                "scope": token.get("scope"),
+            },
+        }
+        integration.enabled = True
+
+        agent = (
+            db.query(AIAgent)
+            .filter(AIAgent.id == agent_id, AIAgent.company_id == company_id)
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
+        if not isinstance(compiled_spec, dict):
+            raise HTTPException(409, "Employee build state is missing")
+
+        updated = deepcopy(compiled_spec)
+        requirements = [
+            dict(item) if isinstance(item, dict) else item
+            for item in (updated.get("requirements") or [])
+        ]
+        requirement = next(
+            (
+                item for item in requirements
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HTTPException(404, "Capability requirement not found")
+
+        requirement["integration_id"] = integration.id
+        requirement["integration_type"] = "custom_api"
+        requirement["integration_operations"] = operations
+        requirement["fulfillment_mode"] = "external_connection"
+        requirement["validation_required"] = True
+        requirement["requires_connection"] = True
+        requirement["status"] = "xvond_build"
+        requirement["delivery_mode"] = "compose"
+        discovery = dict(requirement.get("discovery") or {})
+        discovery["status"] = "resolved"
+        discovery["credential_configured"] = True
+        requirement["discovery"] = discovery
+
+        updated["requirements"] = requirements
+        updated["setup_required"] = [
+            item
+            for item in (updated.get("setup_required") or [])
+            if normalize_requirement_key(item) != key
+        ]
+        updated, unresolved = _resolve_bound_graph_operations(
+            updated,
+            requirement_key=key,
+            operations=operations,
+        )
+        if unresolved:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "api_operation_selection_required",
+                    "requirement_key": key,
+                    "unresolved": unresolved,
+                },
+            )
+
+        if isinstance(pending, dict):
+            pending["compiled_spec"] = updated
+            pending["status"] = "built"
+            pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            _invalidate_preview_evidence(pending)
+            builder["pending_revision"] = pending
+        else:
+            updated, delivery = provision_compiled_capabilities(
+                db,
+                agent_id=agent.id,
+                spec=updated,
+            )
+            builder["compiled_spec"] = updated
+            builder["delivery"] = delivery
+            builder["missing_information"] = list(updated.get("setup_required") or [])
+            _invalidate_preview_evidence(builder)
+            company = _company_or_404(db, company_id)
+            agent.system_prompt = build_compiled_employee_system_prompt(
+                owner_name=company.name,
+                spec=updated,
+            )
+
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.commit()
+        return HTMLResponse(
+            "<html><body><h3>Account connected</h3>"
+            "<script>if(window.opener){window.opener.postMessage({type:'xvond-oauth',status:'connected'},window.location.origin);}window.close();</script>"
+            "</body></html>"
+        )
     except HTTPException:
         db.rollback()
         raise

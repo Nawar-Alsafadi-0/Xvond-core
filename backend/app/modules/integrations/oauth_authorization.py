@@ -31,6 +31,7 @@ def create_oauth_authorization(
     company_id: int,
     agent_id: int,
     requirement_key: str,
+    integration_id: int | None = None,
 ) -> dict:
     if not state_secret:
         raise ValueError("OAuth state signing secret is not configured")
@@ -52,9 +53,9 @@ def create_oauth_authorization(
         "company_id": int(company_id),
         "agent_id": int(agent_id),
         "requirement_key": str(requirement_key),
+        "integration_id": int(integration_id) if integration_id is not None else None,
         "nonce": nonce,
         "exp": int(time.time()) + STATE_TTL_SECONDS,
-        "code_verifier": verifier,
         "token_url": token_url,
         "redirect_uri": redirect_uri,
         "client_id": str(client_id),
@@ -77,6 +78,7 @@ def create_oauth_authorization(
     return {
         "authorization_url": authorization_url + separator + urlencode(params),
         "state": state,
+        "code_verifier": verifier,
         "expires_in": STATE_TTL_SECONDS,
     }
 
@@ -100,7 +102,10 @@ def exchange_authorization_code(
     state_payload: dict,
     code: str,
     client_secret: str,
+    code_verifier: str,
 ) -> dict:
+    if not str(code_verifier or "").strip():
+        raise ValueError("OAuth PKCE verifier is missing")
     result = safe_http_request(
         url=str(state_payload.get("token_url") or ""),
         method="POST",
@@ -111,7 +116,7 @@ def exchange_authorization_code(
             "redirect_uri": str(state_payload.get("redirect_uri") or ""),
             "client_id": str(state_payload.get("client_id") or ""),
             "client_secret": str(client_secret),
-            "code_verifier": str(state_payload.get("code_verifier") or ""),
+            "code_verifier": str(code_verifier or ""),
         },
         timeout=15,
         max_response_bytes=64_000,
