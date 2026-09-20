@@ -72,8 +72,13 @@ def test_every_customer_namespace_route_requires_customer_authentication():
         "require_customer_manager",
         "require_customer_admin",
     }
+    public_oauth_callbacks = {
+        "/customer/meta/channels/instagram/oauth/callback",
+    }
     for route in _mounted_api_routes():
         if not route.path.startswith("/customer/") and route.path != "/customer":
+            continue
+        if route.path in public_oauth_callbacks:
             continue
         names = _dependency_names(route)
         if not accepted.intersection(names):
@@ -118,3 +123,14 @@ def test_usage_and_ai_agent_management_are_tenant_manager_scoped():
         if "require_customer_manager" not in names:
             failures.append((sorted(route.methods), route.path, sorted(names)))
     assert failures == []
+
+
+def test_public_customer_oauth_callbacks_are_explicit_and_non_mutating():
+    callbacks = {
+        "/customer/meta/channels/instagram/oauth/callback",
+    }
+    mounted = {route.path: route for route in _mounted_api_routes()}
+    for path in callbacks:
+        route = mounted[path]
+        assert route.methods == {"GET"}
+        assert _dependency_names(route) == set()
