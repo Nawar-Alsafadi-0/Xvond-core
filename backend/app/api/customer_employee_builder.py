@@ -3888,6 +3888,8 @@ def provide_discovered_capability_access(
                     "scopes": client_flow.get("scopes") or [],
                     "client_id": client_id,
                     "client_secret": client_secret,
+                    "expires_in": token.get("expires_in"),
+                    **oauth_token_timing(token.get("expires_in")),
                 },
             }
 
