@@ -615,6 +615,25 @@ def _ensure_fresh_oauth_access_token(
     finally:
         execution_claims.release(claim_key)
 
+MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS = 250_000
+
+
+def _integration_response_value(result: dict):
+    """Expose bounded JSON responses as structured data for later graph nodes."""
+    raw = result.get("response") if isinstance(result, dict) else None
+    if not isinstance(raw, str):
+        return raw
+    if len(raw) > MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS:
+        return raw
+    text = raw.strip()
+    if not text:
+        return ""
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return raw
+
+
 def _integration_call(
     db,
     context: dict,
@@ -907,11 +926,14 @@ def _integration_call(
         return ToolResult(success=False, error=str(exc))
     status = int(result.get("status_code") or 0)
     success = 200 <= status < 300
+    response_value = _integration_response_value(result)
     return ToolResult(
         success=success,
         data={
             "integration_id": integration.id,
             "integration": integration.name,
+            "status_code": status,
+            "response": response_value,
             "http": result,
             "idempotency_key": idempotency_key,
         },
