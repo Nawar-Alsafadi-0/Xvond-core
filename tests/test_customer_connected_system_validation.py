@@ -414,3 +414,151 @@ def test_config_change_invalidates_preview_and_is_blocked_while_live(
     detail = str(exc.value.detail).lower()
     assert "live employee" in detail
     assert "stage a revision" in detail
+
+
+def test_expired_generic_oauth_refreshes_before_business_action(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {
+                "execute": {
+                    "method": "POST",
+                    "endpoint": "/bookings",
+                    "input_mode": "json",
+                }
+            },
+            "auth_type": "bearer",
+            "api_key": "expired-access",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+            "_xvond_oauth": {
+                "flow": "authorization_code",
+                "token_url": "https://accounts.example.com/oauth/token",
+                "client_id": "client-1",
+                "client_secret": "secret-1",
+                "refresh_token": "refresh-1",
+                "expires_at": 1,
+            },
+        }
+        db.commit()
+
+    monkeypatch.setattr(
+        action_runtime,
+        "refresh_oauth_access_token",
+        lambda oauth_config: {
+            "access_token": "fresh-access",
+            "refresh_token": "refresh-2",
+            "expires_in": 3600,
+            "scope": None,
+            "token_type": "Bearer",
+        },
+    )
+    captured = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 200, "response": '{"id":"booking-1"}'}
+
+    monkeypatch.setattr(action_runtime, "safe_http_request", fake_request)
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "booking",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "validation_required": True,
+                    "operations": {
+                        "execute": {
+                            "method": "POST",
+                            "endpoint": "/bookings",
+                            "input_mode": "json",
+                        }
+                    },
+                }
+            },
+            {"details": {"customer_name": "Test"}},
+            "execute",
+            idempotency_key="booking-refresh-1",
+        )
+        assert result.success is True
+        assert captured["headers"]["Authorization"] == "Bearer fresh-access"
+        refreshed = action_runtime.reveal_config(db.get(CompanyIntegration, 11).config)
+        assert refreshed["api_key"] == "fresh-access"
+        assert refreshed["_xvond_oauth"]["refresh_token"] == "refresh-2"
+        assert refreshed["_xvond_oauth"]["expires_at"] > refreshed["_xvond_oauth"]["obtained_at"]
+
+
+def test_failed_generic_oauth_refresh_blocks_business_side_effect(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {
+                "execute": {"method": "POST", "endpoint": "/bookings"}
+            },
+            "auth_type": "bearer",
+            "api_key": "expired-access",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+            "_xvond_oauth": {
+                "flow": "authorization_code",
+                "token_url": "https://accounts.example.com/oauth/token",
+                "client_id": "client-1",
+                "client_secret": "secret-1",
+                "refresh_token": "refresh-1",
+                "expires_at": 1,
+            },
+        }
+        db.commit()
+
+    def fail_refresh(_oauth_config):
+        raise ValueError("provider rejected refresh")
+
+    monkeypatch.setattr(action_runtime, "refresh_oauth_access_token", fail_refresh)
+    monkeypatch.setattr(
+        action_runtime,
+        "safe_http_request",
+        lambda **kwargs: pytest.fail("Business API must not run after refresh failure"),
+    )
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "booking",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "validation_required": True,
+                    "operations": {
+                        "execute": {"method": "POST", "endpoint": "/bookings"}
+                    },
+                }
+            },
+            {"details": {"customer_name": "Test"}},
+            "execute",
+            idempotency_key="booking-refresh-fail-1",
+        )
+
+    assert result.success is False
+    assert "OAuth token refresh failed" in str(result.error)
