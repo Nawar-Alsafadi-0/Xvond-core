@@ -32,8 +32,9 @@ from backend.app.modules.channels.catalog import (
     validate_channel_config,
 )
 from backend.app.modules.channels.delivery import deactivate_managed_channel_route
-from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.channels.models import AgentChannel, ManagedChannelOutboundDelivery
 from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
+from backend.app.modules.channels.whatsapp_models import WhatsAppOutboundDelivery
 from backend.app.modules.knowledge.models import AgentKnowledge, KnowledgeDocument
 
 router = APIRouter(prefix="/admin/channels", tags=["Xvond Admin - Channels"])
@@ -911,6 +912,20 @@ def delete_channel(
                 "Managed channel route cleanup could not be confirmed; channel was not deleted",
             )
 
+        # Delivery rows reference the channel with a restrictive foreign key.
+        # They are transport/retry metadata; conversation and message history live
+        # independently and must remain intact when an operator removes a channel.
+        whatsapp_delivery_count = (
+            db.query(WhatsAppOutboundDelivery)
+            .filter(WhatsAppOutboundDelivery.channel_id == channel.id)
+            .delete(synchronize_session=False)
+        )
+        managed_delivery_count = (
+            db.query(ManagedChannelOutboundDelivery)
+            .filter(ManagedChannelOutboundDelivery.channel_id == channel.id)
+            .delete(synchronize_session=False)
+        )
+
         _audit_channel(
             db,
             current_admin,
@@ -919,6 +934,8 @@ def delete_channel(
             details={
                 "managed_route_cleanup": cleanup.get("reason"),
                 "managed_route_deactivated": cleanup.get("deactivated"),
+                "deleted_whatsapp_delivery_rows": int(whatsapp_delivery_count or 0),
+                "deleted_managed_delivery_rows": int(managed_delivery_count or 0),
             },
         )
         db.delete(channel)
