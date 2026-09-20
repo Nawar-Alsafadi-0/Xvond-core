@@ -810,7 +810,7 @@ def _integration_call(
     input_mode = str(
         (op_config or {}).get("input_mode") or ("query" if method == "GET" else "json")
     ).strip().lower()
-    if input_mode not in {"json", "form", "multipart", "query", "none"}:
+    if input_mode not in {"json", "json_array", "form", "multipart", "query", "none"}:
         return ToolResult(success=False, error="Integration operation input mode is invalid")
     if input_mode == "json":
         source = request_payload if isinstance(request_payload, dict) else {}
@@ -850,6 +850,97 @@ def _integration_call(
                 ),
                 data={"missing_fields": missing_json_fields},
             )
+
+    if input_mode == "json_array":
+        source = request_payload if isinstance(request_payload, dict) else {}
+        items = source.get("items")
+        if not isinstance(items, list):
+            return ToolResult(
+                success=False,
+                error=f"API operation '{operation}' requires items to be a JSON array",
+                data={"missing_fields": ["items"]},
+            )
+        try:
+            max_items = int((op_config or {}).get("array_max_items") or 100)
+        except (TypeError, ValueError):
+            max_items = 100
+        max_items = max(1, min(max_items, 100))
+        if len(items) > max_items:
+            return ToolResult(
+                success=False,
+                error=f"API operation '{operation}' accepts at most {max_items} array items",
+            )
+
+        item_kind = str((op_config or {}).get("array_item_kind") or "").strip().lower()
+        if item_kind not in {"object", "string", "integer", "number", "boolean"}:
+            return ToolResult(
+                success=False,
+                error=f"API operation '{operation}' has an invalid array item contract",
+            )
+
+        raw_item_fields = (op_config or {}).get("array_item_fields")
+        raw_item_fields = raw_item_fields if isinstance(raw_item_fields, list) else []
+        declared_item_fields = [
+            str(item.get("key") or "").strip()
+            for item in raw_item_fields
+            if isinstance(item, dict) and str(item.get("key") or "").strip()
+        ]
+        required_item_fields = [
+            str(item).strip()
+            for item in ((op_config or {}).get("required_array_item_fields") or [])
+            if str(item or "").strip()
+        ]
+        allowed_item_fields = list(
+            dict.fromkeys([*declared_item_fields, *required_item_fields])
+        )
+
+        normalized_items = []
+        for index, item in enumerate(items):
+            if item_kind == "object":
+                if not isinstance(item, dict):
+                    return ToolResult(
+                        success=False,
+                        error=f"Array item {index} must be an object",
+                    )
+                shaped = (
+                    {
+                        key: value
+                        for key, value in item.items()
+                        if key in allowed_item_fields
+                    }
+                    if allowed_item_fields
+                    else dict(item)
+                )
+                missing = [
+                    key
+                    for key in required_item_fields
+                    if key not in shaped or shaped.get(key) in (None, "")
+                ]
+                if missing:
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"Array item {index} is missing required field(s): "
+                            + ", ".join(missing)
+                        ),
+                        data={"item_index": index, "missing_fields": missing},
+                    )
+                normalized_items.append(shaped)
+                continue
+
+            if item_kind == "string":
+                if not isinstance(item, str):
+                    return ToolResult(success=False, error=f"Array item {index} must be a string")
+            elif item_kind == "integer":
+                if isinstance(item, bool) or not isinstance(item, int):
+                    return ToolResult(success=False, error=f"Array item {index} must be an integer")
+            elif item_kind == "number":
+                if isinstance(item, bool) or not isinstance(item, (int, float)):
+                    return ToolResult(success=False, error=f"Array item {index} must be a number")
+            elif item_kind == "boolean" and not isinstance(item, bool):
+                return ToolResult(success=False, error=f"Array item {index} must be a boolean")
+            normalized_items.append(item)
+        request_payload = normalized_items
 
     multipart_files = None
     if input_mode in {"form", "multipart"}:
@@ -1024,7 +1115,7 @@ def _integration_call(
             url=url,
             method=method,
             headers=headers,
-            json_data=request_payload if input_mode == "json" else None,
+            json_data=request_payload if input_mode in {"json", "json_array"} else None,
             form_data=request_payload if input_mode == "form" else None,
             multipart_data=request_payload if input_mode == "multipart" else None,
             multipart_files=multipart_files if input_mode == "multipart" else None,

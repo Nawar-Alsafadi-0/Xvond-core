@@ -453,6 +453,27 @@ def _schema_kind(document: dict, schema: dict) -> str:
     return "unknown"
 
 
+def _json_array_request_metadata(document: dict, schema: dict) -> dict:
+    resolved = _local_schema_ref(document, schema) or schema
+    if not isinstance(resolved, dict) or _schema_kind(document, resolved) != "array":
+        return {}
+    items = resolved.get("items")
+    if not isinstance(items, dict):
+        return {}
+    item_kind = _schema_kind(document, items)
+    if item_kind not in {"object", "string", "integer", "number", "boolean"}:
+        return {}
+    result: dict[str, Any] = {
+        "array_item_kind": item_kind,
+        "array_max_items": 100,
+    }
+    if item_kind == "object":
+        required, fields = _json_field_metadata(document, items)
+        result["required_array_item_fields"] = required
+        result["array_item_fields"] = fields
+    return result
+
+
 def _response_metadata(document: dict, operation: dict) -> dict:
     status, schema = _success_response_schema(document, operation)
     if not status:
@@ -554,27 +575,35 @@ def normalize_openapi_document(document: dict) -> dict:
             )
             if request_mode == "unsupported":
                 continue
+            request_kind = _schema_kind(document, request_schema)
             if method == "GET" and request_mode in {"json", "form", "multipart"}:
                 # GET request bodies are not portable enough for the generic
                 # adapter; fail closed instead of manufacturing semantics.
                 continue
-            if (
-                request_mode in {"json", "form", "multipart"}
-                and _schema_kind(document, request_schema) != "object"
-            ):
-                # The action contract carries structured detail objects. Root
-                # arrays/scalars need a separate payload contract; pretending
-                # they are objects would send the provider the wrong shape.
+            if request_mode in {"form", "multipart"} and request_kind != "object":
+                continue
+            if request_mode == "json" and request_kind not in {"object", "array"}:
                 continue
 
-            required_body_fields, body_fields = _json_field_metadata(
-                document,
-                request_schema,
+            array_metadata = (
+                _json_array_request_metadata(document, request_schema)
+                if request_mode == "json" and request_kind == "array"
+                else {}
+            )
+            if request_mode == "json" and request_kind == "array" and not array_metadata:
+                continue
+
+            required_body_fields, body_fields = (
+                _json_field_metadata(document, request_schema)
+                if request_kind == "object"
+                else ([], [])
             )
             response_metadata = _response_metadata(document, operation)
 
             if method == "GET":
                 input_mode = "query"
+            elif request_mode == "json" and request_kind == "array":
+                input_mode = "json_array"
             elif request_mode in {"json", "form", "multipart"}:
                 input_mode = request_mode
             elif has_query_parameters:
@@ -600,6 +629,7 @@ def normalize_openapi_document(document: dict) -> dict:
                 "json_fields": body_fields if input_mode == "json" else [],
                 "required_form_fields": required_body_fields if input_mode in {"form", "multipart"} else [],
                 "form_fields": body_fields if input_mode in {"form", "multipart"} else [],
+                **array_metadata,
                 **response_metadata,
                 "description": str(
                     operation.get("summary")

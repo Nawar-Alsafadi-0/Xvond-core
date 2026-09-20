@@ -919,6 +919,16 @@ def _compiler_connection_context(db, *, company_id: int) -> list[dict]:
                             for field in (value.get("form_fields") or [])[:50]
                             if isinstance(field, dict)
                         ],
+                        "array_item_kind": str(value.get("array_item_kind") or "")[:20],
+                        "array_max_items": int(value.get("array_max_items") or 100),
+                        "required_array_item_fields": list(
+                            value.get("required_array_item_fields") or []
+                        )[:50],
+                        "array_item_fields": [
+                            dict(field)
+                            for field in (value.get("array_item_fields") or [])[:50]
+                            if isinstance(field, dict)
+                        ],
                         "response_status": str(value.get("response_status") or "")[:3],
                         "response_kind": str(value.get("response_kind") or "")[:20],
                         "response_fields": [
@@ -2931,7 +2941,7 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
         input_mode = str(
             raw.get("input_mode") or ("query" if method == "GET" else "json")
         ).strip().lower()
-        if input_mode not in {"json", "form", "multipart", "query", "none"}:
+        if input_mode not in {"json", "json_array", "form", "multipart", "query", "none"}:
             raise HTTPException(400, f"Invalid input mode for operation {name}")
         path_params = list(dict.fromkeys(
             re.findall(r"{([A-Za-z_][A-Za-z0-9_]{0,63})}", endpoint)
@@ -3041,6 +3051,23 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
                 if len(required_json_fields) >= 50:
                     break
 
+        array_item_kind = str(raw.get("array_item_kind") or "").strip().lower()
+        if array_item_kind not in {"object", "string", "integer", "number", "boolean"}:
+            array_item_kind = ""
+        try:
+            array_max_items = int(raw.get("array_max_items") or 100)
+        except (TypeError, ValueError):
+            array_max_items = 100
+        array_max_items = max(1, min(array_max_items, 100))
+        required_array_item_fields = [
+            str(item).strip()
+            for item in (raw.get("required_array_item_fields") or [])
+            if re.fullmatch(
+                r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}",
+                str(item or "").strip(),
+            )
+        ][:50]
+
         response_status = str(raw.get("response_status") or "").strip()
         if not re.fullmatch(r"2[0-9][0-9]", response_status):
             response_status = ""
@@ -3101,6 +3128,16 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
             "form_fields": form_fields,
             "description": str(raw.get("description") or "").strip()[:500],
         }
+        if input_mode == "json_array" and array_item_kind:
+            operation_result["array_item_kind"] = array_item_kind
+            operation_result["array_max_items"] = array_max_items
+            if required_array_item_fields:
+                operation_result["required_array_item_fields"] = list(
+                    dict.fromkeys(required_array_item_fields)
+                )
+            array_item_fields = bounded_response_fields("array_item_fields")
+            if array_item_fields:
+                operation_result["array_item_fields"] = array_item_fields
         if response_status:
             operation_result["response_status"] = response_status
         if response_kind:

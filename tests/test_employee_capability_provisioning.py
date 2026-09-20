@@ -4673,3 +4673,38 @@ def test_packaged_calendar_booking_keeps_xvond_semantic_booking_fields():
         "date_field": "date",
         "time_field": "time",
     }
+
+def test_external_root_json_array_action_exposes_items_json_field():
+    action = build_managed_action_config(
+        requirement={
+            "key": "batch_records",
+            "kind": "integration",
+            "purpose": "Create records in a batch",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 101,
+            "validation_required": True,
+            "integration_operations": {
+                "execute": {
+                    "method": "POST",
+                    "endpoint": "/records/batch",
+                    "input_mode": "json_array",
+                    "array_item_kind": "object",
+                    "array_max_items": 100,
+                    "required_array_item_fields": ["name"],
+                    "array_item_fields": [
+                        {"key": "name", "required": True, "type": "string"},
+                    ],
+                }
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    assert action["fields"] == [
+        {
+            "key": "items",
+            "label": "Items",
+            "required": True,
+            "type": "json",
+        }
+    ]
