@@ -37,6 +37,8 @@ def test_teams_inbound_fully_verifies_bot_connector_jwt():
     assert "crypto.createPublicKey" in code
     assert "jwk.endorsements" in code
     assert "endorsements.includes(channelId)" in code
+    assert "channel_endorsement_missing" in code
+    assert "_http_status:403" in code
     assert "crypto.verify('RSA-SHA256'" in code
     assert "Number(claims.exp" in code
     assert "Number(claims.nbf" in code
