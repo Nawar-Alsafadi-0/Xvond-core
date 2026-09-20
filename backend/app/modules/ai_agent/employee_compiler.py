@@ -911,7 +911,9 @@ def _normalize_integration_operations(value: Any) -> dict[str, dict]:
                 break
 
         json_fields: list[dict] = []
-        for raw_field in (raw.get("json_fields") or [])[:50]:
+        raw_json_fields = raw.get("json_fields")
+        raw_json_fields = raw_json_fields if isinstance(raw_json_fields, list) else []
+        for raw_field in raw_json_fields[:50]:
             if not isinstance(raw_field, dict):
                 continue
             key = str(raw_field.get("key") or "").strip()
