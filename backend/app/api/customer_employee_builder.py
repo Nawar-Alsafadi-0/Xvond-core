@@ -1143,6 +1143,9 @@ def _store_provisioned_spec(
         owner_name=company.name if company else "the owner",
         spec=compiled_spec,
     )
+    compiled_role = str(compiled_spec.get("role") or "").strip()
+    if compiled_role and str(agent.name or "").strip() in {"", "My AI Employee", "AI Employee"}:
+        agent.name = compiled_role[:200]
     # Flush the spec and contracts together; the caller owns commit/rollback.
     db.flush()
     return compiled_spec
