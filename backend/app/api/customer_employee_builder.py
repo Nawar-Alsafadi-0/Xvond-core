@@ -113,6 +113,14 @@ SELF_SERVICE_FREE_TEST_MESSAGES = 0
 MAX_EMPLOYEE_FILE_BYTES = 15 * 1024 * 1024
 
 
+def _self_service__self_service_commercial_gating()() -> bool:
+    """Billing is deliberately disabled while the Replit-style experiment is free."""
+    return bool(
+        settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION
+        and not settings.SELF_SERVICE_FREE_EXPERIMENT
+    )
+
+
 def _safe_asset_filename(value: str | None) -> str:
     filename = re.split(r"[\\/]", str(value or "file").strip())[-1].strip()
     filename = re.sub(r"[\x00-\x1f\x7f]+", "_", filename)
@@ -1534,10 +1542,6 @@ def _self_service_builder_journey(
     state = dict(state or {})
     builder = dict(builder or {})
     subscription = dict(state.get("subscription") or {})
-    commercial_gating = (
-        settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION
-        and not settings.SELF_SERVICE_FREE_EXPERIMENT
-    )
     compiled = isinstance(compiled_spec, dict)
     provisioned = bool(
         compiled
@@ -1569,7 +1573,7 @@ def _self_service_builder_journey(
         "Your job description is saved as the source of truth for this employee.",
     )
 
-    if commercial_gating:
+    if _self_service_commercial_gating():
         subscription_status = str(subscription.get("status") or "")
         if subscription.get("active"):
             add_stage(
@@ -1601,7 +1605,7 @@ def _self_service_builder_journey(
             "complete",
             "Xvond compiled the job and provisioned its employee capability plan.",
         )
-    elif has_entitlement or not commercial_gating:
+    elif has_entitlement or not _self_service_commercial_gating():
         add_stage(
             "build",
             "Build",
@@ -2033,7 +2037,7 @@ def _self_service_builder_journey(
                 else "The current conversational employee build has been preview-tested safely."
             ),
         )
-    elif provisioned and (has_entitlement or not commercial_gating) and setup_complete:
+    elif provisioned and (has_entitlement or not _self_service_commercial_gating()) and setup_complete:
         if routine_required:
             preview_actions = [
                 _builder_action(
@@ -5310,7 +5314,7 @@ def launch_self_service_employee(
         # Existing AI Agents plan still owns employee capacity. The self-service
         # workspace currently owns one employee, so its active subscription is
         # the commercial entitlement for this employee.
-        if commercial_gating:
+        if _self_service_commercial_gating():
             limits_service.check_agent_limit(db, company.id)
 
         target_channel_types = [
@@ -5372,7 +5376,7 @@ def launch_self_service_employee(
                     },
                 )
             if not channel.enabled:
-                if commercial_gating:
+                if _self_service_commercial_gating():
                     limits_service.check_channel_limit(db, company.id)
                 channel.enabled = True
                 db.flush()
@@ -5595,7 +5599,7 @@ def preview_employee_routine(
             if not message:
                 raise HTTPException(409, f"Preview AI node {node_scope} has no prompt")
 
-            if commercial_gating:
+            if _self_service_commercial_gating():
                 limits_service.check_token_limit(db, company.id)
             selections = runtime_selections(
                 db,
@@ -5747,7 +5751,7 @@ def test_draft_employee(
             else None
         )
         if pending_spec is not None:
-            if commercial_gating:
+            if _self_service_commercial_gating():
                 if not _has_ai_agents_entitlement(db, current_user.company_id):
                     raise HTTPException(
                         403,
