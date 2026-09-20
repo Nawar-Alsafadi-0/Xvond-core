@@ -126,6 +126,28 @@ def test_oauth_token_timing_and_refresh_window():
         now_epoch=1_000,
         skew_seconds=60,
     ) is True
+    assert oauth.oauth_access_token_needs_refresh(
+        {
+            "flow": "client_credentials",
+            "token_url": "https://accounts.example.com/oauth/token",
+        },
+        now_epoch=1_000,
+    ) is True
+    assert oauth.oauth_access_token_needs_refresh(
+        {
+            "flow": "client_credentials",
+            "obtained_at": 900,
+        },
+        now_epoch=1_000,
+    ) is False
+    assert oauth.oauth_access_token_needs_refresh(
+        {
+            "flow": "authorization_code",
+            "expires_in": 3600,
+            "refresh_token": "legacy-refresh",
+        },
+        now_epoch=1_000,
+    ) is True
 
 
 def test_refresh_oauth_access_token_rotates_refresh_token(monkeypatch):
