@@ -3452,6 +3452,8 @@ def start_discovered_oauth_authorization(
             requirement_key=key,
             integration_id=integration.id,
         )
+        integration_config["_xvond_oauth_pending"]["pkce_verifier_secret"] = authorization["code_verifier"]
+        integration.config = integration_config
         db.commit()
         return {
             "status": "authorization_required",
@@ -3476,6 +3478,7 @@ def finish_discovered_oauth_authorization(
     code: str | None = Query(default=None, max_length=8000),
     state: str | None = Query(default=None, max_length=20000),
     error: str | None = Query(default=None, max_length=1000),
+    current_user: User = Depends(require_customer_manager),
 ):
     """Finish a signed generic OAuth authorization and attach it to the employee."""
     if error:
@@ -3495,6 +3498,8 @@ def finish_discovered_oauth_authorization(
             state_secret=settings.GENERIC_OAUTH_STATE_SECRET,
         )
         company_id = int(payload.get("company_id") or 0)
+        if company_id != int(current_user.company_id):
+            raise HTTPException(403, "OAuth state does not belong to the current customer")
         agent_id = int(payload.get("agent_id") or 0)
         integration_id = int(payload.get("integration_id") or 0)
         key = normalize_requirement_key(payload.get("requirement_key"))
@@ -3527,6 +3532,7 @@ def finish_discovered_oauth_authorization(
             state_payload=payload,
             code=code,
             client_secret=str(pending_oauth.get("client_secret") or ""),
+            code_verifier=str(pending_oauth.get("pkce_verifier_secret") or ""),
         )
         operations = _bounded_connection_operations(raw_config.get("operations") or {})
         base_url = str(raw_config.get("base_url") or "").strip().rstrip("/")
