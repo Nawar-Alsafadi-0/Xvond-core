@@ -64,6 +64,9 @@ class Settings:
     N8N_TIMEOUT_SECONDS = max(1.0, float(os.getenv("N8N_TIMEOUT_SECONDS", "15")))
     N8N_MAX_RETRIES = min(3, max(0, int(os.getenv("N8N_MAX_RETRIES", "1"))))
     BILLING_PROVIDER = os.getenv("BILLING_PROVIDER", "none").strip().lower()
+    SELF_SERVICE_REQUIRE_SUBSCRIPTION = os.getenv(
+        "SELF_SERVICE_REQUIRE_SUBSCRIPTION", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
     PADDLE_API_KEY = os.getenv("PADDLE_API_KEY", "").strip()
     PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
     PADDLE_CLIENT_TOKEN = os.getenv("PADDLE_CLIENT_TOKEN", "").strip()
