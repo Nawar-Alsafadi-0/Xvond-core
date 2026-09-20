@@ -661,6 +661,14 @@ def _integration_call(
     operations = destination.get("operations") or {}
     if not operations and isinstance(config.get("operations"), dict):
         operations = config.get("operations") or {}
+    if (
+        operation == "execute"
+        and isinstance(operations, dict)
+        and not isinstance(operations.get("execute"), dict)
+    ):
+        default_operation = str(destination.get("default_operation") or "").strip()
+        if default_operation and isinstance(operations.get(default_operation), dict):
+            operation = default_operation
     op_config = operations.get(operation) if isinstance(operations, dict) else None
     effective_op_config = op_config if isinstance(op_config, dict) else destination
     method = str(effective_op_config.get("method") or "POST").upper()

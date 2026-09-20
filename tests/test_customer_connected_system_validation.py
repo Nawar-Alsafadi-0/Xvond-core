@@ -780,3 +780,69 @@ def test_generic_api_complete_required_json_body_executes(
         "customer_name": "Test Customer",
         "service_id": 42,
     }
+
+def test_direct_execute_uses_bound_default_api_operation(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {
+                "create_record": {
+                    "method": "POST",
+                    "endpoint": "/records",
+                    "input_mode": "json",
+                    "required_json_fields": ["customer_name"],
+                }
+            },
+            "auth_type": "none",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+        }
+        db.commit()
+
+    monkeypatch.setattr(action_runtime, "validate_public_http_url", lambda url: url)
+    captured = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 201, "response": '{"id":"rec-1"}'}
+
+    monkeypatch.setattr(action_runtime, "safe_http_request", fake_request)
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "specialist_records",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "validation_required": True,
+                    "default_operation": "create_record",
+                    "operations": {
+                        "create_record": {
+                            "method": "POST",
+                            "endpoint": "/records",
+                            "input_mode": "json",
+                            "required_json_fields": ["customer_name"],
+                        }
+                    },
+                }
+            },
+            {"details": {"customer_name": "Test Customer"}},
+            "execute",
+            idempotency_key="default-op-1",
+        )
+
+    assert result.success is True
+    assert captured["method"] == "POST"
+    assert captured["url"] == "https://api.example.com/records"
+    assert captured["json_data"] == {"customer_name": "Test Customer"}

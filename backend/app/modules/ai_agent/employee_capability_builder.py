@@ -233,6 +233,63 @@ def build_internal_record_action_config(*, requirement: dict, spec: dict) -> dic
     }
 
 
+def _external_graph_operations(spec: dict, requirement_key: str) -> list[str]:
+    """Return explicit external operations selected by this requirement's graphs."""
+    key = normalize_requirement_key(requirement_key)
+    result: list[str] = []
+
+    def visit(graph: dict) -> None:
+        nodes = graph.get("nodes") if isinstance(graph, dict) else None
+        if not isinstance(nodes, list):
+            return
+        for raw in nodes:
+            if not isinstance(raw, dict):
+                continue
+            node_type = str(raw.get("type") or "").strip().lower()
+            params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
+            if (
+                node_type == "action"
+                and normalize_requirement_key(params.get("action_type")) == key
+            ):
+                operation = normalize_requirement_key(params.get("operation"))
+                if operation and operation not in result:
+                    result.append(operation)
+            elif node_type == "foreach":
+                nested = params.get("graph")
+                if isinstance(nested, dict):
+                    visit(nested)
+
+    for routine in _compiled_execution_routines(spec):
+        if isinstance(routine, dict):
+            visit(routine.get("graph") or {})
+    return result
+
+
+def _default_external_operation(*, requirement_key: str, operations: dict, spec: dict) -> str | None:
+    """Choose a direct-chat operation only when the contract makes it unambiguous."""
+    available = {
+        normalize_requirement_key(name): str(name)
+        for name, value in (operations or {}).items()
+        if normalize_requirement_key(name) and isinstance(value, dict)
+    }
+    if not available:
+        return None
+    if "execute" in available:
+        return available["execute"]
+
+    graph_operations = [
+        available[name]
+        for name in _external_graph_operations(spec, requirement_key)
+        if name in available
+    ]
+    graph_operations = list(dict.fromkeys(graph_operations))
+    if len(graph_operations) == 1:
+        return graph_operations[0]
+    if len(available) == 1:
+        return next(iter(available.values()))
+    return None
+
+
 def build_external_integration_action_config(*, requirement: dict, spec: dict) -> dict:
     key = str(requirement.get("key") or "connected_action").strip()
     purpose = str(requirement.get("purpose") or key.replace("_", " ")).strip()
@@ -242,10 +299,14 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
 
     fields = []
     availability = {"mode": "none"}
-
+    default_operation = _default_external_operation(
+        requirement_key=key,
+        operations=operations,
+        spec=spec,
+    )
     execute_operation = (
-        operations.get("execute")
-        if isinstance(operations.get("execute"), dict)
+        operations.get(default_operation)
+        if default_operation and isinstance(operations.get(default_operation), dict)
         else {}
     )
     if execute_operation and key != "booking":
@@ -344,6 +405,7 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
             "type": "integration",
             "integration_id": integration_id,
             "operations": operations,
+            **({"default_operation": default_operation} if default_operation else {}),
             "validation_required": requirement.get("validation_required") is True,
         },
         "availability": availability,
