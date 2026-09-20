@@ -9,8 +9,10 @@ ACCEPTANCE_REQUIRE_LIVE="${ACCEPTANCE_REQUIRE_LIVE:-false}"
 GENERALIZATION_ACCEPTANCE="${GENERALIZATION_ACCEPTANCE:-false}"
 MARKET_ACCEPTANCE_MODE="${MARKET_ACCEPTANCE_MODE:-}"
 MARKET_ACCEPTANCE_CHANNELS="${MARKET_ACCEPTANCE_CHANNELS:-}"
+MARKET_ACCEPTANCE_REQUIRE_AUTOMATION_RUN="${MARKET_ACCEPTANCE_REQUIRE_AUTOMATION_RUN:-false}"
 MARKET_ACCEPTANCE_REQUIRE_ONLINE_BILLING="${MARKET_ACCEPTANCE_REQUIRE_ONLINE_BILLING:-false}"
 MARKET_ACCEPTANCE_REQUIRE_PAYMENT_EVIDENCE="${MARKET_ACCEPTANCE_REQUIRE_PAYMENT_EVIDENCE:-false}"
+deployment_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 compose() {
     docker compose -f "$COMPOSE_FILE" "$@"
@@ -303,8 +305,8 @@ if [ -n "$MARKET_ACCEPTANCE_MODE" ]; then
         echo "Market launch gate requires ACCEPTANCE_COMPANY_ID and ACCEPTANCE_AGENT_ID" >&2
         exit 1
     fi
-    if [ -z "$MARKET_ACCEPTANCE_CHANNELS" ]; then
-        echo "Market launch gate requires MARKET_ACCEPTANCE_CHANNELS" >&2
+    if [ -z "$MARKET_ACCEPTANCE_CHANNELS" ] && [ "$MARKET_ACCEPTANCE_REQUIRE_AUTOMATION_RUN" != "true" ]; then
+        echo "Market launch gate requires MARKET_ACCEPTANCE_CHANNELS or MARKET_ACCEPTANCE_REQUIRE_AUTOMATION_RUN=true" >&2
         exit 1
     fi
 
@@ -328,6 +330,9 @@ if [ -n "$MARKET_ACCEPTANCE_MODE" ]; then
     fi
     if [ "$MARKET_ACCEPTANCE_REQUIRE_PAYMENT_EVIDENCE" = "true" ]; then
         set -- "$@" --require-payment-evidence
+    fi
+    if [ "$MARKET_ACCEPTANCE_REQUIRE_AUTOMATION_RUN" = "true" ]; then
+        set -- "$@" --require-automation-run --automation-run-after "$deployment_started_at"
     fi
     compose exec -T app "$@"
 fi
