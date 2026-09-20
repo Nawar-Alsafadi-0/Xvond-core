@@ -113,7 +113,7 @@ SELF_SERVICE_FREE_TEST_MESSAGES = 0
 MAX_EMPLOYEE_FILE_BYTES = 15 * 1024 * 1024
 
 
-def _self_service__self_service_commercial_gating()() -> bool:
+def _self_service_commercial_gating() -> bool:
     """Billing is deliberately disabled while the Replit-style experiment is free."""
     return bool(
         settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION
