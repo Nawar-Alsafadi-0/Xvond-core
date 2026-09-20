@@ -4616,3 +4616,103 @@ def test_nested_repeat_wait_resumes_without_replaying_completed_iterations(monke
         assert pages["limit_reached"] is False
 
     engine.dispose()
+
+def test_repeat_graph_actions_use_stable_per_iteration_idempotency_keys(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    calls = []
+
+    def fake_capability(*args, **kwargs):
+        details = dict(kwargs.get("details") or {})
+        calls.append({
+            "details": details,
+            "idempotency_key": kwargs["idempotency_key"],
+        })
+        return {
+            "iteration": details["iteration"],
+            "done": details["iteration"] >= 1,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "execute_generic_capability",
+        fake_capability,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Repeat Idempotency", active=True))
+        db.add(AIAgent(
+            id=1,
+            company_id=1,
+            name="Worker",
+            system_prompt="work",
+            provider="mock",
+            model="mock",
+            enabled=True,
+        ))
+        db.flush()
+        db.add(AgentToolAssignment(
+            agent_id=1,
+            tool_name="action_request",
+            enabled=True,
+            config={
+                "actions": {
+                    "page_action": {
+                        "enabled": True,
+                        "confirmation_required": False,
+                        "_xvond_permission_mode": "automatic",
+                        "destination": {
+                            "type": "xvond_internal",
+                            "adapter": "generic_capability",
+                        },
+                    }
+                }
+            },
+        ))
+        db.commit()
+
+        graph = {
+            "version": 1,
+            "nodes": [{
+                "id": "pages",
+                "type": "repeat",
+                "params": {
+                    "max_iterations": 4,
+                    "until": {"path": "scheduled_action_result.done", "operator": "eq", "value": True},
+                    "graph": {
+                        "version": 1,
+                        "nodes": [{
+                            "id": "send",
+                            "type": "action",
+                            "params": {
+                                "action_type": "page_action",
+                                "arguments": {"iteration": "$index"},
+                            },
+                        }],
+                    },
+                },
+            }],
+        }
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        for _ in range(2):
+            result = runtime.execute_step(
+                db,
+                1,
+                {"type": "graph", "agent_id": 1, "graph": graph},
+                {"_xvond_execution_key": "stable-repeat-retry"},
+                run_id=1,
+                step_index=0,
+            )
+            assert result["graph_outputs"]["pages"]["count"] == 2
+
+    assert len(calls) == 4
+    first_run_keys = [item["idempotency_key"] for item in calls[:2]]
+    second_run_keys = [item["idempotency_key"] for item in calls[2:]]
+    assert first_run_keys[0] != first_run_keys[1]
+    assert first_run_keys == second_run_keys
+    assert all(
+        key.startswith("stable-repeat-retry:") and ":graph:" in key
+        for key in first_run_keys
+    )
+    engine.dispose()
