@@ -47,10 +47,12 @@ def test_public_builder_is_open_ended_and_creates_directly_without_preview():
     assert "/auth/login" in html
     assert "/auth/signup" in html
     assert "sessionStorage" in html
-    assert "Xvond Workspace" in html
     assert "ابنِ موظفي" in html
     assert "شو بدك موظفك يعمل؟" in html
-    assert "Job Brief" in html
+    assert "/customer/employee-builder/${agentId}/compile" in html
+    assert "عم نبني موظفك" in html
+    assert 'id="employee-name"' not in html
+    assert 'name="channel"' not in html
     assert 'name="capability"' not in html
     assert "خدمة العملاء" not in html
     assert "المبيعات" not in html
@@ -63,9 +65,9 @@ def test_customer_portal_treats_job_brief_as_source_of_truth():
     assert 'href="/build"' in source
     assert "Build on Xvond.com" in source
     assert "Xvond Workspace" in source
-    assert "Job brief" in source
-    assert "source of truth" in source
-    assert "instead of limiting it to a predefined agent type" in source
+    assert "شو طلبت من الموظف" in source
+    assert "ما منعرض إعدادات عامة ما إلها علاقة بالوظيفة" in source
+    assert "عدّل موظفك بالكلام" in source
     assert "Xvond builds this" in source
     assert "BUILD PROGRESS" in source
     assert "data-builder-action" in source
