@@ -243,6 +243,19 @@ def test_admin_ui_can_complete_managed_requests_without_exposing_provider_creden
     assert "access_token" not in ADMIN_UI[ADMIN_UI.index("window.openManagedChannelSetup"):ADMIN_UI.index("window.activateManagedChannel")]
 
 
+def test_every_existing_admin_channel_card_exposes_delete_control():
+    delete_ui = Path("frontend/admin/channel-delete-enhancement.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function wsDeleteChannelButton(channel)" in ADMIN_UI
+    assert "wsDeleteChannelButton(web)" in ADMIN_UI
+    assert "wsDeleteChannelButton(wa)" in ADMIN_UI
+    assert "${remove}" in ADMIN_UI
+    assert "window.deleteWorkspaceChannel=deleteWorkspaceChannel" in delete_ui
+    assert "It does not delete the external provider account" in delete_ui
+
+
 def test_admin_dashboard_surfaces_managed_channel_queue():
     assert "/admin/channels/managed/requests" in ADMIN_APP
     assert "Managed Channel Requests" in ADMIN_APP
