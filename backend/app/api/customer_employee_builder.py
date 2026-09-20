@@ -47,6 +47,7 @@ from backend.app.modules.ai_agent.profile_models import AIAgentProfile
 from backend.app.modules.ai_agent.self_service_policy import (
     communication_channels,
     is_self_service_company,
+    is_self_service_employee,
     self_service_channel_activation_blockers,
     self_service_channel_slots,
     self_service_connection_status,
@@ -627,6 +628,31 @@ def _employee_for_workspace(
     )
 
 
+def _self_service_employee_or_404(
+    db,
+    *,
+    company: Company,
+    agent_id: int,
+) -> tuple[AIAgent, AgentConfig]:
+    agent = (
+        db.query(AIAgent)
+        .filter(
+            AIAgent.id == int(agent_id),
+            AIAgent.company_id == company.id,
+        )
+        .first()
+    )
+    if agent is None:
+        raise HTTPException(404, "AI employee not found")
+    config = _employee_config_or_404(db, agent)
+    if not is_self_service_employee(company, config):
+        raise HTTPException(
+            409,
+            "This employee belongs to Xvond Managed delivery and must use the managed flow",
+        )
+    return agent, config
+
+
 def _employee_config_or_404(db, agent: AIAgent) -> AgentConfig:
     config = db.query(AgentConfig).filter(AgentConfig.agent_id == agent.id).first()
     if config is None or config.agent_type != "employee":
@@ -1172,7 +1198,7 @@ def _store_provisioned_spec(
     settings["employee_builder"] = builder
     config.settings = settings
     company = db.query(Company).filter(Company.id == company_id).first()
-    if is_self_service_company(company):
+    if is_self_service_employee(company, config):
         reconcile_managed_channel_requests(
             db,
             company_id=company_id,
@@ -1307,7 +1333,7 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
         raise HTTPException(400, "Employee job brief is missing")
     requested_channels = list(builder.get("requested_channels") or [])
     company = db.query(Company).filter(Company.id == company_id).first()
-    if is_self_service_company(company):
+    if is_self_service_employee(company, config):
         requested_channels = communication_channels(requested_channels)
     connection_context = _compiler_connection_context(db, company_id=company_id)
 
