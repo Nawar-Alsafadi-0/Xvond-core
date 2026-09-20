@@ -392,6 +392,13 @@ def graph_contract_errors(
                     errors.append(f"{node_id}: repeat until operator is unsupported")
                 if "value" not in until:
                     errors.append(f"{node_id}: repeat until requires value")
+                elif not isinstance(
+                    until.get("value"),
+                    (str, int, float, bool, type(None)),
+                ):
+                    errors.append(
+                        f"{node_id}: repeat until value must be scalar or null"
+                    )
             nested = params.get("graph")
             if not isinstance(nested, dict):
                 errors.append(f"{node_id}: repeat node requires nested graph")
