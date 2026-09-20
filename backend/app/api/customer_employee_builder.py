@@ -902,6 +902,19 @@ def _compiler_connection_context(db, *, company_id: int) -> list[dict]:
                             for field in (value.get("json_fields") or [])[:50]
                             if isinstance(field, dict)
                         ],
+                        "response_status": str(value.get("response_status") or "")[:3],
+                        "response_kind": str(value.get("response_kind") or "")[:20],
+                        "response_fields": [
+                            dict(field)
+                            for field in (value.get("response_fields") or [])[:25]
+                            if isinstance(field, dict)
+                        ],
+                        "response_item_kind": str(value.get("response_item_kind") or "")[:20],
+                        "response_item_fields": [
+                            dict(field)
+                            for field in (value.get("response_item_fields") or [])[:25]
+                            if isinstance(field, dict)
+                        ],
                         "description": str(value.get("description") or "")[:300],
                     }
                     for key, value in list(operations.items())[:30]
@@ -2966,7 +2979,54 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
                 required_json_fields.append(field["key"])
                 if len(required_json_fields) >= 50:
                     break
-        result[name] = {
+
+        response_status = str(raw.get("response_status") or "").strip()
+        if not re.fullmatch(r"2[0-9][0-9]", response_status):
+            response_status = ""
+        response_kind = str(raw.get("response_kind") or "").strip().lower()
+        if response_kind not in {
+            "none", "object", "array", "string", "integer", "number", "boolean", "unknown"
+        }:
+            response_kind = ""
+        response_item_kind = str(raw.get("response_item_kind") or "").strip().lower()
+        if response_item_kind not in {
+            "none", "object", "array", "string", "integer", "number", "boolean", "unknown"
+        }:
+            response_item_kind = ""
+
+        def bounded_response_fields(field_name: str) -> list[dict]:
+            raw_fields = raw.get(field_name)
+            raw_fields = raw_fields if isinstance(raw_fields, list) else []
+            bounded: list[dict] = []
+            for item in raw_fields[:25]:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("key") or "").strip()
+                if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}", key):
+                    continue
+                field = {
+                    "key": key,
+                    "required": bool(item.get("required")),
+                    "type": str(item.get("type") or "string").strip().lower()[:20],
+                }
+                fmt = str(item.get("format") or "").strip().lower()[:40]
+                if fmt:
+                    field["format"] = fmt
+                description = str(item.get("description") or "").strip()[:300]
+                if description:
+                    field["description"] = description
+                enum = item.get("enum")
+                if isinstance(enum, list):
+                    bounded_enum = [
+                        value for value in enum[:20]
+                        if isinstance(value, (str, int, float, bool)) or value is None
+                    ]
+                    if bounded_enum:
+                        field["enum"] = bounded_enum
+                bounded.append(field)
+            return bounded
+
+        operation_result = {
             "method": method,
             "endpoint": endpoint,
             "input_mode": input_mode,
@@ -2978,6 +3038,19 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
             "json_fields": json_fields,
             "description": str(raw.get("description") or "").strip()[:500],
         }
+        if response_status:
+            operation_result["response_status"] = response_status
+        if response_kind:
+            operation_result["response_kind"] = response_kind
+        response_fields = bounded_response_fields("response_fields")
+        if response_fields:
+            operation_result["response_fields"] = response_fields
+        if response_item_kind:
+            operation_result["response_item_kind"] = response_item_kind
+        response_item_fields = bounded_response_fields("response_item_fields")
+        if response_item_fields:
+            operation_result["response_item_fields"] = response_item_fields
+        result[name] = operation_result
         if len(result) >= 50:
             break
     return result
