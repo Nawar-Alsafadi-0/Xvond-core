@@ -13,6 +13,7 @@ from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.ai_agent.profile_models import AIAgentProfile
 from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.tools.models import AgentToolAssignment
 
 router = APIRouter(prefix="/admin/ai-employee-profile", tags=["Xvond Admin - AI Employee Profile"])
 
@@ -252,6 +253,32 @@ def _ensure_agent_config(db, agent: AIAgent) -> AgentConfig:
     return row
 
 
+def _ensure_human_handoff(db, agent_id: int) -> AgentToolAssignment:
+    """Give every managed employee a safe escalation path by default.
+
+    Existing assignments are preserved exactly, including an explicit disabled
+    state chosen by an operator.
+    """
+    row = (
+        db.query(AgentToolAssignment)
+        .filter(
+            AgentToolAssignment.agent_id == agent_id,
+            AgentToolAssignment.tool_name == "human_handoff",
+        )
+        .first()
+    )
+    if row is None:
+        row = AgentToolAssignment(
+            agent_id=agent_id,
+            tool_name="human_handoff",
+            config={},
+            enabled=True,
+        )
+        db.add(row)
+        db.flush()
+    return row
+
+
 def _set_agent_behavior(db, agent: AIAgent, data: EmployeeProfileUpdate) -> AgentConfig:
     row = _ensure_agent_config(db, agent)
     settings = dict(row.settings or {})
@@ -337,6 +364,7 @@ def create_profile_employee(company_id: int, data: EmployeeProfileUpdate, curren
         db.flush()
         _upsert_profile(db, company, agent, data)
         behavior = _set_agent_behavior(db, agent, data)
+        _ensure_human_handoff(db, agent.id)
 
         company_profile = _company_profile(db, company_id)
         if company_profile is not None:
@@ -409,6 +437,7 @@ def update_profile(company_id: int, agent_id: int, data: EmployeeProfileUpdate, 
         agent.system_prompt = _profile_prompt(company.name, data)
         _upsert_profile(db, company, agent, data)
         _set_agent_behavior(db, agent, data)
+        _ensure_human_handoff(db, agent.id)
         db.commit()
         return {"status": "updated", "agent_id": agent.id}
     except HTTPException:
