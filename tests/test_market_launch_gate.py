@@ -10,6 +10,7 @@ from backend.app.main import app  # noqa: F401 - register metadata
 from backend.app.core.database.base import Base
 from backend.app.models.company import Company
 from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.billing.service_models import (
     ServiceCheckout,
     ServicePaymentEvent,
@@ -190,6 +191,159 @@ def test_market_gate_rejects_non_packaged_channel_as_launch_requirement(
     assert report["launchable"] is False
     assert item["packaged_provider"] is False
     assert item["reason"] == "provider_not_packaged"
+
+
+def test_market_gate_accepts_channel_free_employee_only_after_real_automation_run(
+    launch_database,
+    monkeypatch,
+):
+    monkeypatch.setattr(gate, "check_release", lambda **kwargs: {"overall_ok": True})
+    monkeypatch.setattr(gate, "_billing_gate", lambda *args, **kwargs: {"ok": True})
+
+    with launch_database() as db:
+        workflow = AutomationWorkflow(
+            company_id=1,
+            name="Daily operations",
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+            },
+            steps=[],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.flush()
+        workflow_id = workflow.id
+        db.commit()
+
+    missing = gate.market_launch_gate(
+        company_id=1,
+        agent_id=1,
+        launch_mode="self_service",
+        required_channels=[],
+        require_online_billing=False,
+        require_payment_evidence=False,
+        require_automation_run=True,
+    )
+
+    assert missing["launchable"] is False
+    assert missing["automation"]["reason"] == "successful_automation_run_missing"
+
+    with launch_database() as db:
+        db.add(
+            AutomationRun(
+                company_id=1,
+                workflow_id=workflow_id,
+                status="success",
+                input_data={"source": "market_acceptance"},
+                output_data={"result": "verified"},
+                finished_at=datetime.now(),
+            )
+        )
+        db.commit()
+
+    accepted = gate.market_launch_gate(
+        company_id=1,
+        agent_id=1,
+        launch_mode="self_service",
+        required_channels=[],
+        require_online_billing=False,
+        require_payment_evidence=False,
+        require_automation_run=True,
+    )
+
+    assert accepted["launchable"] is True
+    assert accepted["channels"]["required"] == []
+    assert accepted["automation"]["successful_run_id"] is not None
+
+
+def test_automation_run_evidence_is_scoped_to_exact_employee(
+    launch_database,
+):
+    with launch_database() as db:
+        other_workflow = AutomationWorkflow(
+            company_id=1,
+            name="Other employee workflow",
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 999,
+            },
+            steps=[],
+            enabled=True,
+        )
+        db.add(other_workflow)
+        db.flush()
+        db.add(
+            AutomationRun(
+                company_id=1,
+                workflow_id=other_workflow.id,
+                status="success",
+                input_data={},
+                output_data={},
+                finished_at=datetime.now(),
+            )
+        )
+        db.commit()
+
+        result = gate._automation_run_gate(
+            db,
+            company_id=1,
+            agent_id=1,
+            required=True,
+        )
+
+    assert result["ok"] is False
+    assert result["reason"] == "enabled_employee_workflow_missing"
+
+
+def test_automation_run_evidence_rejects_success_before_release_cutover(
+    launch_database,
+):
+    with launch_database() as db:
+        workflow = AutomationWorkflow(
+            company_id=1,
+            name="Current workflow",
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+            },
+            steps=[],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.flush()
+        db.add(
+            AutomationRun(
+                company_id=1,
+                workflow_id=workflow.id,
+                status="success",
+                input_data={},
+                output_data={},
+                finished_at=datetime(2026, 1, 1),
+            )
+        )
+        db.commit()
+
+        result = gate._automation_run_gate(
+            db,
+            company_id=1,
+            agent_id=1,
+            required=True,
+            completed_after=datetime(2026, 1, 2),
+        )
+
+    assert result["ok"] is False
+    assert result["reason"] == "successful_automation_run_missing"
+    assert result["completed_after"] == datetime(2026, 1, 2)
+
+
+def test_automation_cutover_parser_normalizes_utc_to_database_naive_time():
+    assert gate._utc_datetime("2026-09-20T12:30:00Z") == datetime(
+        2026, 9, 20, 12, 30
+    )
 
 
 def test_payment_evidence_is_scoped_to_same_company_and_checkout(
