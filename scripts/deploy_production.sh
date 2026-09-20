@@ -279,13 +279,26 @@ fi
 if [ "$workflow_enabled" = "true" ]; then
     docker compose -f "$COMPOSE_FILE" --profile workflow up -d workflow-postgres
     wait_healthy xvond-workflow-postgres
+    workflow_synced="false"
     if workflow_sync_required; then
         COMPOSE_FILE="$COMPOSE_FILE" sh scripts/sync_workflow_engine.sh
+        workflow_synced="true"
     else
         docker compose -f "$COMPOSE_FILE" --profile workflow up -d workflow-registry workflow-engine
     fi
     wait_healthy xvond-workflow-engine
-    probe_workflow_contract
+    if ! probe_workflow_contract; then
+        if [ "$WORKFLOW_SYNC_MODE" = "auto" ] && [ "$workflow_synced" != "true" ]; then
+            echo "Workflow contract is unhealthy after skipped sync; running one full recovery sync."
+            COMPOSE_FILE="$COMPOSE_FILE" sh scripts/sync_workflow_engine.sh
+            workflow_synced="true"
+            wait_healthy xvond-workflow-engine
+            probe_workflow_contract
+        else
+            echo "Workflow contract failed after workflow sync; refusing release." >&2
+            exit 1
+        fi
+    fi
 fi
 
 compose stop whatsapp-worker automation-scheduler >/dev/null 2>&1 || true
