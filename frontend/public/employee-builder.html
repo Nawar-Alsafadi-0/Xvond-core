@@ -127,11 +127,38 @@
         return false;
       }
       if (response.status === 409) {
-        show("auth-card", false);
-        show("build-card", false);
-        show("success-card", true);
-        $("success-card").querySelector("h2").textContent = "عندك موظف موجود بالفعل";
-        return true;
+        let conflict = null;
+        try { conflict = await response.json(); } catch (_) {}
+        const existingAgentId = Number(conflict?.detail?.agent_id || 0);
+        if (existingAgentId) {
+          const revise = await fetch(`/customer/employee-builder/${existingAgentId}/job-brief`, {
+            method:"PATCH",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({description})
+          });
+          if (revise.ok) {
+            sessionStorage.removeItem("xvond_employee_draft");
+            show("auth-card", false);
+            show("build-card", false);
+            show("progress-card", true);
+            $("progress-card").scrollIntoView({behavior:"smooth"});
+            await buildEmployee(existingAgentId);
+            return true;
+          }
+          if (revise.status === 409) {
+            sessionStorage.removeItem("xvond_employee_draft");
+            show("auth-card", false);
+            show("build-card", false);
+            show("success-card", true);
+            $("success-card").querySelector("h2").textContent = "موظفك الحالي شغال";
+            $("success-copy").textContent = "افتح مساحة الموظف وعدّل نفس الموظف بالكلام بدون ما نوقف النسخة الشغالة.";
+            return true;
+          }
+          $("create-error").textContent = await detail(revise);
+          return false;
+        }
+        $("create-error").textContent = conflict?.detail?.message || "تعذر تحديث الموظف الحالي.";
+        return false;
       }
       const message = await detail(response);
       if (showAuthOn401) $("create-error").textContent = message;
