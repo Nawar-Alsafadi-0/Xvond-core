@@ -127,6 +127,7 @@ window.openCustomerMetaChannelConnect = async function(agentId, channelType) {
             }
             })();
         }, {
+            config_id: config.config_id || undefined,
             scope: (config.scopes || []).join(","),
             return_scopes: true,
             auth_type: "rerequest",
