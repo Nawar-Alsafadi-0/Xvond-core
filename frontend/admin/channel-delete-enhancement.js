@@ -26,8 +26,10 @@ function xvondInjectChannelDeleteButtons(){
 }
 
 async function deleteWorkspaceChannel(channelId,channelLabel){
-  const label=channelLabel||'channel';
-  if(!confirm(`Permanently delete ${label} from this AI employee?\n\nThis removes the channel and its saved Xvond connection. For WhatsApp, it does not delete the phone number from Meta.`))return;
+  const channel=(xvondWorkspace?.data?.channels||[]).find(item=>Number(item.id)===Number(channelId));
+  const label=channelLabel||channel?.channel_name||channel?.channel_type||'channel';
+  const traffic=channel?.enabled?'This channel is active and deleting it will stop its traffic immediately.\n\n':'';
+  if(!confirm(`Permanently delete ${label} from this AI employee?\n\n${traffic}This removes the Xvond channel, saved configuration and managed route. It does not delete the external provider account, phone number, bot or app.`))return;
   try{
     await api(`/admin/channels/${channelId}`,{method:'DELETE'});
     await loadCompanyControlCenter(xvondWorkspace.companyId,'channels');
@@ -35,6 +37,7 @@ async function deleteWorkspaceChannel(channelId,channelLabel){
     alert(e.message||'Failed to delete channel');
   }
 }
+window.deleteWorkspaceChannel=deleteWorkspaceChannel;
 
 if(typeof renderCompanyControlCenter==='function'){
   const xvondOriginalRenderCompanyControlCenter=renderCompanyControlCenter;

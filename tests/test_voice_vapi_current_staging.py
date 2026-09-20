@@ -112,3 +112,5 @@ def test_current_admin_loads_voice_controls_without_replacing_workspace():
     assert "renderChannelsTab" in voice
     assert "/admin/voice/vapi/phone-numbers" in voice
     assert "/vapi/provision" in voice
+    assert "deleteWorkspaceChannel(${Number(ch.id)})" in voice
+    assert "Delete Channel" in voice
