@@ -809,7 +809,7 @@ def _integration_call(
     input_mode = str(
         (op_config or {}).get("input_mode") or ("query" if method == "GET" else "json")
     ).strip().lower()
-    if input_mode not in {"json", "form", "query", "none"}:
+    if input_mode not in {"json", "form", "multipart", "query", "none"}:
         return ToolResult(success=False, error="Integration operation input mode is invalid")
     if input_mode == "json":
         source = request_payload if isinstance(request_payload, dict) else {}
@@ -850,7 +850,7 @@ def _integration_call(
                 data={"missing_fields": missing_json_fields},
             )
 
-    if input_mode == "form":
+    if input_mode in {"form", "multipart"}:
         source = request_payload if isinstance(request_payload, dict) else {}
         required_form_fields = [
             str(item).strip()
@@ -896,7 +896,11 @@ def _integration_call(
                     error=f"Form field '{key}' must be a scalar value",
                 )
         request_payload = source
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        if input_mode == "form":
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        else:
+            # httpx must set the multipart boundary itself.
+            headers.pop("Content-Type", None)
 
     if input_mode == "query":
         query_items = []
@@ -971,6 +975,7 @@ def _integration_call(
             headers=headers,
             json_data=request_payload if input_mode == "json" else None,
             form_data=request_payload if input_mode == "form" else None,
+            multipart_data=request_payload if input_mode == "multipart" else None,
             timeout=float((op_config or {}).get("timeout") or 15),
             max_response_bytes=MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS,
         )
