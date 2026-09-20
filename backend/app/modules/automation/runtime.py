@@ -3443,11 +3443,15 @@ class AutomationRuntime:
                 )
                 if not result.success:
                     raise ValueError(result.error or "Scheduled integration action failed")
+                integration_result = result.data or {}
                 return {
                     "scheduled_action_result": {
                         "runtime": "connected_integration",
                         "action_type": action_type,
-                        "result": result.data or {},
+                        "operation": operation,
+                        "status_code": integration_result.get("status_code"),
+                        "response": integration_result.get("response"),
+                        "result": integration_result,
                     }
                 }
 

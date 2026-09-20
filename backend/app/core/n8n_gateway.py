@@ -102,6 +102,29 @@ class N8NActionGateway:
             max_retries_override=0,
         )
 
+    def deactivate_channel(
+        self,
+        *,
+        company_id: int,
+        agent_id: int,
+        channel_id: int,
+        connection_key: str,
+    ) -> dict[str, Any]:
+        """Remove one managed-channel route from the isolated workflow registry."""
+        return self.execute(
+            company_id=company_id,
+            agent_id=agent_id,
+            action="channel.deactivate",
+            data={
+                "channel_id": channel_id,
+                "connection_key": connection_key,
+            },
+            # Registry deletion is idempotent, but Core does not blindly retry a
+            # control-plane call whose outcome may be unknown. Reconciliation
+            # persists cleanup-pending state and retries deliberately later.
+            max_retries_override=0,
+        )
+
     def execute(
         self,
         *,

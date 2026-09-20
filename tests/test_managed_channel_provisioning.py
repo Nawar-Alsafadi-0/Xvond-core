@@ -9,8 +9,11 @@ from sqlalchemy.orm import Session
 from backend.app.main import app  # noqa: F401 - register metadata
 from backend.app.api import admin_channels as api
 from backend.app.core.database.base import Base
+from backend.app.core.n8n_gateway import N8NGatewayError
 from backend.app.models.company import Company
 from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.channels import delivery as channel_delivery
+from backend.app.modules.channels.delivery import reconcile_managed_channel_requests
 from backend.app.modules.channels.models import AgentChannel
 
 
@@ -138,6 +141,7 @@ def test_managed_connect_verifies_gateway_before_marking_connected(
         assert row.config["connection_key"] == "telegram-clinic"
         assert row.config["provider_account_label"] == "Clinic Telegram"
         assert row.config["connection_method"] == "xvond_managed_gateway"
+        assert row.config["registry_cleanup_state"] == "active"
         assert row.config["provisioning_verified_at"]
 
 
@@ -240,3 +244,208 @@ def test_admin_dashboard_surfaces_managed_channel_queue():
     assert "Managed Channel Requests" in ADMIN_APP
     assert "managed_channel_request" in ADMIN_APP
     assert 'tab:"channels"' in ADMIN_APP
+
+def test_removed_connected_managed_channel_cleans_registry_route(
+    managed_channel_db,
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(channel_delivery.n8n_gateway, "configured", lambda: True)
+
+    def fake_deactivate(**kwargs):
+        calls.append(kwargs)
+        return {
+            "success": True,
+            "data": {"deactivated": True},
+            "request_id": "cleanup-1",
+            "action": "channel.deactivate",
+        }
+
+    monkeypatch.setattr(
+        channel_delivery.n8n_gateway,
+        "deactivate_channel",
+        fake_deactivate,
+    )
+
+    with managed_channel_db() as db:
+        result = reconcile_managed_channel_requests(
+            db,
+            company_id=1,
+            agent_id=10,
+            desired_channel_types=[],
+            request_source="job_brief_revision",
+        )
+        db.commit()
+
+    assert "instagram" in result["cancelled"]
+    assert calls == [
+        {
+            "company_id": 1,
+            "agent_id": 10,
+            "channel_id": 101,
+            "connection_key": "instagram-main",
+        }
+    ]
+
+    with managed_channel_db() as db:
+        row = db.get(AgentChannel, 101)
+        assert row.enabled is False
+        assert row.config["provisioning_state"] == "cancelled"
+        assert row.config["registry_cleanup_state"] == "complete"
+        assert row.config.get("provisioning_error") is None
+
+
+def test_failed_registry_cleanup_is_persisted_and_retried(
+    managed_channel_db,
+    monkeypatch,
+):
+    monkeypatch.setattr(channel_delivery.n8n_gateway, "configured", lambda: True)
+    attempts = {"count": 0}
+
+    def flaky_deactivate(**kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise N8NGatewayError("temporary registry failure")
+        return {
+            "success": True,
+            "data": {"deactivated": True},
+            "request_id": "cleanup-retry",
+            "action": "channel.deactivate",
+        }
+
+    monkeypatch.setattr(
+        channel_delivery.n8n_gateway,
+        "deactivate_channel",
+        flaky_deactivate,
+    )
+
+    with managed_channel_db() as db:
+        reconcile_managed_channel_requests(
+            db,
+            company_id=1,
+            agent_id=10,
+            desired_channel_types=[],
+        )
+        db.commit()
+
+    with managed_channel_db() as db:
+        row = db.get(AgentChannel, 101)
+        assert row.enabled is False
+        assert row.config["provisioning_state"] == "cancelled"
+        assert row.config["registry_cleanup_state"] == "pending"
+        assert row.config["provisioning_error"] == "workflow_registry_cleanup_pending"
+
+    with managed_channel_db() as db:
+        reconcile_managed_channel_requests(
+            db,
+            company_id=1,
+            agent_id=10,
+            desired_channel_types=[],
+        )
+        db.commit()
+
+    assert attempts["count"] == 2
+    with managed_channel_db() as db:
+        row = db.get(AgentChannel, 101)
+        assert row.config["registry_cleanup_state"] == "complete"
+        assert row.config.get("provisioning_error") is None
+
+
+def test_re_request_waits_for_pending_route_cleanup(
+    managed_channel_db,
+    monkeypatch,
+):
+    monkeypatch.setattr(channel_delivery.n8n_gateway, "configured", lambda: True)
+    calls = []
+
+    with managed_channel_db() as db:
+        row = db.get(AgentChannel, 101)
+        row.config = {
+            "provisioning_state": "cancelled",
+            "registry_cleanup_state": "pending",
+            "connection_key": "instagram-main",
+            "provisioning_error": "workflow_registry_cleanup_pending",
+        }
+        db.commit()
+
+    def cleaned(**kwargs):
+        calls.append(kwargs)
+        return {
+            "success": True,
+            "data": {"deactivated": False},
+            "request_id": "cleanup-before-request",
+            "action": "channel.deactivate",
+        }
+
+    monkeypatch.setattr(channel_delivery.n8n_gateway, "deactivate_channel", cleaned)
+
+    with managed_channel_db() as db:
+        result = reconcile_managed_channel_requests(
+            db,
+            company_id=1,
+            agent_id=10,
+            desired_channel_types=["instagram"],
+            request_source="job_brief_revision",
+        )
+        db.commit()
+
+    assert result["requested"] == ["instagram"]
+    assert len(calls) == 1
+    with managed_channel_db() as db:
+        row = db.get(AgentChannel, 101)
+        assert row.config["provisioning_state"] == "requested"
+        assert row.config["registry_cleanup_state"] == "complete"
+        assert row.config.get("provisioning_error") is None
+
+
+def test_admin_delete_keeps_channel_when_route_cleanup_cannot_be_confirmed(
+    managed_channel_db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        api,
+        "deactivate_managed_channel_route",
+        lambda channel: {
+            "required": True,
+            "complete": False,
+            "reason": "registry_cleanup_failed",
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        api.delete_channel(
+            101,
+            SimpleNamespace(id=99, role="xvond_admin"),
+        )
+
+    assert exc.value.status_code == 502
+    with managed_channel_db() as db:
+        assert db.get(AgentChannel, 101) is not None
+
+
+def test_admin_delete_removes_channel_after_route_cleanup(
+    managed_channel_db,
+    monkeypatch,
+):
+    seen = []
+
+    def cleaned(channel):
+        seen.append(channel.id)
+        return {
+            "required": True,
+            "complete": True,
+            "reason": "deactivated",
+            "deactivated": True,
+        }
+
+    monkeypatch.setattr(api, "deactivate_managed_channel_route", cleaned)
+
+    result = api.delete_channel(
+        101,
+        SimpleNamespace(id=99, role="xvond_admin"),
+    )
+
+    assert result == {"status": "deleted", "channel_id": 101}
+    assert seen == [101]
+    with managed_channel_db() as db:
+        assert db.get(AgentChannel, 101) is None

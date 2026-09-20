@@ -615,6 +615,27 @@ def _ensure_fresh_oauth_access_token(
     finally:
         execution_claims.release(claim_key)
 
+MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS = 250_000
+
+
+def _integration_response_value(result: dict):
+    """Expose bounded JSON responses as structured data for later graph nodes."""
+    raw = result.get("response") if isinstance(result, dict) else None
+    if not isinstance(raw, str):
+        return raw
+    if len(raw) > MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS:
+        raw = raw[:MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS]
+    if bool(result.get("truncated")):
+        return raw
+    text = raw.strip()
+    if not text:
+        return ""
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return raw
+
+
 def _integration_call(
     db,
     context: dict,
@@ -661,6 +682,14 @@ def _integration_call(
     operations = destination.get("operations") or {}
     if not operations and isinstance(config.get("operations"), dict):
         operations = config.get("operations") or {}
+    if (
+        operation == "execute"
+        and isinstance(operations, dict)
+        and not isinstance(operations.get("execute"), dict)
+    ):
+        default_operation = str(destination.get("default_operation") or "").strip()
+        if default_operation and isinstance(operations.get(default_operation), dict):
+            operation = default_operation
     op_config = operations.get(operation) if isinstance(operations, dict) else None
     effective_op_config = op_config if isinstance(op_config, dict) else destination
     method = str(effective_op_config.get("method") or "POST").upper()
@@ -780,16 +809,119 @@ def _integration_call(
     input_mode = str(
         (op_config or {}).get("input_mode") or ("query" if method == "GET" else "json")
     ).strip().lower()
-    if input_mode not in {"json", "query", "none"}:
+    if input_mode not in {"json", "form", "query", "none"}:
         return ToolResult(success=False, error="Integration operation input mode is invalid")
+    if input_mode == "json":
+        source = request_payload if isinstance(request_payload, dict) else {}
+        required_json_fields = [
+            str(item).strip()
+            for item in ((op_config or {}).get("required_json_fields") or [])
+            if str(item or "").strip()
+        ]
+        raw_json_fields = (op_config or {}).get("json_fields")
+        raw_json_fields = raw_json_fields if isinstance(raw_json_fields, list) else []
+        declared_json_fields = [
+            str(item.get("key") or "").strip()
+            for item in raw_json_fields
+            if isinstance(item, dict) and str(item.get("key") or "").strip()
+        ]
+        allowed_json_fields = list(
+            dict.fromkeys([*declared_json_fields, *required_json_fields])
+        )
+        if allowed_json_fields:
+            source = {
+                key: value
+                for key, value in source.items()
+                if key in allowed_json_fields
+            }
+            request_payload = source
+        missing_json_fields = [
+            key
+            for key in required_json_fields
+            if key not in source or source.get(key) in (None, "")
+        ]
+        if missing_json_fields:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"API operation '{operation}' requires JSON field(s): "
+                    + ", ".join(missing_json_fields)
+                ),
+                data={"missing_fields": missing_json_fields},
+            )
+
+    if input_mode == "form":
+        source = request_payload if isinstance(request_payload, dict) else {}
+        required_form_fields = [
+            str(item).strip()
+            for item in ((op_config or {}).get("required_form_fields") or [])
+            if str(item or "").strip()
+        ]
+        raw_form_fields = (op_config or {}).get("form_fields")
+        raw_form_fields = raw_form_fields if isinstance(raw_form_fields, list) else []
+        declared_form_fields = [
+            str(item.get("key") or "").strip()
+            for item in raw_form_fields
+            if isinstance(item, dict) and str(item.get("key") or "").strip()
+        ]
+        allowed_form_fields = list(
+            dict.fromkeys([*declared_form_fields, *required_form_fields])
+        )
+        if allowed_form_fields:
+            source = {
+                key: value
+                for key, value in source.items()
+                if key in allowed_form_fields
+            }
+        missing_form_fields = [
+            key
+            for key in required_form_fields
+            if key not in source or source.get(key) in (None, "")
+        ]
+        if missing_form_fields:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"API operation '{operation}' requires form field(s): "
+                    + ", ".join(missing_form_fields)
+                ),
+                data={"missing_fields": missing_form_fields},
+            )
+        for key, value in source.items():
+            if value is None:
+                continue
+            if not isinstance(value, (str, int, float, bool)):
+                return ToolResult(
+                    success=False,
+                    error=f"Form field '{key}' must be a scalar value",
+                )
+        request_payload = source
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+
     if input_mode == "query":
         query_items = []
         source = request_payload if isinstance(request_payload, dict) else {}
+        raw_query_params = (op_config or {}).get("query_params")
+        raw_query_params = raw_query_params if isinstance(raw_query_params, list) else []
+        query_params = [
+            str(item).strip()
+            for item in raw_query_params
+            if str(item or "").strip()
+        ]
         required_query_params = [
             str(item).strip()
             for item in ((op_config or {}).get("required_query_params") or [])
             if str(item or "").strip()
         ]
+        allowed_query_params = list(
+            dict.fromkeys([*query_params, *required_query_params])
+        )
+        if allowed_query_params:
+            source = {
+                key: value
+                for key, value in source.items()
+                if key in allowed_query_params
+            }
         missing_query_params = [
             key
             for key in required_query_params
@@ -838,17 +970,22 @@ def _integration_call(
             method=method,
             headers=headers,
             json_data=request_payload if input_mode == "json" else None,
+            form_data=request_payload if input_mode == "form" else None,
             timeout=float((op_config or {}).get("timeout") or 15),
+            max_response_bytes=MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS,
         )
     except Exception as exc:
         return ToolResult(success=False, error=str(exc))
     status = int(result.get("status_code") or 0)
     success = 200 <= status < 300
+    response_value = _integration_response_value(result)
     return ToolResult(
         success=success,
         data={
             "integration_id": integration.id,
             "integration": integration.name,
+            "status_code": status,
+            "response": response_value,
             "http": result,
             "idempotency_key": idempotency_key,
         },

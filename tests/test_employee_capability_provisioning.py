@@ -3404,7 +3404,15 @@ def test_graph_action_forwards_named_operation_to_connected_api(database, monkey
                 arguments=arguments,
                 idempotency_key=idempotency_key,
             )
-            return SimpleNamespace(success=True, data={"ok": True}, error=None)
+            return SimpleNamespace(
+                success=True,
+                data={
+                    "ok": True,
+                    "status_code": 200,
+                    "response": {"id": "vendor-123", "state": "ready"},
+                },
+                error=None,
+            )
 
         monkeypatch.setattr(
             "backend.app.modules.automation.runtime._integration_call",
@@ -3441,7 +3449,11 @@ def test_graph_action_forwards_named_operation_to_connected_api(database, monkey
     assert captured["arguments"]["details"]["query"] == "abc"
     assert captured["idempotency_key"].startswith("named-op-test:")
     assert ":graph:" in captured["idempotency_key"]
-    assert result["graph_outputs"]["lookup_vendor"]["scheduled_action_result"]["result"] == {"ok": True}
+    action_result = result["graph_outputs"]["lookup_vendor"]["scheduled_action_result"]
+    assert action_result["operation"] == "lookup"
+    assert action_result["status_code"] == 200
+    assert action_result["response"] == {"id": "vendor-123", "state": "ready"}
+    assert action_result["result"]["ok"] is True
 
 
 def test_generic_api_lookup_uses_query_contract_and_fails_closed_for_unknown_operation(database, monkeypatch):
@@ -3604,6 +3616,12 @@ def test_compiler_connection_context_is_validated_tenant_safe_and_secret_free(da
                         "method": "POST",
                         "endpoint": "/orders",
                         "input_mode": "json",
+                        "response_status": "201",
+                        "response_kind": "object",
+                        "response_fields": [
+                            {"key": "id", "required": True, "type": "string"},
+                            {"key": "state", "required": False, "type": "string"},
+                        ],
                         "description": "Create order",
                     }
                 },
@@ -3653,6 +3671,12 @@ def test_compiler_connection_context_is_validated_tenant_safe_and_secret_free(da
     assert context[0]["name"] == "Vendor API"
     assert context[0]["type"] == "custom_api"
     assert context[0]["operations"]["create_order"]["endpoint"] == "/orders"
+    assert context[0]["operations"]["create_order"]["response_status"] == "201"
+    assert context[0]["operations"]["create_order"]["response_kind"] == "object"
+    assert [
+        item["key"]
+        for item in context[0]["operations"]["create_order"]["response_fields"]
+    ] == ["id", "state"]
     rendered = json.dumps(context)
     assert "super-secret" not in rendered
     assert "api_key" not in rendered
@@ -4133,3 +4157,519 @@ def test_bound_api_operation_resolution_reaches_nested_foreach_graph():
     assert unresolved == []
     nested = resolved["execution_graph"]["nodes"][0]["params"]["graph"]
     assert nested["nodes"][0]["params"]["operation"] == "create_order"
+
+def test_external_execute_contract_generates_customer_fields_from_api_schema():
+    action = build_managed_action_config(
+        requirement={
+            "key": "create_specialist_record",
+            "kind": "integration",
+            "purpose": "Create a specialist record",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 91,
+            "validation_required": True,
+            "integration_operations": {
+                "execute": {
+                    "method": "POST",
+                    "endpoint": "/records/{account_id}",
+                    "input_mode": "json",
+                    "path_params": ["account_id"],
+                    "required_json_fields": ["customer_name", "service_id"],
+                    "json_fields": [
+                        {
+                            "key": "customer_name",
+                            "required": True,
+                            "type": "string",
+                        },
+                        {
+                            "key": "service_id",
+                            "required": True,
+                            "type": "integer",
+                        },
+                        {
+                            "key": "visit_date",
+                            "required": False,
+                            "type": "string",
+                            "format": "date",
+                        },
+                    ],
+                }
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    fields = {item["key"]: item for item in action["fields"]}
+    assert fields["account_id"]["required"] is True
+    assert fields["customer_name"]["required"] is True
+    assert fields["service_id"]["type"] == "number"
+    assert fields["visit_date"]["required"] is False
+    assert fields["visit_date"]["type"] == "date"
+
+def test_external_single_named_operation_becomes_direct_default_and_drives_fields():
+    action = build_managed_action_config(
+        requirement={
+            "key": "specialist_records",
+            "kind": "integration",
+            "purpose": "Create specialist records",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 92,
+            "validation_required": True,
+            "integration_operations": {
+                "create_record": {
+                    "method": "POST",
+                    "endpoint": "/records",
+                    "input_mode": "json",
+                    "required_json_fields": ["customer_name"],
+                    "json_fields": [
+                        {
+                            "key": "customer_name",
+                            "required": True,
+                            "type": "string",
+                        }
+                    ],
+                }
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    assert action["destination"]["default_operation"] == "create_record"
+    assert action["fields"] == [
+        {
+            "key": "customer_name",
+            "label": "Customer Name",
+            "required": True,
+            "type": "text",
+        }
+    ]
+
+
+def test_external_graph_selected_operation_becomes_direct_default_when_contract_has_many():
+    action = build_managed_action_config(
+        requirement={
+            "key": "specialist_records",
+            "kind": "integration",
+            "purpose": "Create specialist records",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 93,
+            "validation_required": True,
+            "integration_operations": {
+                "lookup_record": {
+                    "method": "GET",
+                    "endpoint": "/records/{record_id}",
+                    "input_mode": "query",
+                    "path_params": ["record_id"],
+                },
+                "create_record": {
+                    "method": "POST",
+                    "endpoint": "/records",
+                    "input_mode": "json",
+                    "required_json_fields": ["customer_name"],
+                    "json_fields": [
+                        {
+                            "key": "customer_name",
+                            "required": True,
+                            "type": "string",
+                        }
+                    ],
+                },
+            },
+        },
+        spec={
+            "permissions": [],
+            "execution_graph": {
+                "version": 1,
+                "trigger": {"type": "manual"},
+                "nodes": [
+                    {
+                        "id": "create",
+                        "type": "action",
+                        "depends_on": [],
+                        "params": {
+                            "action_type": "specialist_records",
+                            "operation": "create_record",
+                            "arguments": {},
+                        },
+                    }
+                ],
+            },
+        },
+    )
+
+    assert action["destination"]["default_operation"] == "create_record"
+    assert [field["key"] for field in action["fields"]] == ["customer_name"]
+
+
+def test_external_ambiguous_operations_do_not_gain_an_unsafe_direct_default():
+    action = build_managed_action_config(
+        requirement={
+            "key": "specialist_records",
+            "kind": "integration",
+            "purpose": "Work with specialist records",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 94,
+            "validation_required": True,
+            "integration_operations": {
+                "create_record": {
+                    "method": "POST",
+                    "endpoint": "/records",
+                    "input_mode": "json",
+                },
+                "delete_record": {
+                    "method": "DELETE",
+                    "endpoint": "/records/{record_id}",
+                    "input_mode": "query",
+                },
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    assert "default_operation" not in action["destination"]
+    assert action["fields"] == []
+
+def test_external_action_exposes_required_and_optional_declared_query_fields():
+    action = build_managed_action_config(
+        requirement={
+            "key": "vendor_search",
+            "kind": "integration",
+            "purpose": "Search vendor records",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 95,
+            "validation_required": True,
+            "integration_operations": {
+                "execute": {
+                    "method": "GET",
+                    "endpoint": "/records",
+                    "input_mode": "query",
+                    "query_params": ["status", "limit"],
+                    "required_query_params": ["status"],
+                }
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    fields = {item["key"]: item for item in action["fields"]}
+    assert fields["status"]["required"] is True
+    assert fields["limit"]["required"] is False
+
+def test_graph_can_feed_connected_api_response_into_later_action(database, monkeypatch):
+    factory, _ = database
+    calls = []
+
+    with factory() as db:
+        agent = db.query(AIAgent).filter(AIAgent.company_id == 1).first()
+        assignment = AgentToolAssignment(
+            agent_id=agent.id,
+            tool_name="action_request",
+            enabled=True,
+            config={
+                "actions": {
+                    "vendor_records": {
+                        "enabled": True,
+                        "confirmation_required": False,
+                        "_xvond_permission_mode": "automatic",
+                        "destination": {
+                            "type": "integration",
+                            "integration_id": 88,
+                            "operations": {
+                                "create_record": {
+                                    "method": "POST",
+                                    "endpoint": "/records",
+                                },
+                                "get_record": {
+                                    "method": "GET",
+                                    "endpoint": "/records/{record_id}",
+                                },
+                            },
+                        },
+                    }
+                }
+            },
+        )
+        db.add(assignment)
+        db.commit()
+        agent_id = agent.id
+
+        def fake_call(
+            db,
+            context,
+            action_type,
+            action,
+            arguments,
+            operation,
+            *,
+            idempotency_key=None,
+        ):
+            calls.append({
+                "operation": operation,
+                "details": dict(arguments.get("details") or {}),
+            })
+            if operation == "create_record":
+                return SimpleNamespace(
+                    success=True,
+                    data={
+                        "status_code": 201,
+                        "response": {"id": "rec-99"},
+                    },
+                    error=None,
+                )
+            return SimpleNamespace(
+                success=True,
+                data={
+                    "status_code": 200,
+                    "response": {"id": "rec-99", "state": "ready"},
+                },
+                error=None,
+            )
+
+        monkeypatch.setattr(
+            "backend.app.modules.automation.runtime._integration_call",
+            fake_call,
+        )
+
+        result = automation_runtime.execute_step(
+            db,
+            1,
+            {
+                "type": "graph",
+                "agent_id": agent_id,
+                "graph": {
+                    "version": 1,
+                    "trigger": {"type": "manual"},
+                    "nodes": [
+                        {
+                            "id": "create_vendor",
+                            "type": "action",
+                            "depends_on": [],
+                            "params": {
+                                "action_type": "vendor_records",
+                                "operation": "create_record",
+                                "arguments": {"customer_name": "Test Customer"},
+                            },
+                        },
+                        {
+                            "id": "read_vendor",
+                            "type": "action",
+                            "depends_on": ["create_vendor"],
+                            "params": {
+                                "action_type": "vendor_records",
+                                "operation": "get_record",
+                                "arguments": {
+                                    "record_id": (
+                                        "$nodes.create_vendor."
+                                        "scheduled_action_result.response.id"
+                                    )
+                                },
+                            },
+                        },
+                    ],
+                },
+            },
+            {"_xvond_execution_key": "response-chain-test"},
+            run_id=1,
+            step_index=0,
+        )
+
+    assert calls[0]["operation"] == "create_record"
+    assert calls[1]["operation"] == "get_record"
+    assert calls[1]["details"]["record_id"] == "rec-99"
+    assert (
+        result["graph_outputs"]["read_vendor"]["scheduled_action_result"]["response"]
+        == {"id": "rec-99", "state": "ready"}
+    )
+
+def test_external_action_exposes_declared_form_fields():
+    action = build_managed_action_config(
+        requirement={
+            "key": "vendor_session",
+            "kind": "integration",
+            "purpose": "Create vendor session",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 96,
+            "validation_required": True,
+            "integration_operations": {
+                "execute": {
+                    "method": "POST",
+                    "endpoint": "/session",
+                    "input_mode": "form",
+                    "required_form_fields": ["username"],
+                    "form_fields": [
+                        {
+                            "key": "username",
+                            "required": True,
+                            "type": "string",
+                        },
+                        {
+                            "key": "remember",
+                            "required": False,
+                            "type": "boolean",
+                        },
+                    ],
+                }
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    fields = {item["key"]: item for item in action["fields"]}
+    assert fields["username"]["required"] is True
+    assert fields["username"]["type"] == "text"
+    assert fields["remember"]["required"] is False
+    assert fields["remember"]["type"] == "boolean"
+
+def test_external_booking_uses_provider_declared_fields_instead_of_fixed_booking_shape():
+    action = build_managed_action_config(
+        requirement={
+            "key": "booking",
+            "kind": "integration",
+            "purpose": "Create appointments in the clinic system",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 97,
+            "validation_required": True,
+            "integration_operations": {
+                "execute": {
+                    "method": "POST",
+                    "endpoint": "/appointments",
+                    "input_mode": "json",
+                    "required_json_fields": [
+                        "patient_id",
+                        "service_id",
+                        "starts_at",
+                    ],
+                    "json_fields": [
+                        {
+                            "key": "patient_id",
+                            "required": True,
+                            "type": "string",
+                        },
+                        {
+                            "key": "service_id",
+                            "required": True,
+                            "type": "integer",
+                        },
+                        {
+                            "key": "starts_at",
+                            "required": True,
+                            "type": "string",
+                            "format": "date-time",
+                        },
+                        {
+                            "key": "note",
+                            "required": False,
+                            "type": "string",
+                        },
+                    ],
+                }
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    fields = {item["key"]: item for item in action["fields"]}
+    assert set(fields) == {"patient_id", "service_id", "starts_at", "note"}
+    assert fields["patient_id"]["required"] is True
+    assert fields["service_id"]["type"] == "number"
+    assert fields["note"]["required"] is False
+    assert "customer_name" not in fields
+    assert "phone" not in fields
+    assert "date" not in fields
+    assert action["availability"] == {"mode": "none"}
+
+
+def test_external_booking_unions_declared_availability_inputs_with_execute_inputs():
+    action = build_managed_action_config(
+        requirement={
+            "key": "booking",
+            "kind": "integration",
+            "purpose": "Find slots and create appointments",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 98,
+            "validation_required": True,
+            "integration_operations": {
+                "availability": {
+                    "method": "POST",
+                    "endpoint": "/slots/search",
+                    "input_mode": "json",
+                    "required_json_fields": ["appointment_date", "service_id"],
+                    "json_fields": [
+                        {
+                            "key": "appointment_date",
+                            "required": True,
+                            "type": "string",
+                            "format": "date",
+                        },
+                        {
+                            "key": "service_id",
+                            "required": True,
+                            "type": "integer",
+                        },
+                    ],
+                },
+                "execute": {
+                    "method": "POST",
+                    "endpoint": "/appointments",
+                    "input_mode": "json",
+                    "required_json_fields": ["slot_id", "patient_id"],
+                    "json_fields": [
+                        {
+                            "key": "slot_id",
+                            "required": True,
+                            "type": "string",
+                        },
+                        {
+                            "key": "patient_id",
+                            "required": True,
+                            "type": "string",
+                        },
+                    ],
+                },
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    fields = {item["key"]: item for item in action["fields"]}
+    assert set(fields) == {
+        "slot_id",
+        "patient_id",
+        "appointment_date",
+        "service_id",
+    }
+    assert fields["appointment_date"]["type"] == "date"
+    assert action["availability"]["mode"] == "integration"
+    assert action["availability"]["date_field"] == "appointment_date"
+
+
+def test_packaged_calendar_booking_keeps_xvond_semantic_booking_fields():
+    action = build_managed_action_config(
+        requirement={
+            "key": "booking",
+            "kind": "integration",
+            "purpose": "Book appointments on Google Calendar",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 99,
+            "validation_required": True,
+            "integration_operations": {
+                "availability": {"adapter": "google_calendar"},
+                "execute": {"adapter": "google_calendar"},
+                "cancel": {"adapter": "google_calendar"},
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    assert [item["key"] for item in action["fields"]] == [
+        "customer_name",
+        "phone",
+        "service",
+        "date",
+        "time",
+        "notes",
+    ]
+    assert action["availability"] == {
+        "mode": "integration",
+        "date_field": "date",
+        "time_field": "time",
+    }

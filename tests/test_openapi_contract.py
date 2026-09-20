@@ -296,3 +296,423 @@ def test_openapi_drops_unsafe_oauth_urls():
         "paths": {"/orders": {"get": {"operationId": "listOrders"}}},
     }
     assert normalize_openapi_document(document)["auth_schemes"] == []
+
+def test_openapi_extracts_required_json_body_fields_through_refs_and_allof():
+    document = {
+        "openapi": "3.0.3",
+        "components": {
+            "schemas": {
+                "Customer": {
+                    "type": "object",
+                    "required": ["customer_name"],
+                    "properties": {
+                        "customer_name": {
+                            "type": "string",
+                            "description": "Customer full name",
+                        }
+                    },
+                },
+                "BookingRequest": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/Customer"},
+                        {
+                            "type": "object",
+                            "required": ["service_id", "date"],
+                            "properties": {
+                                "service_id": {"type": "integer"},
+                                "date": {"type": "string", "format": "date"},
+                                "notes": {"type": "string"},
+                            },
+                        },
+                    ]
+                },
+            }
+        },
+        "paths": {
+            "/appointments": {
+                "post": {
+                    "operationId": "createAppointment",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/BookingRequest"}
+                            }
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+    operation = normalize_openapi_document(document)["operations"]["create_appointment"]
+
+    assert operation["required_json_fields"] == [
+        "customer_name",
+        "service_id",
+        "date",
+    ]
+    fields = {item["key"]: item for item in operation["json_fields"]}
+    assert fields["customer_name"]["required"] is True
+    assert fields["customer_name"]["description"] == "Customer full name"
+    assert fields["service_id"]["type"] == "integer"
+    assert fields["date"]["format"] == "date"
+    assert fields["notes"]["required"] is False
+
+
+def test_swagger_body_parameter_exposes_required_json_fields():
+    document = {
+        "swagger": "2.0",
+        "paths": {
+            "/orders": {
+                "post": {
+                    "operationId": "createOrder",
+                    "parameters": [
+                        {
+                            "name": "body",
+                            "in": "body",
+                            "required": True,
+                            "schema": {
+                                "type": "object",
+                                "required": ["sku", "quantity"],
+                                "properties": {
+                                    "sku": {"type": "string"},
+                                    "quantity": {"type": "integer"},
+                                },
+                            },
+                        }
+                    ],
+                }
+            }
+        },
+    }
+
+    operation = normalize_openapi_document(document)["operations"]["create_order"]
+    assert operation["input_mode"] == "json"
+    assert operation["required_json_fields"] == ["sku", "quantity"]
+
+def test_openapi_tracks_all_declared_query_parameters_for_request_shaping():
+    contract = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "paths": {
+                "/search": {
+                    "get": {
+                        "operationId": "searchItems",
+                        "parameters": [
+                            {"name": "status", "in": "query", "required": True},
+                            {"name": "limit", "in": "query", "required": False},
+                            {"name": "ignored body", "in": "query", "required": False},
+                        ],
+                    }
+                }
+            },
+        }
+    )
+
+    operation = contract["operations"]["search_items"]
+    assert operation["query_params"] == ["status", "limit"]
+    assert operation["required_query_params"] == ["status"]
+
+def test_openapi_extracts_bounded_success_object_response_contract():
+    contract = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "components": {
+                "schemas": {
+                    "CreatedOrder": {
+                        "type": "object",
+                        "required": ["id"],
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "Created order identifier",
+                            },
+                            "total": {"type": "number"},
+                        },
+                    }
+                }
+            },
+            "paths": {
+                "/orders": {
+                    "post": {
+                        "operationId": "createOrder",
+                        "responses": {
+                            "400": {"description": "bad request"},
+                            "201": {
+                                "description": "created",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "$ref": "#/components/schemas/CreatedOrder"
+                                        }
+                                    }
+                                },
+                            },
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    operation = contract["operations"]["create_order"]
+    assert operation["response_status"] == "201"
+    assert operation["response_kind"] == "object"
+    fields = {item["key"]: item for item in operation["response_fields"]}
+    assert fields["id"]["required"] is True
+    assert fields["id"]["description"] == "Created order identifier"
+    assert fields["total"]["type"] == "number"
+
+
+def test_openapi_extracts_array_item_response_contract():
+    contract = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "components": {
+                "schemas": {
+                    "Order": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "state": {"type": "string"},
+                        },
+                    }
+                }
+            },
+            "paths": {
+                "/orders": {
+                    "get": {
+                        "operationId": "listOrders",
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/components/schemas/Order"
+                                            },
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    operation = contract["operations"]["list_orders"]
+    assert operation["response_status"] == "200"
+    assert operation["response_kind"] == "array"
+    assert operation["response_item_kind"] == "object"
+    assert [item["key"] for item in operation["response_item_fields"]] == [
+        "id",
+        "state",
+    ]
+
+
+def test_swagger_success_response_schema_is_supported():
+    contract = normalize_openapi_document(
+        {
+            "swagger": "2.0",
+            "paths": {
+                "/record": {
+                    "post": {
+                        "operationId": "createRecord",
+                        "responses": {
+                            "201": {
+                                "description": "created",
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["id"],
+                                    "properties": {"id": {"type": "integer"}},
+                                },
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    operation = contract["operations"]["create_record"]
+    assert operation["response_status"] == "201"
+    assert operation["response_kind"] == "object"
+    assert operation["response_fields"][0]["key"] == "id"
+    assert operation["response_fields"][0]["type"] == "integer"
+
+def test_openapi_urlencoded_request_body_becomes_form_contract():
+    contract = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "paths": {
+                "/token": {
+                    "post": {
+                        "operationId": "createToken",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/x-www-form-urlencoded": {
+                                    "schema": {
+                                        "type": "object",
+                                        "required": ["client_id", "grant_type"],
+                                        "properties": {
+                                            "client_id": {"type": "string"},
+                                            "grant_type": {
+                                                "type": "string",
+                                                "enum": ["client_credentials"],
+                                            },
+                                            "scope": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    operation = contract["operations"]["create_token"]
+    assert operation["input_mode"] == "form"
+    assert operation["required_form_fields"] == ["client_id", "grant_type"]
+    fields = {item["key"]: item for item in operation["form_fields"]}
+    assert fields["client_id"]["required"] is True
+    assert fields["grant_type"]["enum"] == ["client_credentials"]
+    assert fields["scope"]["required"] is False
+    assert operation["required_json_fields"] == []
+    assert operation["json_fields"] == []
+
+
+def test_openapi_multipart_request_does_not_fall_back_to_json():
+    contract = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "paths": {
+                "/health": {
+                    "get": {"operationId": "health"}
+                },
+                "/upload": {
+                    "post": {
+                        "operationId": "uploadFile",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {
+                                        "type": "object",
+                                        "required": ["file"],
+                                        "properties": {
+                                            "file": {
+                                                "type": "string",
+                                                "format": "binary",
+                                            }
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                    }
+                },
+            },
+        }
+    )
+
+    assert set(contract["operations"]) == {"health"}
+
+
+def test_swagger_formdata_urlencoded_request_is_supported_but_multipart_is_not():
+    urlencoded = normalize_openapi_document(
+        {
+            "swagger": "2.0",
+            "consumes": ["application/x-www-form-urlencoded"],
+            "paths": {
+                "/session": {
+                    "post": {
+                        "operationId": "createSession",
+                        "parameters": [
+                            {
+                                "name": "username",
+                                "in": "formData",
+                                "required": True,
+                                "type": "string",
+                            },
+                            {
+                                "name": "remember",
+                                "in": "formData",
+                                "required": False,
+                                "type": "boolean",
+                            },
+                        ],
+                    }
+                }
+            },
+        }
+    )
+    operation = urlencoded["operations"]["create_session"]
+    assert operation["input_mode"] == "form"
+    assert operation["required_form_fields"] == ["username"]
+    assert [item["key"] for item in operation["form_fields"]] == [
+        "username",
+        "remember",
+    ]
+
+    multipart = normalize_openapi_document(
+        {
+            "swagger": "2.0",
+            "consumes": ["multipart/form-data"],
+            "paths": {
+                "/health": {"get": {"operationId": "health"}},
+                "/upload": {
+                    "post": {
+                        "operationId": "upload",
+                        "parameters": [
+                            {
+                                "name": "file",
+                                "in": "formData",
+                                "required": True,
+                                "type": "string",
+                                "format": "binary",
+                            }
+                        ],
+                    }
+                },
+            },
+        }
+    )
+    assert set(multipart["operations"]) == {"health"}
+
+def test_openapi_root_array_json_request_stays_fail_closed():
+    contract = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "paths": {
+                "/health": {
+                    "get": {"operationId": "health"}
+                },
+                "/batch": {
+                    "post": {
+                        "operationId": "batchCreate",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {"type": "object"},
+                                    }
+                                }
+                            },
+                        },
+                    }
+                },
+            },
+        }
+    )
+
+    assert set(contract["operations"]) == {"health"}

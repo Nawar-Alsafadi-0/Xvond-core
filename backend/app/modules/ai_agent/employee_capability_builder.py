@@ -233,6 +233,63 @@ def build_internal_record_action_config(*, requirement: dict, spec: dict) -> dic
     }
 
 
+def _external_graph_operations(spec: dict, requirement_key: str) -> list[str]:
+    """Return explicit external operations selected by this requirement's graphs."""
+    key = normalize_requirement_key(requirement_key)
+    result: list[str] = []
+
+    def visit(graph: dict) -> None:
+        nodes = graph.get("nodes") if isinstance(graph, dict) else None
+        if not isinstance(nodes, list):
+            return
+        for raw in nodes:
+            if not isinstance(raw, dict):
+                continue
+            node_type = str(raw.get("type") or "").strip().lower()
+            params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
+            if (
+                node_type == "action"
+                and normalize_requirement_key(params.get("action_type")) == key
+            ):
+                operation = normalize_requirement_key(params.get("operation"))
+                if operation and operation not in result:
+                    result.append(operation)
+            elif node_type == "foreach":
+                nested = params.get("graph")
+                if isinstance(nested, dict):
+                    visit(nested)
+
+    for routine in _compiled_execution_routines(spec):
+        if isinstance(routine, dict):
+            visit(routine.get("graph") or {})
+    return result
+
+
+def _default_external_operation(*, requirement_key: str, operations: dict, spec: dict) -> str | None:
+    """Choose a direct-chat operation only when the contract makes it unambiguous."""
+    available = {
+        normalize_requirement_key(name): str(name)
+        for name, value in (operations or {}).items()
+        if normalize_requirement_key(name) and isinstance(value, dict)
+    }
+    if not available:
+        return None
+    if "execute" in available:
+        return available["execute"]
+
+    graph_operations = [
+        available[name]
+        for name in _external_graph_operations(spec, requirement_key)
+        if name in available
+    ]
+    graph_operations = list(dict.fromkeys(graph_operations))
+    if len(graph_operations) == 1:
+        return graph_operations[0]
+    if len(available) == 1:
+        return next(iter(available.values()))
+    return None
+
+
 def build_external_integration_action_config(*, requirement: dict, spec: dict) -> dict:
     key = str(requirement.get("key") or "connected_action").strip()
     purpose = str(requirement.get("purpose") or key.replace("_", " ")).strip()
@@ -242,21 +299,167 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
 
     fields = []
     availability = {"mode": "none"}
+    default_operation = _default_external_operation(
+        requirement_key=key,
+        operations=operations,
+        spec=spec,
+    )
+    execute_operation = (
+        operations.get(default_operation)
+        if default_operation and isinstance(operations.get(default_operation), dict)
+        else {}
+    )
+    seen_fields: set[str] = set()
+
+    def add_field(
+        raw_key,
+        *,
+        required: bool = True,
+        raw_type: str = "string",
+        raw_format: str = "",
+    ) -> None:
+        field_key = str(raw_key or "").strip()
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}", field_key)
+            or field_key in seen_fields
+        ):
+            return
+        field_type = "text"
+        value_type = str(raw_type or "").strip().lower()
+        value_format = str(raw_format or "").strip().lower()
+        if value_format == "email":
+            field_type = "email"
+        elif value_format == "date":
+            field_type = "date"
+        elif value_format == "time":
+            field_type = "time"
+        elif value_format in {"phone", "tel"}:
+            field_type = "phone"
+        elif value_type in {"integer", "number"}:
+            field_type = "number"
+        elif value_type == "boolean":
+            field_type = "boolean"
+        fields.append({
+            "key": field_key,
+            "label": re.sub(r"[_.-]+", " ", field_key).strip().title(),
+            "required": required,
+            "type": field_type,
+        })
+        seen_fields.add(field_key)
+
+    def add_operation_fields(operation: dict) -> None:
+        if not isinstance(operation, dict):
+            return
+        for raw_key in operation.get("path_params") or []:
+            add_field(raw_key, required=True)
+
+        required_query_keys = {
+            str(item or "").strip()
+            for item in (operation.get("required_query_params") or [])
+            if str(item or "").strip()
+        }
+        declared_query_keys = {
+            str(item or "").strip()
+            for item in (operation.get("query_params") or [])
+            if str(item or "").strip()
+        }
+        for raw_key in operation.get("query_params") or []:
+            add_field(
+                raw_key,
+                required=str(raw_key or "").strip() in required_query_keys,
+            )
+        for raw_key in operation.get("required_query_params") or []:
+            if str(raw_key or "").strip() not in declared_query_keys:
+                add_field(raw_key, required=True)
+
+        json_field_keys: set[str] = set()
+        for raw_field in operation.get("json_fields") or []:
+            if not isinstance(raw_field, dict):
+                continue
+            raw_key = str(raw_field.get("key") or "").strip()
+            if not raw_key:
+                continue
+            json_field_keys.add(raw_key)
+            add_field(
+                raw_key,
+                required=bool(raw_field.get("required")),
+                raw_type=str(raw_field.get("type") or "string"),
+                raw_format=str(raw_field.get("format") or ""),
+            )
+        for raw_key in operation.get("required_json_fields") or []:
+            if str(raw_key or "").strip() not in json_field_keys:
+                add_field(raw_key, required=True)
+
+        form_field_keys: set[str] = set()
+        for raw_field in operation.get("form_fields") or []:
+            if not isinstance(raw_field, dict):
+                continue
+            raw_key = str(raw_field.get("key") or "").strip()
+            if not raw_key:
+                continue
+            form_field_keys.add(raw_key)
+            add_field(
+                raw_key,
+                required=bool(raw_field.get("required")),
+                raw_type=str(raw_field.get("type") or "string"),
+                raw_format=str(raw_field.get("format") or ""),
+            )
+        for raw_key in operation.get("required_form_fields") or []:
+            if str(raw_key or "").strip() not in form_field_keys:
+                add_field(raw_key, required=True)
+
+    if execute_operation:
+        add_operation_fields(execute_operation)
+
     if key == "booking":
-        fields = [
-            {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
-            {"key": "phone", "label": "Phone", "required": True, "type": "phone"},
-            {"key": "service", "label": "Service", "required": True, "type": "text"},
-            {"key": "date", "label": "Date", "required": True, "type": "date", "role": "date"},
-            {"key": "time", "label": "Time", "required": True, "type": "time", "role": "time"},
-            {"key": "notes", "label": "Notes", "required": False, "type": "text"},
-        ]
-        if isinstance(operations.get("availability"), dict):
-            availability = {
-                "mode": "integration",
-                "date_field": "date",
-                "time_field": "time",
-            }
+        availability_operation = (
+            operations.get("availability")
+            if isinstance(operations.get("availability"), dict)
+            else {}
+        )
+        if availability_operation:
+            add_operation_fields(availability_operation)
+            availability = {"mode": "integration"}
+
+        # Packaged calendar connectors intentionally have no HTTP request schema.
+        # Keep Xvond's semantic booking fields only for those schema-less
+        # connectors; imported/custom booking APIs use their exact provider
+        # contract instead of being forced into customer_name/date/time.
+        if not fields:
+            fields = [
+                {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
+                {"key": "phone", "label": "Phone", "required": True, "type": "phone"},
+                {"key": "service", "label": "Service", "required": True, "type": "text"},
+                {"key": "date", "label": "Date", "required": True, "type": "date", "role": "date"},
+                {"key": "time", "label": "Time", "required": True, "type": "time", "role": "time"},
+                {"key": "notes", "label": "Notes", "required": False, "type": "text"},
+            ]
+            if availability_operation:
+                availability.update({
+                    "date_field": "date",
+                    "time_field": "time",
+                })
+        elif availability_operation:
+            date_field = next(
+                (
+                    field["key"]
+                    for field in fields
+                    if field.get("type") == "date"
+                ),
+                None,
+            )
+            time_field = next(
+                (
+                    field["key"]
+                    for field in fields
+                    if field.get("type") == "time"
+                ),
+                None,
+            )
+            if date_field:
+                availability["date_field"] = date_field
+            if time_field:
+                availability["time_field"] = time_field
 
     module_map = {
         "booking": "booking",
@@ -277,6 +480,7 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
             "type": "integration",
             "integration_id": integration_id,
             "operations": operations,
+            **({"default_operation": default_operation} if default_operation else {}),
             "validation_required": requirement.get("validation_required") is True,
         },
         "availability": availability,

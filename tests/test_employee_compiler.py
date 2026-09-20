@@ -1645,3 +1645,164 @@ def test_discovery_drops_hallucinated_docs_url_and_bounds_queries():
     assert discovery["docs_url"] == ""
     assert len(discovery["search_queries"]) == 5
     assert discovery["customer_access"] == "unknown"
+
+def test_compiler_preserves_connected_system_request_contract_metadata():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Record employee",
+            "requirements": [
+                {
+                    "key": "specialist_records",
+                    "kind": "integration",
+                    "purpose": "Create records",
+                    "requires_connection": True,
+                    "fulfillment_mode": "external_connection",
+                    "integration_operations": {
+                        "execute": {
+                            "method": "POST",
+                            "endpoint": "/records/{account_id}",
+                            "input_mode": "json",
+                            "path_params": ["account_id"],
+                            "required_query_params": ["locale"],
+                            "required_json_fields": ["customer_name"],
+                            "json_fields": [
+                                {
+                                    "key": "customer_name",
+                                    "required": True,
+                                    "type": "string",
+                                    "description": "Customer name",
+                                }
+                            ],
+                        }
+                    },
+                }
+            ],
+        },
+        job_brief="Create records in my connected specialist system.",
+    )
+
+    operation = spec["requirements"][0]["integration_operations"]["execute"]
+    assert operation["path_params"] == ["account_id"]
+    assert operation["required_query_params"] == ["locale"]
+    assert operation["required_json_fields"] == ["customer_name"]
+    assert operation["json_fields"][0]["key"] == "customer_name"
+
+def test_compiler_preserves_declared_connected_api_query_parameters():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Search employee",
+            "requirements": [
+                {
+                    "key": "vendor_search",
+                    "kind": "integration",
+                    "purpose": "Search connected vendor records",
+                    "requires_connection": True,
+                    "fulfillment_mode": "external_connection",
+                    "integration_operations": {
+                        "lookup": {
+                            "method": "GET",
+                            "endpoint": "/records",
+                            "input_mode": "query",
+                            "query_params": ["status", "limit"],
+                            "required_query_params": ["status"],
+                        }
+                    },
+                }
+            ],
+        },
+        job_brief="Search records in my connected vendor system.",
+    )
+
+    operation = spec["requirements"][0]["integration_operations"]["lookup"]
+    assert operation["query_params"] == ["status", "limit"]
+    assert operation["required_query_params"] == ["status"]
+
+def test_compiler_preserves_connected_api_response_contract_metadata():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Order employee",
+            "requirements": [
+                {
+                    "key": "vendor_orders",
+                    "kind": "integration",
+                    "purpose": "Create vendor orders",
+                    "requires_connection": True,
+                    "fulfillment_mode": "external_connection",
+                    "integration_operations": {
+                        "create_order": {
+                            "method": "POST",
+                            "endpoint": "/orders",
+                            "input_mode": "json",
+                            "response_status": "201",
+                            "response_kind": "object",
+                            "response_fields": [
+                                {
+                                    "key": "id",
+                                    "required": True,
+                                    "type": "string",
+                                    "description": "Created order identifier",
+                                },
+                                {
+                                    "key": "state",
+                                    "required": False,
+                                    "type": "string",
+                                },
+                            ],
+                        }
+                    },
+                }
+            ],
+        },
+        job_brief="Create orders in my connected vendor system.",
+    )
+
+    operation = spec["requirements"][0]["integration_operations"]["create_order"]
+    assert operation["response_status"] == "201"
+    assert operation["response_kind"] == "object"
+    assert [item["key"] for item in operation["response_fields"]] == ["id", "state"]
+    assert operation["response_fields"][0]["required"] is True
+
+def test_compiler_preserves_connected_api_form_request_contract():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Session employee",
+            "requirements": [
+                {
+                    "key": "vendor_session",
+                    "kind": "integration",
+                    "purpose": "Create a vendor session",
+                    "requires_connection": True,
+                    "fulfillment_mode": "external_connection",
+                    "integration_operations": {
+                        "create_session": {
+                            "method": "POST",
+                            "endpoint": "/session",
+                            "input_mode": "form",
+                            "required_form_fields": ["username"],
+                            "form_fields": [
+                                {
+                                    "key": "username",
+                                    "required": True,
+                                    "type": "string",
+                                },
+                                {
+                                    "key": "remember",
+                                    "required": False,
+                                    "type": "boolean",
+                                },
+                            ],
+                        }
+                    },
+                }
+            ],
+        },
+        job_brief="Create a session in my connected vendor system.",
+    )
+
+    operation = spec["requirements"][0]["integration_operations"]["create_session"]
+    assert operation["input_mode"] == "form"
+    assert operation["required_form_fields"] == ["username"]
+    assert [item["key"] for item in operation["form_fields"]] == [
+        "username",
+        "remember",
+    ]

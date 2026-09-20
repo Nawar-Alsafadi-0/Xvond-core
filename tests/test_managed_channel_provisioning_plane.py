@@ -63,3 +63,27 @@ def test_channel_provider_uses_registry_result_not_env_route_json():
     lookup_code = _node("Normalize Channel Route Lookup")["parameters"]["jsCode"]
     assert "provider_url:String(row.provider_url)" in lookup_code
     assert "provider_secret:String(row.provider_secret)" in lookup_code
+
+def test_gateway_uses_one_shot_route_deactivation_action():
+    block = GATEWAY.split("def deactivate_channel(", 1)[1].split("def execute(", 1)[0]
+    assert 'action="channel.deactivate"' in block
+    assert "max_retries_override=0" in block
+
+
+def test_actions_workflow_deactivates_routes_through_private_registry():
+    code = _node("Validate and Dispatch")["parameters"]["jsCode"]
+    assert "'channel.deactivate'" in code
+    assert "_dispatch: 'channel_deactivate'" in code
+
+    gate = _node("Channel Deactivate?")["parameters"]
+    assert "channel_deactivate" in str(gate)
+
+    deactivate = _node("Deactivate Channel Route")["parameters"]
+    assert deactivate["method"] == "DELETE"
+    assert "XVOND_WORKFLOW_REGISTRY_URL" in deactivate["url"]
+    assert "/v1/routes/" in deactivate["url"]
+    assert "XVOND_WORKFLOW_REGISTRY_SECRET" in str(deactivate["headerParameters"])
+
+    normalized = _node("Normalize Deactivate Result")["parameters"]["jsCode"]
+    assert "deactivated" in normalized
+    assert "Managed channel deactivation failed" in normalized
