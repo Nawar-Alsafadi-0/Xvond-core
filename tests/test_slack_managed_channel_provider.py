@@ -59,10 +59,11 @@ def test_slack_acks_before_forwarding_to_xvond():
 
 def test_slack_outbound_uses_web_api_and_requires_provider_confirmation():
     send = _node("Slack chat.postMessage")
-    assert send["parameters"]["url"] == "https://slack.com/api/chat.postMessage"
-    headers = send["parameters"]["headerParameters"]["parameters"]
-    authorization = next(item["value"] for item in headers if item["name"] == "Authorization")
-    assert "bot_token" in authorization
+    code = send["parameters"]["jsCode"]
+    assert "https://slack.com/api/chat.postMessage" in code
+    assert "XVOND_WORKFLOW_REGISTRY_URL" in code
+    assert "provider_config?.bot_token" in code
+    assert "'Authorization':'Bearer ' + botToken" in code
 
     normalize = _node("Normalize Slack Send Result")["parameters"]["jsCode"]
     assert "response.ok !== true" in normalize
