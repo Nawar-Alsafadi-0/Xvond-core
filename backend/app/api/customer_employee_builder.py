@@ -2325,7 +2325,7 @@ def create_employee(
             "name": agent.name,
             "enabled": agent.enabled,
             "subscription_required_for_go_live": not has_entitlement,
-            "subscription_required_for_compile": not has_entitlement,
+            "subscription_required_for_compile": bool(not has_entitlement and not is_self_service),
             "blueprint": blueprint.as_dict(),
             "readiness": blueprint_readiness(blueprint),
             "config_id": config.id if config else None,
