@@ -10,6 +10,7 @@ from backend.app.core.database.connection import SessionLocal
 from backend.app.core.config_secrets import reveal_config
 from backend.app.models.company import Company
 from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
 from backend.app.modules.billing.payment_gateway import payment_gateway
 from backend.app.modules.billing.service_models import (
     ServiceCheckout,
@@ -32,6 +33,13 @@ from scripts.production_acceptance import check_release
 
 def _utcnow_naive() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _utc_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed
 
 
 def _parse_channels(values: list[str] | None) -> list[str]:
@@ -154,6 +162,68 @@ def _channel_gate(
         "ok": all(item.get("ok") is True for item in checks.values()),
         "required": required_channels,
         "channels": checks,
+    }
+
+
+def _automation_run_gate(
+    db,
+    *,
+    company_id: int,
+    agent_id: int,
+    required: bool,
+    completed_after: datetime | None = None,
+) -> dict:
+    """Require real execution evidence for a background/hybrid employee path."""
+
+    if not required:
+        return {
+            "ok": True,
+            "required": False,
+            "reason": "not_required",
+        }
+
+    workflows = (
+        db.query(AutomationWorkflow)
+        .filter(
+            AutomationWorkflow.company_id == company_id,
+            AutomationWorkflow.enabled.is_(True),
+        )
+        .all()
+    )
+    workflow_ids = [
+        workflow.id
+        for workflow in workflows
+        if isinstance(workflow.trigger_config, dict)
+        and workflow.trigger_config.get("_xvond_source") == "self_service_employee"
+        and int(workflow.trigger_config.get("_xvond_agent_id") or 0) == agent_id
+    ]
+    if not workflow_ids:
+        return {
+            "ok": False,
+            "required": True,
+            "workflow_ids": [],
+            "reason": "enabled_employee_workflow_missing",
+        }
+
+    query = db.query(AutomationRun).filter(
+        AutomationRun.company_id == company_id,
+        AutomationRun.workflow_id.in_(workflow_ids),
+        AutomationRun.status == "success",
+        AutomationRun.finished_at.is_not(None),
+    )
+    if completed_after is not None:
+        query = query.filter(AutomationRun.finished_at >= completed_after)
+    run = query.order_by(
+        AutomationRun.finished_at.desc(), AutomationRun.id.desc()
+    ).first()
+    return {
+        "ok": run is not None,
+        "required": True,
+        "workflow_ids": workflow_ids,
+        "successful_run_id": run.id if run is not None else None,
+        "successful_run_finished_at": run.finished_at if run is not None else None,
+        "completed_after": completed_after,
+        "reason": None if run is not None else "successful_automation_run_missing",
     }
 
 
@@ -317,6 +387,8 @@ def market_launch_gate(
     required_channels: list[str],
     require_online_billing: bool,
     require_payment_evidence: bool,
+    require_automation_run: bool = False,
+    automation_run_after: datetime | None = None,
     live_ai: bool = True,
 ) -> dict:
     base = check_release(
@@ -354,6 +426,13 @@ def market_launch_gate(
             agent_id=agent_id,
             required_channels=required_channels,
         )
+        automation = _automation_run_gate(
+            db,
+            company_id=company_id,
+            agent_id=agent_id,
+            required=require_automation_run,
+            completed_after=automation_run_after,
+        )
         billing = _billing_gate(
             db,
             company_id=company_id,
@@ -366,6 +445,7 @@ def market_launch_gate(
                 base.get("overall_ok")
                 and identity["ok"]
                 and channels["ok"]
+                and automation["ok"]
                 and billing["ok"]
             ),
             "launch_mode": launch_mode,
@@ -374,10 +454,12 @@ def market_launch_gate(
             "base_acceptance": base,
             "identity": identity,
             "channels": channels,
+            "automation": automation,
             "billing": billing,
             "truth": {
                 "code_ready_is_not_service_ready": True,
                 "required_channels_need_real_roundtrip_evidence": True,
+                "required_automation_needs_real_successful_run_evidence": True,
                 "provider_account_permissions_are_external": True,
             },
         }
@@ -414,6 +496,23 @@ def main() -> int:
         help="Require a completed checkout and signed transaction.completed webhook evidence.",
     )
     parser.add_argument(
+        "--require-automation-run",
+        action="store_true",
+        help=(
+            "Require a finished successful run from an enabled workflow provisioned "
+            "for this employee. This is the acceptance path for channel-free "
+            "background employees and may also be combined with channel evidence."
+        ),
+    )
+    parser.add_argument(
+        "--automation-run-after",
+        type=_utc_datetime,
+        help=(
+            "Only accept automation evidence completed at or after this ISO-8601 "
+            "UTC timestamp. Production deployment passes its cutover start time."
+        ),
+    )
+    parser.add_argument(
         "--skip-live-ai",
         action="store_true",
         help="Skip the real billable AI health request. Not recommended for final launch acceptance.",
@@ -421,8 +520,13 @@ def main() -> int:
     args = parser.parse_args()
 
     required_channels = _parse_channels(args.require_channel)
-    if not required_channels:
-        parser.error("At least one --require-channel is required for market launch acceptance")
+    if not required_channels and not args.require_automation_run:
+        parser.error(
+            "Market launch acceptance requires at least one --require-channel "
+            "or --require-automation-run"
+        )
+    if args.automation_run_after is not None and not args.require_automation_run:
+        parser.error("--automation-run-after requires --require-automation-run")
     if args.require_payment_evidence and not args.require_online_billing:
         parser.error("--require-payment-evidence requires --require-online-billing")
 
@@ -433,6 +537,8 @@ def main() -> int:
         required_channels=required_channels,
         require_online_billing=args.require_online_billing,
         require_payment_evidence=args.require_payment_evidence,
+        require_automation_run=args.require_automation_run,
+        automation_run_after=args.automation_run_after,
         live_ai=not args.skip_live_ai,
     )
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))

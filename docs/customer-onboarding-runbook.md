@@ -46,6 +46,8 @@ Assign only the tools required for the sold workflow. Validate integration secre
 
 For any employee with enabled business actions, the canonical Workflow Engine health action must succeed before employee Go Live. A configured URL/secret alone is not proof that the workflow is active.
 
+For a channel-free background employee, run its provisioned workflow at least once through the real automation runtime. The market launch gate must see a finished successful run belonging to that exact employee; a compiled graph or enabled schedule alone is not execution evidence.
+
 Exit condition: every enabled tool has a real execution path, safe error behavior and an owner for unresolved operations.
 
 ## 8. Configure channels
@@ -120,6 +122,8 @@ For WhatsApp Coexistence, prove all of the following on the deployed image:
 For Website, prove the public widget origin, visitor continuity, handoff/reply and Return to AI on the real site.
 
 For Voice, prove a real provider phone call, authenticated callback, response latency/behavior and any sold action/handoff behavior.
+
+For a channel-free background employee, prove one successful provisioned automation run on the deployed image and verify its stored output. Use `--require-automation-run` in the market launch gate; production deployment also applies its cutover start time so an older success cannot authorize a new release. The automation requirement may be combined with channel requirements for a hybrid employee.
 
 Exit condition: every sold live channel has a real end-to-end acceptance result. A configured credential is not acceptance evidence.
 
