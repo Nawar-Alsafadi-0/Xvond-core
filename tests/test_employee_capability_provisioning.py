@@ -4341,3 +4341,129 @@ def test_external_action_exposes_required_and_optional_declared_query_fields():
     fields = {item["key"]: item for item in action["fields"]}
     assert fields["status"]["required"] is True
     assert fields["limit"]["required"] is False
+
+def test_graph_can_feed_connected_api_response_into_later_action(database, monkeypatch):
+    factory, _ = database
+    calls = []
+
+    with factory() as db:
+        agent = db.query(AIAgent).filter(AIAgent.company_id == 1).first()
+        assignment = AgentToolAssignment(
+            agent_id=agent.id,
+            tool_name="action_request",
+            enabled=True,
+            config={
+                "actions": {
+                    "vendor_records": {
+                        "enabled": True,
+                        "confirmation_required": False,
+                        "_xvond_permission_mode": "automatic",
+                        "destination": {
+                            "type": "integration",
+                            "integration_id": 88,
+                            "operations": {
+                                "create_record": {
+                                    "method": "POST",
+                                    "endpoint": "/records",
+                                },
+                                "get_record": {
+                                    "method": "GET",
+                                    "endpoint": "/records/{record_id}",
+                                },
+                            },
+                        },
+                    }
+                }
+            },
+        )
+        db.add(assignment)
+        db.commit()
+        agent_id = agent.id
+
+        def fake_call(
+            db,
+            context,
+            action_type,
+            action,
+            arguments,
+            operation,
+            *,
+            idempotency_key=None,
+        ):
+            calls.append({
+                "operation": operation,
+                "details": dict(arguments.get("details") or {}),
+            })
+            if operation == "create_record":
+                return SimpleNamespace(
+                    success=True,
+                    data={
+                        "status_code": 201,
+                        "response": {"id": "rec-99"},
+                    },
+                    error=None,
+                )
+            return SimpleNamespace(
+                success=True,
+                data={
+                    "status_code": 200,
+                    "response": {"id": "rec-99", "state": "ready"},
+                },
+                error=None,
+            )
+
+        monkeypatch.setattr(
+            "backend.app.modules.automation.runtime._integration_call",
+            fake_call,
+        )
+
+        result = automation_runtime.execute_step(
+            db,
+            1,
+            {
+                "type": "graph",
+                "agent_id": agent_id,
+                "graph": {
+                    "version": 1,
+                    "trigger": {"type": "manual"},
+                    "nodes": [
+                        {
+                            "id": "create_vendor",
+                            "type": "action",
+                            "depends_on": [],
+                            "params": {
+                                "action_type": "vendor_records",
+                                "operation": "create_record",
+                                "arguments": {"customer_name": "Test Customer"},
+                            },
+                        },
+                        {
+                            "id": "read_vendor",
+                            "type": "action",
+                            "depends_on": ["create_vendor"],
+                            "params": {
+                                "action_type": "vendor_records",
+                                "operation": "get_record",
+                                "arguments": {
+                                    "record_id": (
+                                        "$nodes.create_vendor."
+                                        "scheduled_action_result.response.id"
+                                    )
+                                },
+                            },
+                        },
+                    ],
+                },
+            },
+            {"_xvond_execution_key": "response-chain-test"},
+            run_id=1,
+            step_index=0,
+        )
+
+    assert calls[0]["operation"] == "create_record"
+    assert calls[1]["operation"] == "get_record"
+    assert calls[1]["details"]["record_id"] == "rec-99"
+    assert (
+        result["graph_outputs"]["read_vendor"]["scheduled_action_result"]["response"]
+        == {"id": "rec-99", "state": "ready"}
+    )
