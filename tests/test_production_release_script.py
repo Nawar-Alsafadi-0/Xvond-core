@@ -258,3 +258,12 @@ def test_release_skips_workflow_reimport_when_definitions_did_not_change():
     assert "skipping import/publish" in SOURCE
     assert '--profile workflow up -d workflow-registry workflow-engine' in SOURCE
     assert 'printf \'%s\\n\' "$release_sha" > "$WORKFLOW_SYNC_MARKER"' in SOURCE
+
+
+def test_release_recovers_once_when_skipped_workflow_sync_has_bad_contract():
+    assert 'workflow_synced="false"' in SOURCE
+    assert 'if ! probe_workflow_contract; then' in SOURCE
+    assert 'WORKFLOW_SYNC_MODE" = "auto"' in SOURCE
+    assert "Workflow contract is unhealthy after skipped sync; running one full recovery sync." in SOURCE
+    assert 'COMPOSE_FILE="$COMPOSE_FILE" sh scripts/sync_workflow_engine.sh' in SOURCE
+    assert "Workflow contract failed after workflow sync; refusing release." in SOURCE
