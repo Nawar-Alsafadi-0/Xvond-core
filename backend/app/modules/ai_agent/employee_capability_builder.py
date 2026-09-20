@@ -258,8 +258,11 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
             raw_type: str = "string",
             raw_format: str = "",
         ) -> None:
-            field_key = normalize_requirement_key(raw_key)
-            if not field_key or field_key in seen_fields:
+            field_key = str(raw_key or "").strip()
+            if (
+                not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}", field_key)
+                or field_key in seen_fields
+            ):
                 return
             field_type = "text"
             value_type = str(raw_type or "").strip().lower()
@@ -278,7 +281,7 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
                 field_type = "boolean"
             fields.append({
                 "key": field_key,
-                "label": field_key.replace("_", " ").strip().title(),
+                "label": re.sub(r"[_.-]+", " ", field_key).strip().title(),
                 "required": required,
                 "type": field_type,
             })
