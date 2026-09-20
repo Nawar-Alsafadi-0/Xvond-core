@@ -16,8 +16,10 @@ CUSTOM_CHANNEL_WORKFLOW_FILE="${CUSTOM_CHANNEL_WORKFLOW_FILE:-ops/n8n/xvond-cust
 CUSTOM_CHANNEL_WORKFLOW_ID="${CUSTOM_CHANNEL_WORKFLOW_ID:-xvond-custom-channel-provider-v1}"
 TWILIO_SMS_WORKFLOW_FILE="${TWILIO_SMS_WORKFLOW_FILE:-ops/n8n/xvond-twilio-sms-provider.workflow.json}"
 TWILIO_SMS_WORKFLOW_ID="${TWILIO_SMS_WORKFLOW_ID:-xvond-twilio-sms-provider-v1}"
+MAILGUN_EMAIL_WORKFLOW_FILE="${MAILGUN_EMAIL_WORKFLOW_FILE:-ops/n8n/xvond-mailgun-email-provider.workflow.json}"
+MAILGUN_EMAIL_WORKFLOW_ID="${MAILGUN_EMAIL_WORKFLOW_ID:-xvond-mailgun-email-provider-v1}"
 
-for file in "$ACTION_WORKFLOW_FILE" "$CHANNEL_WORKFLOW_FILE" "$TELEGRAM_WORKFLOW_FILE" "$META_WORKFLOW_FILE" "$SLACK_WORKFLOW_FILE" "$CUSTOM_CHANNEL_WORKFLOW_FILE" "$TWILIO_SMS_WORKFLOW_FILE"; do
+for file in "$ACTION_WORKFLOW_FILE" "$CHANNEL_WORKFLOW_FILE" "$TELEGRAM_WORKFLOW_FILE" "$META_WORKFLOW_FILE" "$SLACK_WORKFLOW_FILE" "$CUSTOM_CHANNEL_WORKFLOW_FILE" "$TWILIO_SMS_WORKFLOW_FILE" "$MAILGUN_EMAIL_WORKFLOW_FILE"; do
     if [ ! -f "$file" ]; then
         echo "Workflow sync failed: $file not found" >&2
         exit 1
@@ -233,6 +235,36 @@ fetch("http://127.0.0.1:5678/webhook/xvond-custom-channel-provider", {
 }
 
 
+probe_mailgun_email_gateway() {
+    docker exec xvond-workflow-engine node -e '
+fetch("http://127.0.0.1:5678/webhook/xvond-mailgun-email-provider", {
+  method: "POST",
+  headers: {"content-type": "application/json"},
+  body: JSON.stringify({action: "health_probe"}),
+}).then(async response => {
+  const text = await response.text();
+  if (!response.ok) {
+    console.error(`http_${response.status}:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  let result;
+  try { result = JSON.parse(text); }
+  catch (_error) {
+    console.error(`invalid_json_response:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  if (!result || result.success !== false) {
+    console.error(`invalid_mailgun_email_gateway_response:${text.slice(0, 300)}`);
+    process.exit(2);
+  }
+  process.exit(0);
+}).catch(error => {
+  console.error(`fetch_failed:${String(error && error.message || "unknown")}`);
+  process.exit(2);
+});'
+}
+
+
 probe_twilio_sms_gateway() {
     docker exec xvond-workflow-engine node -e '
 fetch("http://127.0.0.1:5678/webhook/xvond-twilio-sms-provider", {
@@ -274,7 +306,8 @@ wait_for_runtime_webhooks() {
            meta_output="$(probe_meta_gateway 2>&1)" &&
            slack_output="$(probe_slack_gateway 2>&1)" &&
            custom_output="$(probe_custom_channel_gateway 2>&1)" &&
-           twilio_output="$(probe_twilio_sms_gateway 2>&1)"; then
+           twilio_output="$(probe_twilio_sms_gateway 2>&1)" &&
+           mailgun_output="$(probe_mailgun_email_gateway 2>&1)"; then
             return 0
         else
             code="$?"
@@ -284,7 +317,8 @@ ${telegram_output:-}
 ${meta_output:-}
 ${slack_output:-}
 ${custom_output:-}
-${twilio_output:-}"
+${twilio_output:-}
+${mailgun_output:-}"
             if [ "$code" -ne 2 ]; then
                 printf '%b\n' "$last_error" >&2
                 return "$code"
@@ -333,8 +367,9 @@ sync_one_workflow "$META_WORKFLOW_FILE" "$META_WORKFLOW_ID"
 sync_one_workflow "$SLACK_WORKFLOW_FILE" "$SLACK_WORKFLOW_ID"
 sync_one_workflow "$CUSTOM_CHANNEL_WORKFLOW_FILE" "$CUSTOM_CHANNEL_WORKFLOW_ID"
 sync_one_workflow "$TWILIO_SMS_WORKFLOW_FILE" "$TWILIO_SMS_WORKFLOW_ID"
+sync_one_workflow "$MAILGUN_EMAIL_WORKFLOW_FILE" "$MAILGUN_EMAIL_WORKFLOW_ID"
 
 compose_workflow up -d --no-deps workflow-engine
 wait_for_runtime_webhooks
 
-echo "Workflow engine synced from Git: $ACTION_WORKFLOW_ID, $CHANNEL_WORKFLOW_ID, $TELEGRAM_WORKFLOW_ID, $META_WORKFLOW_ID, $SLACK_WORKFLOW_ID, $CUSTOM_CHANNEL_WORKFLOW_ID, $TWILIO_SMS_WORKFLOW_ID"
+echo "Workflow engine synced from Git: $ACTION_WORKFLOW_ID, $CHANNEL_WORKFLOW_ID, $TELEGRAM_WORKFLOW_ID, $META_WORKFLOW_ID, $SLACK_WORKFLOW_ID, $CUSTOM_CHANNEL_WORKFLOW_ID, $TWILIO_SMS_WORKFLOW_ID, $MAILGUN_EMAIL_WORKFLOW_ID"
