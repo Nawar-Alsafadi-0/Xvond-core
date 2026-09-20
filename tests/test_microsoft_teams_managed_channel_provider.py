@@ -35,6 +35,8 @@ def test_teams_inbound_fully_verifies_bot_connector_jwt():
     assert "claims.aud" in code
     assert "claims.serviceurl" in code
     assert "crypto.createPublicKey" in code
+    assert "jwk.endorsements" in code
+    assert "endorsements.includes(channelId)" in code
     assert "crypto.verify('RSA-SHA256'" in code
     assert "Number(claims.exp" in code
     assert "Number(claims.nbf" in code
@@ -55,7 +57,10 @@ def test_teams_inbound_acks_before_forwarding_to_xvond():
 
 def test_teams_outbound_uses_bot_framework_oauth_and_requires_activity_id():
     code = _node("Send Microsoft Teams Message")["parameters"]["jsCode"]
-    assert "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token" in code
+    assert "microsoft_tenant_id" in code
+    assert "'botframework.com'" in code
+    assert "'https://login.microsoftonline.com/' + encodeURIComponent(tenantId)" in code
+    assert "tenantGuid.test(tenantId)" in code
     assert "https://api.botframework.com/.default" in code
     assert "'/v3/conversations/'" in code
     assert "'/activities'" in code
@@ -67,7 +72,10 @@ def test_teams_route_validator_checks_registries_oauth_and_never_prints_secrets(
     assert "XVOND_MICROSOFT_TEAMS_ROUTES_JSON" in SCRIPT
     assert "XVOND_CHANNEL_ROUTES_JSON" in SCRIPT
     assert "xvond-microsoft-teams-provider" in SCRIPT
-    assert "botframework.com/oauth2/v2.0/token" in SCRIPT
+    assert "microsoft_tenant_id" in SCRIPT
+    assert "'https://login.microsoftonline.com/' + encodeURIComponent(tenantId)" in SCRIPT
+    assert "tenantGuid.test(tenantId)" in SCRIPT
+    assert "oauth_tenant_mode" in SCRIPT
     printed = SCRIPT.split("console.log(JSON.stringify({", 1)[1]
     assert "microsoft_app_password:" not in printed
     assert "provider_secret:" not in printed
@@ -82,4 +90,6 @@ def test_release_sync_imports_and_probes_teams_workflow():
 
 def test_workflow_container_receives_teams_route_registry():
     assert "XVOND_MICROSOFT_TEAMS_ROUTES_JSON=" in ENV
+    assert "microsoft_tenant_id" in ENV
+    assert "single-tenant" in ENV
     assert "XVOND_MICROSOFT_TEAMS_ROUTES_JSON: ${XVOND_MICROSOFT_TEAMS_ROUTES_JSON:-{}}" in COMPOSE
