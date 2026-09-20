@@ -665,6 +665,15 @@ def connect_managed_channel(
             connection_key=connection_key,
         )
 
+        inbound_path = str(provider_setup.get("inbound_path") or "").strip()
+        provider_inbound_url = None
+        if inbound_path and settings.WORKFLOW_PUBLIC_URL:
+            provider_inbound_url = settings.WORKFLOW_PUBLIC_URL + inbound_path
+            if canonical_channel_type(channel.channel_type) not in {"instagram", "messenger"}:
+                provider_inbound_url += (
+                    f"?company_id={channel.company_id}&connection_key={connection_key}"
+                )
+
         incoming = {
             "connection_key": connection_key,
             "provisioning_state": "connected",
@@ -672,6 +681,7 @@ def connect_managed_channel(
             "registry_cleanup_state": "active",
             "connection_method": "xvond_managed_gateway",
             "provisioning_verified_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "provider_inbound_url": provider_inbound_url,
         }
         if data.provider_account_label is not None:
             incoming["provider_account_label"] = str(data.provider_account_label or "").strip() or None
