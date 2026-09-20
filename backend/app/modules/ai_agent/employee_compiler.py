@@ -17,7 +17,7 @@ from backend.app.modules.channels.catalog import (
 )
 
 
-COMPILER_VERSION = 15
+COMPILER_VERSION = 14
 
 GENERIC_PRIMITIVES = {
     "workflow_engine",
@@ -947,11 +947,15 @@ def _normalize_integration_operations(value: Any) -> dict[str, dict]:
             "method": method,
             "endpoint": "/" + endpoint.lstrip("/"),
             "input_mode": input_mode,
-            "path_params": path_params,
-            "required_query_params": required_query_params,
-            "required_json_fields": required_json_fields,
-            "json_fields": json_fields,
         }
+        if path_params:
+            operation["path_params"] = path_params
+        if required_query_params:
+            operation["required_query_params"] = required_query_params
+        if required_json_fields:
+            operation["required_json_fields"] = required_json_fields
+        if json_fields:
+            operation["json_fields"] = json_fields
         try:
             timeout = float(raw.get("timeout") or 15)
         except (TypeError, ValueError):
