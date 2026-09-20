@@ -101,6 +101,16 @@ def test_admin_privacy_boundary_keeps_customer_content_out_of_operator_ui():
     assert "Customer payloads remain inside the tenant workspace" in privacy
 
 
+def test_admin_privacy_loader_keeps_company_open_bounded_and_lazy():
+    privacy = (ADMIN_DIR / "privacy-boundaries.js").read_text(encoding="utf-8-sig")
+
+    assert "loadPrivacyAwareAgentMetadata" in privacy
+    assert "hydratePrivacyAwareWorkspaceTab" in privacy
+    assert "loadedTabs: new Set(['overview'])" in privacy
+    assert "viewController.abort()" in privacy
+    assert "await hydrateWorkspaceTab(xvondWorkspace.tab)" in privacy
+
+
 def test_admin_polish_contains_only_operator_safe_attention_data():
     polish = (ADMIN_DIR / "control-center-polish.js").read_text(encoding="utf-8-sig")
     assert "xvondCustomerOps" not in polish

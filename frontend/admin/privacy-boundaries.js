@@ -183,52 +183,13 @@
         applySuggestedAgentActionTemplate(template.id);
     };
 
-    loadCompanyControlCenter = async function loadPrivacyAwareCompanyControlCenter(companyId, tab = null) {
-        simpleCompanyId = Number(companyId);
-        xvondWorkspace.companyId = Number(companyId);
-        if (tab && tab !== 'conversations') {
-            xvondWorkspace.tab = tab;
-        } else if (xvondWorkspace.tab === 'conversations') {
-            xvondWorkspace.tab = 'overview';
-        }
-
-        const [
-            view,
-            channelResult,
-            moduleResult,
-            catalog,
-            integrations,
-            usage,
-            profile,
-            setup,
-            audit,
-            serviceBilling,
-            servicePlans,
-            users,
-            readiness,
-            unresolved,
-        ] = await Promise.all([
-            api(`/admin/company-view/${companyId}`),
-            api(`/admin/channels/companies/${companyId}`),
-            api(`/admin/companies/${companyId}/modules`),
-            api('/admin/agent-actions/templates/catalog'),
-            api(`/admin/integrations/companies/${companyId}`),
-            api(`/admin/operations/companies/${companyId}/usage`),
-            api(`/admin/company-profile/${companyId}`),
-            api('/admin/setup/catalog'),
-            wsOptional(`/admin/audit/?company_id=${companyId}&limit=100`, {logs: [], total: 0}),
-            wsOptional(`/admin/service-billing/companies/${companyId}`, {services: []}),
-            wsOptional('/admin/service-billing/plans', {plans: []}),
-            wsOptional(`/admin/company-users/companies/${companyId}`, {users: []}),
-            wsOptional(`/admin/production/companies/${companyId}/readiness`, null),
-            wsOptional(`/admin/operations/companies/${companyId}/external-unresolved`, {requests: []}),
-        ]);
-
-        const agentMeta = await Promise.all((view.agents || []).map(async agent => {
+    async function loadPrivacyAwareAgentMetadata(companyId, issues) {
+        const agents = xvondWorkspace.data?.view?.agents || [];
+        return Promise.all(agents.map(async agent => {
             const [agentProfile, knowledge, actions] = await Promise.all([
-                wsOptional(`/admin/ai-employee-profile/companies/${companyId}/${agent.id}`, {name: agent.name}),
-                wsOptional(`/admin/ai-employees/companies/${companyId}/${agent.id}/knowledge`, {items: []}),
-                wsOptional(`/admin/agent-actions/${agent.id}`, {actions: [], ready: false}),
+                wsOptional(`/admin/ai-employee-profile/companies/${companyId}/${agent.id}`, {name: agent.name}, `${agent.name} profile`, issues, 6000),
+                wsOptional(`/admin/ai-employees/companies/${companyId}/${agent.id}/knowledge`, {items: []}, `${agent.name} knowledge`, issues, 6000),
+                wsOptional(`/admin/agent-actions/${agent.id}`, {actions: [], ready: false}, `${agent.name} actions`, issues, 6000),
             ]);
             return {
                 agent,
@@ -238,31 +199,120 @@
                 operationsReady: !!actions.ready,
             };
         }));
+    }
+
+    hydrateWorkspaceTab = async function hydratePrivacyAwareWorkspaceTab(tab) {
+        const data = xvondWorkspace.data;
+        if (!data || data.loadedTabs?.has(tab)) return;
+        const companyId = xvondWorkspace.companyId;
+        const issues = data.loadIssues || [];
+
+        try {
+            if (['agents', 'knowledge', 'operations'].includes(tab)) {
+                data.agentMeta = await loadPrivacyAwareAgentMetadata(companyId, issues);
+            }
+            if (tab === 'integrations') {
+                const result = await wsOptional(`/admin/integrations/companies/${companyId}`, {integrations: []}, 'Integrations', issues, 6000);
+                data.integrations = result.integrations || [];
+            }
+            if (tab === 'operations') {
+                const [unresolved, catalog] = await Promise.all([
+                    wsOptional(`/admin/operations/companies/${companyId}/external-unresolved`, {requests: []}, 'External reconciliation', issues, 6000),
+                    wsOptional('/admin/agent-actions/templates/catalog', {templates: []}, 'Action catalog', issues, 6000),
+                ]);
+                data.unresolved = unresolved.requests || [];
+                data.catalog = catalog;
+            }
+            if (tab === 'usage') {
+                data.usage = await wsOptional(`/admin/operations/companies/${companyId}/usage`, {summary: {}, usage: []}, 'Usage', issues, 6000);
+            }
+            if (tab === 'billing') {
+                const plans = await wsOptional('/admin/service-billing/plans', {plans: []}, 'Plan catalog', issues, 6000);
+                data.plans = plans.plans || [];
+            }
+            if (tab === 'users') {
+                const users = await wsOptional(`/admin/company-users/companies/${companyId}`, {users: []}, 'Company users', issues, 6000);
+                data.users = (users.users && users.users.length ? users.users : data.view.users) || [];
+            }
+            if (tab === 'logs') {
+                const audit = await wsOptional(`/admin/audit/?company_id=${companyId}&limit=100`, {logs: [], total: 0}, 'Audit trail', issues, 6000);
+                data.audit = audit.logs || [];
+            }
+            if (tab === 'company') {
+                data.setup = await wsOptional('/admin/setup/catalog', {}, 'Setup catalog', issues, 6000);
+            }
+            if (tab === 'workflow') {
+                data.workflowEngine = await wsOptional('/admin/workflow-engine/status', {status: 'unknown', enabled: false, configured: false}, 'Workflow Engine', issues, 6000);
+            }
+        } finally {
+            data.loadedTabs?.add(tab);
+            renderCompanyControlCenter();
+        }
+    };
+
+    loadCompanyControlCenter = async function loadPrivacyAwareCompanyControlCenter(companyId, tab = null) {
+        simpleCompanyId = Number(companyId);
+        xvondWorkspace.companyId = Number(companyId);
+        if (tab && tab !== 'conversations') {
+            xvondWorkspace.tab = tab;
+        } else if (xvondWorkspace.tab === 'conversations') {
+            xvondWorkspace.tab = 'overview';
+        }
+
+        const loadIssues = [];
+        const viewController = new AbortController();
+        const viewTimer = setTimeout(() => viewController.abort(), 8000);
+        let view;
+        try {
+            view = await api(`/admin/company-view/${companyId}`, {signal: viewController.signal});
+        } finally {
+            clearTimeout(viewTimer);
+        }
+
+        const [channelResult, moduleResult, profile, serviceBilling, readiness] = await Promise.all([
+            wsOptional(`/admin/channels/companies/${companyId}`, {channels: []}, 'Channels', loadIssues, 6000),
+            wsOptional(`/admin/companies/${companyId}/modules`, {modules: []}, 'Company capabilities', loadIssues, 6000),
+            wsOptional(`/admin/company-profile/${companyId}`, {company_name: view.company?.name || ''}, 'Company profile', loadIssues, 6000),
+            wsOptional(`/admin/service-billing/companies/${companyId}`, {services: []}, 'Billing', loadIssues, 6000),
+            wsOptional(`/admin/production/companies/${companyId}/readiness`, null, 'Managed delivery readiness', loadIssues, 6000),
+        ]);
 
         const billingServices = serviceBilling.services || [];
         xvondWorkspace.data = {
             view,
             channels: channelResult.channels || [],
             modules: moduleResult.modules || [],
-            catalog,
-            integrations: integrations.integrations || [],
+            catalog: {templates: []},
+            integrations: [],
             // Customer-created content is intentionally not loaded into Admin.
             requests: [],
             conversations: [],
             handoffs: [],
-            unresolved: unresolved.requests || [],
-            usage,
+            unresolved: [],
+            usage: {summary: {}, usage: []},
             profile,
-            setup,
-            audit: audit.logs || [],
+            setup: {},
+            audit: [],
             billingServices,
-            plans: servicePlans.plans || [],
-            users: (users.users && users.users.length ? users.users : view.users) || [],
+            plans: [],
+            users: view.users || [],
             readiness,
-            agentMeta,
+            agentMeta: (view.agents || []).map(agent => ({
+                agent,
+                profile: {name: agent.name},
+                knowledge: [],
+                actions: [],
+                operationsReady: false,
+            })),
+            workflowEngine: {status: 'unknown', enabled: false, configured: false},
+            loadIssues,
+            loadedTabs: new Set(['overview']),
         };
 
         renderCompanyControlCenter();
+        if (xvondWorkspace.tab !== 'overview') {
+            await hydrateWorkspaceTab(xvondWorkspace.tab);
+        }
     };
 
     openAgentActions = async function openPrivacyAwareAgentActions(companyId, agentId) {

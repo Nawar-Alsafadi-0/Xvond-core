@@ -36,3 +36,12 @@ def test_lifecycle_controls_are_loaded_after_company_control_center():
     company_script = ADMIN_INDEX.index("company-control-center.js")
     lifecycle_script = ADMIN_INDEX.index("company-lifecycle-controls.js")
     assert company_script < lifecycle_script
+
+
+def test_lifecycle_mutation_observer_does_not_rewrite_its_own_panel_forever():
+    guard = "if(hero.querySelector('[data-xvond-lifecycle-controls]'))return;"
+    observer = "new MutationObserver(()=>xvondInjectLifecycleControls())"
+
+    assert observer in LIFECYCLE_UI
+    assert guard in LIFECYCLE_UI
+    assert LIFECYCLE_UI.index(guard) < LIFECYCLE_UI.index("panel.innerHTML=")
