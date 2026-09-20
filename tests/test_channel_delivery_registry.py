@@ -85,6 +85,10 @@ def test_public_channel_catalog_exposes_delivery_truth_without_configs_or_secret
     assert items["custom"]["packaged_provider"] is True
     assert items["sms"]["availability"] == "xvond_managed_live"
     assert items["sms"]["packaged_provider"] is True
+    assert items["email"]["availability"] == "xvond_managed_live"
+    assert items["email"]["packaged_provider"] is True
+    assert items["teams"]["availability"] == "xvond_managed_live"
+    assert items["teams"]["packaged_provider"] is True
     assert items["xvond"]["availability"] == "built_in"
 
     for item in payload["channels"]:
@@ -96,10 +100,10 @@ def test_public_channel_catalog_exposes_delivery_truth_without_configs_or_secret
 def test_open_ended_builder_detects_managed_and_self_service_channels():
     blueprint = build_employee_blueprint(
         "بدي موظف يرد على واتساب ورسائل انستغرام، يتصل هاتفيًا، "
-        "ويتابع Telegram وSlack ويرد على العملاء بالإيميل وSMS"
+        "ويتابع Telegram وSlack وMicrosoft Teams ويرد على العملاء بالإيميل وSMS"
     )
 
-    for key in ("whatsapp", "instagram", "voice", "telegram", "slack", "email", "sms"):
+    for key in ("whatsapp", "instagram", "voice", "telegram", "slack", "teams", "email", "sms"):
         assert key in blueprint.channels
 
     readiness = blueprint_readiness(blueprint)
