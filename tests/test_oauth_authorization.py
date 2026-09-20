@@ -92,3 +92,17 @@ def test_authorization_state_binds_pending_integration(monkeypatch):
     )
     payload = oauth.consume_oauth_state(result["state"], state_secret="state-secret")
     assert payload["integration_id"] == 55
+
+
+def test_exchange_rejects_missing_pkce_verifier():
+    with pytest.raises(ValueError, match="PKCE verifier"):
+        oauth.exchange_authorization_code(
+            state_payload={
+                "token_url": "https://accounts.example.com/oauth/token",
+                "redirect_uri": "https://xvond.example/oauth/callback",
+                "client_id": "client-1",
+            },
+            code="code-1",
+            client_secret="secret-1",
+            code_verifier="",
+        )
