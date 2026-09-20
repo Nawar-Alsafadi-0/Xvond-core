@@ -154,9 +154,9 @@ function xvondDecorateAgentsWithMetaChannels() {
             box.style.cssText = "margin-top:10px;padding:12px;border:1px solid rgba(148,163,184,.25);border-radius:10px";
             box.innerHTML = `
                 <strong>${safe(xvondMetaChannelName(type))}</strong>
-                <p class="muted" style="margin:6px 0 10px">${connected ? "Connected to Meta through Xvond." : "${type === "instagram" ? "Connect the professional Instagram account directly. No Facebook Page or token copy is required." : "Connect the business account securely with Meta. No access token needs to be copied manually."}"}</p>
+                <p class="muted" style="margin:6px 0 10px">${connected ? "Connected to Meta through Xvond." : (type === "instagram" ? "Connect the professional Instagram account directly. No Facebook Page or token copy is required." : "Connect the business account securely with Meta. No access token needs to be copied manually.")}</p>
                 <button type="button" onclick="openCustomerMetaChannelConnect(${Number(agent.id)},'${type}')">
-                    ${connected ? "Reconnect / Change Account" : "Connect with Meta"}
+                    ${connected ? "Reconnect / Change Account" : (type === "instagram" ? "Connect Instagram" : "Connect with Meta")}
                 </button>
             `;
             card.appendChild(box);
