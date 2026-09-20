@@ -66,6 +66,42 @@ class N8NActionGateway:
         safe["data"] = None
         return safe
 
+    def provision_channel(
+        self,
+        *,
+        company_id: int,
+        agent_id: int,
+        channel_id: int,
+        channel_type: str,
+        connection_key: str,
+        provider_type: str,
+        provider_url: str,
+        provider_secret: str,
+        provider_config: dict[str, Any],
+        provider_account_label: str | None = None,
+    ) -> dict[str, Any]:
+        """Write one managed-channel route into the isolated workflow plane.
+
+        Provider credentials are transported to n8n but are never persisted in
+        Xvond Core. The workflow plane owns encryption/storage and provider use.
+        """
+        return self.execute(
+            company_id=company_id,
+            agent_id=agent_id,
+            action="channel.provision",
+            data={
+                "channel_id": channel_id,
+                "channel_type": channel_type,
+                "connection_key": connection_key,
+                "provider_type": provider_type,
+                "provider_url": provider_url,
+                "provider_secret": provider_secret,
+                "provider_config": provider_config,
+                "provider_account_label": provider_account_label,
+            },
+            max_retries_override=0,
+        )
+
     def execute(
         self,
         *,

@@ -20,13 +20,17 @@ from backend.app.modules.tools.business_models import (
 )
 
 
-DEFAULT_EVENTS = [
+LEGACY_DEFAULT_EVENTS_V1 = [
     "booking_new",
     "order_new",
     "lead_new",
     "handoff_pending",
     "operation_attention",
     "ai_failure",
+]
+DEFAULT_EVENTS = [
+    *LEGACY_DEFAULT_EVENTS_V1,
+    "employee_update",
 ]
 SUPPORTED_NOTIFICATION_DESTINATIONS = {"dashboard"}
 
@@ -479,6 +483,8 @@ def sync_company(db, company_id: int) -> None:
                 destinations=["dashboard"],
             )
         )
+    elif set(pref.event_types or []) == set(LEGACY_DEFAULT_EVENTS_V1):
+        pref.event_types = list(DEFAULT_EVENTS)
     db.flush()
 
 

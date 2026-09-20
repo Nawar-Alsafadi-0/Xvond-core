@@ -59,13 +59,17 @@ def test_analytics_source_secrets_are_protected_and_not_returned_raw():
 
 def test_failed_automation_runs_remain_billable_for_capacity():
     runtime = source("backend/app/modules/automation/runtime.py")
-    marker = 'metadata={"workflow_id": workflow.id, "status": "failed"}'
-    assert marker in runtime
-    assert runtime.count("service_limits.record(") >= 2
+    # Usage and the durable run are committed before business nodes start. A
+    # later node rollback therefore cannot erase billable capacity, and retrying
+    # the same run must not create a second usage event.
+    assert "service_limits.record(" in runtime
+    assert 'metadata={"workflow_id": workflow.id}' in runtime
+    assert "Persist the run and its billed usage before any business node starts." in runtime
+    assert "db.commit()\n        db.refresh(run)\n\n        try:" in runtime
     assert "except Exception as original_error:" in runtime
-    assert 'original_error = __import__("sys").exc_info()[1]' not in runtime
-    assert 'raise original_error' not in runtime
-    assert '"usage_recorded": usage_recorded' in runtime
+    assert "_store_failed_run(" in runtime
+    assert '"usage_recorded": True' in runtime
+    assert 'metadata={"workflow_id": workflow.id, "status": "failed"}' not in runtime
 
 
 def test_voice_provisioning_is_resumable_and_readiness_gated():

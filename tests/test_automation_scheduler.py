@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
@@ -12,14 +13,19 @@ from backend.app.models.company import Company
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
+from backend.app.modules.customer_ops.models import NotificationEvent
 from backend.app.modules.automation.schedule import (
     latest_due_slot,
+    next_schedule_slot,
     normalize_schedule_config,
     schedule_slot_key,
 )
 from backend.app.modules.automation import scheduler
 from backend.app.modules.automation import runtime as automation_runtime_module
-from backend.app.modules.automation.execution_graph import graph_has_side_effect
+from backend.app.modules.automation.execution_graph import (
+    graph_contract_errors,
+    graph_has_side_effect,
+)
 from backend.app.modules.automation.webhook_auth import (
     automation_webhook_key,
     verify_automation_webhook_key,
@@ -2262,3 +2268,2094 @@ def test_approval_resume_rejects_changed_workflow_checkpoint(monkeypatch):
             raise AssertionError("changed workflow must invalidate approval checkpoint")
 
     engine.dispose()
+
+
+def test_owner_never_permission_skips_scheduled_action_without_side_effect(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Denied Action", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Denied worker",
+                system_prompt="Do not execute denied actions.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "send_report": {
+                            "enabled": True,
+                            "confirmation_required": True,
+                            "_xvond_permission_mode": "never",
+                            "xvond_generated": True,
+                            "destination": {
+                                "type": "xvond_internal",
+                                "adapter": "generic_capability",
+                                "execution_plan": [
+                                    {
+                                        "id": "notify",
+                                        "op": "notify",
+                                        "title": "Report",
+                                        "message": "Sent.",
+                                    }
+                                ],
+                            },
+                        }
+                    }
+                },
+            )
+        )
+        db.commit()
+
+        called = {"count": 0}
+
+        def forbidden(*args, **kwargs):
+            called["count"] += 1
+            raise AssertionError("owner-denied action must not execute")
+
+        monkeypatch.setattr(
+            automation_runtime_module,
+            "execute_generic_capability",
+            forbidden,
+        )
+
+        result = automation_runtime_module.AutomationRuntime().execute_step(
+            db=db,
+            company_id=1,
+            step={
+                "type": "scheduled_action",
+                "agent_id": 1,
+                "action_type": "send_report",
+            },
+            state={"_xvond_execution_key": "denied-action-test"},
+            run_id=1,
+            step_index=0,
+        )
+
+        assert called["count"] == 0
+        assert result["scheduled_action_result"] == {
+            "skipped": True,
+            "reason": "owner_permission_never",
+            "action_type": "send_report",
+        }
+
+    engine.dispose()
+
+
+
+def test_monthly_schedule_uses_generic_day_of_month_and_clamps_short_months():
+    schedule = normalize_schedule_config(
+        {
+            "kind": "monthly",
+            "day_of_month": 31,
+            "hour": 9,
+            "minute": 0,
+            "timezone": "UTC",
+        }
+    )
+    slot = latest_due_slot(
+        schedule,
+        now=datetime(2026, 2, 28, 10, 0, tzinfo=UTC),
+        created_at=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+    )
+
+    assert schedule["day_of_month"] == 31
+    assert slot == datetime(2026, 2, 28, 9, 0, tzinfo=UTC)
+
+
+def test_one_time_schedule_is_due_only_after_target_time():
+    schedule = normalize_schedule_config(
+        {
+            "kind": "once",
+            "at": "2026-10-01T09:00:00",
+            "timezone": "Asia/Muscat",
+        }
+    )
+
+    before = latest_due_slot(
+        schedule,
+        now=datetime(2026, 10, 1, 4, 59, tzinfo=UTC),
+        created_at=datetime(2026, 9, 20, 0, 0, tzinfo=UTC),
+    )
+    due = latest_due_slot(
+        schedule,
+        now=datetime(2026, 10, 1, 5, 1, tzinfo=UTC),
+        created_at=datetime(2026, 9, 20, 0, 0, tzinfo=UTC),
+    )
+
+    assert schedule["at"] == "2026-10-01T05:00:00Z"
+    assert before is None
+    assert due == datetime(2026, 10, 1, 5, 0, tzinfo=UTC)
+
+
+
+def test_wait_graph_contract_is_generic_and_bounded():
+    assert graph_contract_errors(
+        {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "pause",
+                    "type": "wait",
+                    "depends_on": [],
+                    "params": {"duration": 2, "unit": "days"},
+                }
+            ],
+        }
+    ) == []
+
+    errors = graph_contract_errors(
+        {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "pause",
+                    "type": "wait",
+                    "depends_on": [],
+                    "params": {"duration": 500, "unit": "weeks"},
+                }
+            ],
+        }
+    )
+    assert any("at most one year" in item for item in errors)
+
+    ambiguous_until = graph_contract_errors(
+        {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "pause",
+                    "type": "wait",
+                    "depends_on": [],
+                    "params": {"until": "2026-10-01T09:00:00"},
+                }
+            ],
+        }
+    )
+    assert any("timezone offset" in item for item in ambiguous_until)
+
+
+def test_graph_wait_resumes_same_run_without_replaying_prior_nodes(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    calls = {"fetch": 0}
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_request(**kwargs):
+        calls["fetch"] += 1
+        return {
+            "status_code": 200,
+            "response": '{"value":42}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(
+            Company(
+                id=1,
+                name="Durable Wait",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Long-running worker",
+                system_prompt="Run durable work.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Durable wait graph",
+            trigger_type="manual",
+            trigger_config={"_xvond_agent_id": 1},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "fetch",
+                                "type": "http_get_json",
+                                "depends_on": [],
+                                "params": {"url": "https://example.com/data"},
+                            },
+                            {
+                                "id": "pause",
+                                "type": "wait",
+                                "depends_on": ["fetch"],
+                                "params": {"duration": 5, "unit": "minutes"},
+                            },
+                            {
+                                "id": "after_wait",
+                                "type": "notify",
+                                "depends_on": ["pause"],
+                                "params": {"message": "continued"},
+                            },
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        waiting = runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={"_xvond_execution_key": "durable-wait-test"},
+        )
+
+        assert waiting.status == "waiting_time"
+        assert waiting.resume_at is not None
+        assert waiting.finished_at is None
+        assert calls["fetch"] == 1
+        assert waiting.output_data["wait"]["node_id"] == "pause"
+
+        resumed = runtime.resume_wait(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=waiting,
+            now=waiting.resume_at,
+        )
+
+        assert resumed.id == waiting.id
+        assert resumed.status == "success"
+        assert resumed.resume_at is None
+        assert calls["fetch"] == 1
+        outputs = resumed.output_data["steps"][-1]["result"]["graph_outputs"]
+        assert outputs["pause"]["resumed"] is True
+        assert outputs["after_wait"]["notification"]["message"] == "continued"
+
+    engine.dispose()
+
+
+def test_scheduler_resumes_due_durable_wait(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = lambda: Session(engine, autoflush=False)
+
+    monkeypatch.setattr(scheduler, "SessionLocal", factory)
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    with factory() as db:
+        db.add(
+            Company(
+                id=1,
+                name="Due Wait",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Delayed worker",
+                system_prompt="Continue later.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Delayed workflow",
+            trigger_type="manual",
+            trigger_config={"_xvond_agent_id": 1},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "pause",
+                                "type": "wait",
+                                "depends_on": [],
+                                "params": {"duration": 1, "unit": "minutes"},
+                            },
+                            {
+                                "id": "done",
+                                "type": "notify",
+                                "depends_on": ["pause"],
+                                "params": {"message": "done"},
+                            },
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        waiting = automation_runtime_module.automation_runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={"_xvond_execution_key": "scheduler-wait-test"},
+        )
+        run_id = waiting.id
+        due_at = waiting.resume_at
+
+    result = scheduler.run_due_waiting_run(run_id, now=due_at)
+
+    assert result["run_id"] == run_id
+    assert result["status"] == "success"
+
+    with factory() as db:
+        stored = db.query(AutomationRun).filter(AutomationRun.id == run_id).one()
+        assert stored.status == "success"
+        assert stored.resume_at is None
+
+    engine.dispose()
+
+
+def test_nested_foreach_wait_resumes_without_replaying_completed_work(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    calls = {"fetch": 0}
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_request(**kwargs):
+        calls["fetch"] += 1
+        return {
+            "status_code": 200,
+            "response": '{"ok":true}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(
+            Company(
+                id=1,
+                name="Nested Wait",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Batch worker",
+                system_prompt="Process items with durable pauses.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Nested wait graph",
+            trigger_type="manual",
+            trigger_config={"_xvond_agent_id": 1},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "each",
+                                "type": "foreach",
+                                "depends_on": [],
+                                "params": {
+                                    "items": [{"id": 1}, {"id": 2}],
+                                    "graph": {
+                                        "version": 1,
+                                        "nodes": [
+                                            {
+                                                "id": "fetch",
+                                                "type": "http_get_json",
+                                                "depends_on": [],
+                                                "params": {
+                                                    "url": "https://example.com/data"
+                                                },
+                                            },
+                                            {
+                                                "id": "pause",
+                                                "type": "wait",
+                                                "depends_on": ["fetch"],
+                                                "params": {
+                                                    "duration": 1,
+                                                    "unit": "minutes",
+                                                },
+                                            },
+                                            {
+                                                "id": "done",
+                                                "type": "transform",
+                                                "depends_on": ["pause"],
+                                                "params": {
+                                                    "values": {"item_id": "$item.id"}
+                                                },
+                                            },
+                                        ],
+                                    },
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        first = runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={"_xvond_execution_key": "nested-wait-test"},
+        )
+        assert first.status == "waiting_time"
+        assert calls["fetch"] == 1
+
+        second = runtime.resume_wait(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=first,
+            now=first.resume_at,
+        )
+        assert second.status == "waiting_time"
+        assert calls["fetch"] == 2
+
+        finished = runtime.resume_wait(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=second,
+            now=second.resume_at,
+        )
+        assert finished.status == "success"
+        assert calls["fetch"] == 2
+        each = finished.output_data["steps"][-1]["result"]["graph_outputs"]["each"]
+        assert each["count"] == 2
+
+    engine.dispose()
+
+
+
+def test_await_event_contract_supports_generic_correlation():
+    assert graph_contract_errors(
+        {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "wait_for_result",
+                    "type": "await_event",
+                    "depends_on": [],
+                    "params": {
+                        "event": "external.result.ready",
+                        "match": {"job_id": "$input.job_id"},
+                    },
+                }
+            ],
+        }
+    ) == []
+
+    errors = graph_contract_errors(
+        {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "bad_wait",
+                    "type": "await_event",
+                    "depends_on": [],
+                    "params": {"event": ""},
+                }
+            ],
+        }
+    )
+    assert any("valid event name" in item for item in errors)
+
+
+def test_correlated_event_resumes_same_run_without_replaying_prior_work(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = lambda: Session(engine, autoflush=False)
+    calls = {"fetch": 0}
+
+    monkeypatch.setattr(event_dispatch_module, "SessionLocal", factory)
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_request(**kwargs):
+        calls["fetch"] += 1
+        return {
+            "status_code": 200,
+            "response": '{"submitted":true}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+
+    with factory() as db:
+        db.add(
+            Company(
+                id=1,
+                name="Event Wait",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Event-driven worker",
+                system_prompt="Continue after a correlated event.",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Correlated event continuation",
+            trigger_type="manual",
+            trigger_config={"_xvond_agent_id": 1},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "submit",
+                                "type": "http_get_json",
+                                "depends_on": [],
+                                "params": {"url": "https://example.com/start"},
+                            },
+                            {
+                                "id": "await_result",
+                                "type": "await_event",
+                                "depends_on": ["submit"],
+                                "params": {
+                                    "event": "external.result.ready",
+                                    "match": {"job_id": "$input.job_id"},
+                                },
+                            },
+                            {
+                                "id": "final",
+                                "type": "transform",
+                                "depends_on": ["await_result"],
+                                "params": {
+                                    "values": {
+                                        "status": "$nodes.await_result.payload.status"
+                                    }
+                                },
+                            },
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        waiting = automation_runtime_module.automation_runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={
+                "_xvond_execution_key": "event-wait-test",
+                "job_id": "job-123",
+            },
+        )
+        run_id = waiting.id
+        assert waiting.status == "waiting_event"
+        assert waiting.resume_event_name == "external.result.ready"
+        assert waiting.output_data["event_wait"]["match"] == {"job_id": "job-123"}
+        assert calls["fetch"] == 1
+
+    unrelated = event_dispatch_module.dispatch_automation_event(
+        company_id=1,
+        event_name="external.result.ready",
+        event_id="evt-unrelated",
+        payload={"job_id": "job-999", "status": "done"},
+    )
+    assert unrelated["resumed_waits"] == []
+
+    with factory() as db:
+        still_waiting = db.query(AutomationRun).filter(AutomationRun.id == run_id).one()
+        assert still_waiting.status == "waiting_event"
+
+    matched = event_dispatch_module.dispatch_automation_event(
+        company_id=1,
+        event_name="external.result.ready",
+        event_id="evt-matched",
+        payload={"job_id": "job-123", "status": "done"},
+    )
+
+    assert matched["resumed_waits"][0]["run_id"] == run_id
+    assert matched["resumed_waits"][0]["status"] == "success"
+    assert calls["fetch"] == 1
+
+    with factory() as db:
+        finished = db.query(AutomationRun).filter(AutomationRun.id == run_id).one()
+        assert finished.status == "success"
+        assert finished.resume_event_name is None
+        outputs = finished.output_data["steps"][-1]["result"]["graph_outputs"]
+        assert outputs["await_result"]["event_id"] == "evt-matched"
+        assert outputs["await_result"]["payload"]["status"] == "done"
+        assert outputs["final"]["status"] == "done"
+
+    engine.dispose()
+
+
+
+def test_graph_notify_persists_owner_visible_event_idempotently():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Notify Co", active=True, lifecycle_status="live"))
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        step = {
+            "type": "graph",
+            "agent_id": 77,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "owner_update",
+                        "type": "notify",
+                        "depends_on": [],
+                        "params": {
+                            "title": "Employee finished",
+                            "message": "The requested work is ready.",
+                            "severity": "info",
+                        },
+                    }
+                ],
+            },
+        }
+        state = {"_xvond_execution_key": "notify-idempotency-key"}
+
+        first = runtime.execute_step(db, 1, step, dict(state), run_id=10, step_index=0)
+        second = runtime.execute_step(db, 1, step, dict(state), run_id=10, step_index=0)
+        db.commit()
+
+        rows = db.query(NotificationEvent).filter_by(company_id=1).all()
+        assert len(rows) == 1
+        assert rows[0].event_type == "employee_update"
+        assert rows[0].title == "Employee finished"
+        assert rows[0].message == "The requested work is ready."
+        assert rows[0].payload["agent_id"] == 77
+        assert rows[0].payload["automation_run_id"] == 10
+        assert first["graph_outputs"]["owner_update"]["notification"]["duplicate"] is False
+        assert second["graph_outputs"]["owner_update"]["notification"]["duplicate"] is True
+        assert (
+            first["graph_outputs"]["owner_update"]["notification"]["event_id"]
+            == second["graph_outputs"]["owner_update"]["notification"]["event_id"]
+        )
+
+    engine.dispose()
+
+
+def test_nested_foreach_notifications_are_scoped_per_item():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Batch Notify", active=True, lifecycle_status="live"))
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        result = runtime.execute_step(
+            db,
+            1,
+            {
+                "type": "graph",
+                "agent_id": 9,
+                "graph": {
+                    "version": 1,
+                    "nodes": [
+                        {
+                            "id": "each",
+                            "type": "foreach",
+                            "depends_on": [],
+                            "params": {
+                                "items": [{"id": 1}, {"id": 2}],
+                                "graph": {
+                                    "version": 1,
+                                    "nodes": [
+                                        {
+                                            "id": "done",
+                                            "type": "notify",
+                                            "depends_on": [],
+                                            "params": {"message": "Item processed"},
+                                        }
+                                    ],
+                                },
+                            },
+                        }
+                    ],
+                },
+            },
+            {"_xvond_execution_key": "batch-notify"},
+            run_id=11,
+            step_index=0,
+        )
+        db.commit()
+
+        rows = (
+            db.query(NotificationEvent)
+            .filter_by(company_id=1, event_type="employee_update")
+            .order_by(NotificationEvent.id.asc())
+            .all()
+        )
+        assert len(rows) == 2
+        assert rows[0].event_key != rows[1].event_key
+        assert rows[0].payload["node_scope"] == "each[0]/done"
+        assert rows[1].payload["node_scope"] == "each[1]/done"
+        assert result["graph_outputs"]["each"]["count"] == 2
+
+    engine.dispose()
+
+
+
+def test_resumed_interval_routine_waits_for_next_slot_instead_of_catching_up(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = lambda: Session(engine, autoflush=False)
+    monkeypatch.setattr(scheduler, "SessionLocal", factory)
+
+    with factory() as db:
+        db.add(
+            Company(
+                id=1,
+                name="Self Service",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Monitor",
+                system_prompt="monitor",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.add(
+            AutomationWorkflow(
+                id=1,
+                company_id=1,
+                name="Hourly routine",
+                trigger_type="schedule",
+                trigger_config={
+                    "_xvond_source": "self_service_employee",
+                    "_xvond_agent_id": 1,
+                    "_xvond_graph_trigger": True,
+                    "_xvond_routine_id": "hourly",
+                    "_xvond_resumed_at": "2026-09-18T12:05:00Z",
+                    "schedule": {"kind": "interval", "every_minutes": 60},
+                },
+                steps=[],
+                enabled=True,
+                created_at=datetime(2026, 9, 18, 10, 0),
+            )
+        )
+        db.commit()
+
+    called = []
+
+    def fake_execute(*, db, company_id, workflow, input_data):
+        called.append(dict(input_data))
+        run = AutomationRun(
+            company_id=company_id,
+            workflow_id=workflow.id,
+            status="success",
+            input_data=dict(input_data),
+            output_data={},
+            finished_at=datetime(2026, 9, 18, 13, 5),
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        return run
+
+    monkeypatch.setattr(scheduler.automation_runtime, "execute", fake_execute)
+
+    immediately_after_resume = scheduler.run_due_workflow(
+        1,
+        now=datetime(2026, 9, 18, 12, 10, tzinfo=UTC),
+    )
+    next_slot = scheduler.run_due_workflow(
+        1,
+        now=datetime(2026, 9, 18, 13, 6, tzinfo=UTC),
+    )
+
+    assert immediately_after_resume["status"] == "not_due"
+    assert next_slot["status"] == "success"
+    assert called[0]["_xvond_schedule_slot"] == "2026-09-18T13:05:00Z"
+    engine.dispose()
+
+
+
+def test_automation_runtime_merges_routine_defaults_for_all_triggers(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Defaults Company", active=True))
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Scoped defaults",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_runtime_inputs": {
+                    "target": "compiled-default",
+                    "fixed": "from-routine",
+                },
+            },
+            steps=[],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        run = automation_runtime_module.AutomationRuntime().execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={
+                "target": "caller-override",
+                "dynamic": "runtime",
+            },
+        )
+
+        assert run.input_data["target"] == "caller-override"
+        assert run.input_data["fixed"] == "from-routine"
+        assert run.input_data["dynamic"] == "runtime"
+        assert run.input_data["_xvond_execution_key"].startswith(
+            "automation:1:1:run:"
+        )
+
+    engine.dispose()
+
+
+
+def test_graph_preview_simulates_side_effects_without_persisting_or_waiting(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "run_browser_task",
+        lambda **kwargs: pytest.fail("interactive browser must not run in preview"),
+    )
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "generate_image_asset",
+        lambda **kwargs: pytest.fail("media generation must not run in preview"),
+    )
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "write_agent_state",
+        lambda *args, **kwargs: pytest.fail("state write must not run in preview"),
+    )
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "delete_agent_state",
+        lambda *args, **kwargs: pytest.fail("state delete must not run in preview"),
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Preview Co", active=False))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Preview worker",
+                system_prompt="preview",
+                provider="mock",
+                model="mock",
+                enabled=False,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentConfig(
+                agent_id=1,
+                agent_type="employee",
+                settings={},
+                capabilities={},
+                customer_controls={},
+            )
+        )
+        db.commit()
+
+        graph = {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "think",
+                    "type": "ai",
+                    "depends_on": [],
+                    "params": {"prompt": "Analyze the input."},
+                },
+                {
+                    "id": "act",
+                    "type": "action",
+                    "depends_on": ["think"],
+                    "params": {
+                        "action_type": "send_report",
+                        "arguments": {"text": "$nodes.think.ai_response"},
+                    },
+                },
+                {
+                    "id": "write",
+                    "type": "state_write",
+                    "depends_on": ["act"],
+                    "params": {
+                        "namespace": "preview",
+                        "key": "last",
+                        "value": "$nodes.act.scheduled_action_result.action_type",
+                    },
+                },
+                {
+                    "id": "notify",
+                    "type": "notify",
+                    "depends_on": ["write"],
+                    "params": {"title": "Done", "message": "Preview finished."},
+                },
+                {
+                    "id": "pause",
+                    "type": "wait",
+                    "depends_on": ["notify"],
+                    "params": {"duration": 1, "unit": "hours"},
+                },
+                {
+                    "id": "event",
+                    "type": "await_event",
+                    "depends_on": ["pause"],
+                    "params": {"event": "external.ready", "match": {"id": "$input.id"}},
+                },
+                {
+                    "id": "browser",
+                    "type": "browser",
+                    "depends_on": ["event"],
+                    "params": {
+                        "url": "https://example.com",
+                        "actions": [{"op": "click", "text": "Continue"}],
+                    },
+                },
+                {
+                    "id": "image",
+                    "type": "media",
+                    "depends_on": ["browser"],
+                    "params": {"prompt": "Create a preview image."},
+                },
+                {
+                    "id": "delete",
+                    "type": "state_delete",
+                    "depends_on": ["image"],
+                    "params": {
+                        "namespace": "preview",
+                        "key": "last",
+                    },
+                },
+            ],
+        }
+
+        result = automation_runtime_module.AutomationRuntime().execute_step(
+            db,
+            1,
+            {"type": "graph", "agent_id": 1, "graph": graph},
+            {
+                "id": "abc",
+                "_xvond_preview": True,
+                "_xvond_execution_key": "preview:1",
+                "_xvond_preview_event_payloads": {
+                    "event": {"id": "abc", "status": "ready"}
+                },
+            },
+            run_id=0,
+            step_index=0,
+        )
+
+        outputs = result["graph_outputs"]
+        assert outputs["think"]["simulated"] is True
+        assert outputs["act"]["scheduled_action_result"]["would_execute"] is True
+        assert outputs["write"]["written"] is False
+        assert outputs["notify"]["notification"]["persisted"] is False
+        assert outputs["pause"]["would_wait"] is True
+        assert outputs["event"]["would_wait"] is True
+        assert outputs["event"]["payload"]["status"] == "ready"
+        assert outputs["browser"]["browser"]["would_interact"] is True
+        assert outputs["image"]["media_url"].startswith("preview://media/")
+        assert outputs["delete"]["deleted"] is False
+
+        assert db.query(ActionRequest).count() == 0
+        assert db.query(NotificationEvent).count() == 0
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        assert not (config.settings or {}).get("_xvond_runtime_state")
+
+    engine.dispose()
+
+
+def test_graph_preview_allows_explicit_simulated_node_outputs():
+    runtime = automation_runtime_module.AutomationRuntime()
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 1,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "external",
+                        "type": "http_get_json",
+                        "depends_on": [],
+                        "params": {"url": "https://example.com/data"},
+                    },
+                    {
+                        "id": "check",
+                        "type": "condition",
+                        "depends_on": ["external"],
+                        "params": {
+                            "left": "$nodes.external.result.price",
+                            "operator": "lt",
+                            "right": 10,
+                        },
+                    },
+                ],
+            },
+        },
+        state={
+            "_xvond_preview": True,
+            "_xvond_preview_outputs": {
+                "external": {"result": {"price": 7}}
+            },
+        },
+        run_id=0,
+        step_index=0,
+    )
+
+    assert result["graph_outputs"]["external"]["preview_override"] is True
+    assert result["graph_outputs"]["check"]["matched"] is True
+
+
+
+def test_graph_preview_can_use_stateless_real_ai_executor():
+    runtime = automation_runtime_module.AutomationRuntime()
+    captured = {}
+
+    def preview_ai_executor(*, prompt, context, node_scope):
+        captured.update(
+            {
+                "prompt": prompt,
+                "context": context,
+                "node_scope": node_scope,
+            }
+        )
+        return {
+            "ai_response": "preview answer",
+            "usage": {"total_tokens": 12},
+        }
+
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 1,
+            "graph": {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "think",
+                        "type": "ai",
+                        "depends_on": [],
+                        "params": {
+                            "prompt": "Analyze this.",
+                            "context": {"value": 42},
+                        },
+                    }
+                ],
+            },
+        },
+        state={
+            "_xvond_preview": True,
+            "_xvond_preview_ai_executor": preview_ai_executor,
+        },
+        run_id=0,
+        step_index=0,
+    )
+
+    output = result["graph_outputs"]["think"]
+    assert output["preview"] is True
+    assert output["simulated"] is False
+    assert output["ai_response"] == "preview answer"
+    assert captured == {
+        "prompt": "Analyze this.",
+        "context": {"value": 42},
+        "node_scope": "think",
+    }
+
+
+
+def test_next_interval_schedule_slot_is_strictly_future():
+    slot = next_schedule_slot(
+        {"kind": "interval", "every_minutes": 15},
+        after=datetime(2026, 9, 18, 12, 30, tzinfo=UTC),
+        created_at=datetime(2026, 9, 18, 12, 0, tzinfo=UTC),
+    )
+    assert slot == datetime(2026, 9, 18, 12, 45, tzinfo=UTC)
+
+
+def test_next_daily_schedule_slot_uses_local_timezone():
+    slot = next_schedule_slot(
+        {"kind": "daily", "hour": 8, "minute": 0, "timezone": "Asia/Muscat"},
+        after=datetime(2026, 9, 18, 4, 0, tzinfo=UTC),
+        created_at=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+    )
+    assert slot == datetime(2026, 9, 19, 4, 0, tzinfo=UTC)
+
+
+def test_next_weekly_schedule_slot_selects_nearest_requested_day():
+    slot = next_schedule_slot(
+        {
+            "kind": "weekly",
+            "weekdays": [0, 4],
+            "hour": 9,
+            "minute": 30,
+            "timezone": "UTC",
+        },
+        after=datetime(2026, 9, 18, 10, 0, tzinfo=UTC),
+        created_at=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+    )
+    assert slot == datetime(2026, 9, 21, 9, 30, tzinfo=UTC)
+
+
+def test_next_monthly_schedule_clamps_short_month_and_moves_forward():
+    slot = next_schedule_slot(
+        {
+            "kind": "monthly",
+            "day_of_month": 31,
+            "hour": 9,
+            "minute": 0,
+            "timezone": "UTC",
+        },
+        after=datetime(2026, 1, 31, 10, 0, tzinfo=UTC),
+        created_at=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+    )
+    assert slot == datetime(2026, 2, 28, 9, 0, tzinfo=UTC)
+
+
+def test_next_one_time_schedule_disappears_after_execution_time():
+    before = next_schedule_slot(
+        {"kind": "once", "at": "2026-10-01T05:00:00Z"},
+        after=datetime(2026, 10, 1, 4, 59, tzinfo=UTC),
+        created_at=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+    )
+    after = next_schedule_slot(
+        {"kind": "once", "at": "2026-10-01T05:00:00Z"},
+        after=datetime(2026, 10, 1, 5, 0, tzinfo=UTC),
+        created_at=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+    )
+    assert before == datetime(2026, 10, 1, 5, 0, tzinfo=UTC)
+    assert after is None
+
+
+
+def test_foreach_graph_actions_use_stable_per_item_idempotency_keys(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    calls = []
+
+    def fake_capability(*args, **kwargs):
+        calls.append(
+            {
+                "details": dict(kwargs.get("details") or {}),
+                "idempotency_key": kwargs["idempotency_key"],
+            }
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "execute_generic_capability",
+        fake_capability,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Foreach Idempotency", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Worker",
+                system_prompt="work",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "send_item": {
+                            "enabled": True,
+                            "confirmation_required": False,
+                            "_xvond_permission_mode": "automatic",
+                            "destination": {
+                                "type": "xvond_internal",
+                                "adapter": "generic_capability",
+                            },
+                        }
+                    }
+                },
+            )
+        )
+        db.commit()
+
+        graph = {
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "each",
+                    "type": "foreach",
+                    "depends_on": [],
+                    "params": {
+                        "items": [{"id": 1}, {"id": 2}],
+                        "graph": {
+                            "version": 1,
+                            "nodes": [
+                                {
+                                    "id": "send",
+                                    "type": "action",
+                                    "depends_on": [],
+                                    "params": {
+                                        "action_type": "send_item",
+                                        "arguments": {"id": "$item.id"},
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                }
+            ],
+        }
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        for _ in range(2):
+            result = runtime.execute_step(
+                db,
+                1,
+                {"type": "graph", "agent_id": 1, "graph": graph},
+                {"_xvond_execution_key": "stable-foreach-retry"},
+                run_id=1,
+                step_index=0,
+            )
+            assert result["graph_outputs"]["each"]["count"] == 2
+
+    assert len(calls) == 4
+    first_run_keys = [item["idempotency_key"] for item in calls[:2]]
+    second_run_keys = [item["idempotency_key"] for item in calls[2:]]
+
+    assert first_run_keys[0] != first_run_keys[1]
+    assert first_run_keys == second_run_keys
+    assert all(
+        key.startswith("stable-foreach-retry:") and ":graph:" in key
+        for key in first_run_keys
+    )
+    engine.dispose()
+
+def test_failed_graph_retry_skips_completed_action_and_reuses_same_run(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    action_calls = []
+    fetch_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_capability(*args, **kwargs):
+        action_calls.append(
+            {
+                "details": dict(kwargs.get("details") or {}),
+                "idempotency_key": kwargs["idempotency_key"],
+            }
+        )
+        return {"ok": True}
+
+    def fake_request(**kwargs):
+        fetch_calls["count"] += 1
+        if fetch_calls["count"] == 1:
+            raise ValueError("temporary upstream failure")
+        return {
+            "status_code": 200,
+            "response": '{"value":42}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "execute_generic_capability",
+        fake_capability,
+    )
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Retry Company", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Retry Worker",
+                system_prompt="work",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "send": {
+                            "enabled": True,
+                            "confirmation_required": False,
+                            "_xvond_permission_mode": "automatic",
+                            "destination": {
+                                "type": "xvond_internal",
+                                "adapter": "generic_capability",
+                            },
+                        }
+                    }
+                },
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Retry graph",
+            trigger_type="manual",
+            trigger_config={},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "send",
+                                "type": "action",
+                                "depends_on": [],
+                                "params": {
+                                    "action_type": "send",
+                                    "arguments": {"value": "once"},
+                                },
+                            },
+                            {
+                                "id": "fetch",
+                                "type": "http_get_json",
+                                "depends_on": ["send"],
+                                "params": {"url": "https://example.com/data"},
+                            },
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        with pytest.raises(ValueError, match="temporary upstream failure"):
+            runtime.execute(
+                db=db,
+                company_id=1,
+                workflow=workflow,
+                input_data={"_xvond_execution_key": "safe-retry-test"},
+            )
+
+        failed = db.query(AutomationRun).one()
+        original_run_id = failed.id
+        assert failed.status == "failed"
+        checkpoint = failed.output_data["retry_checkpoint"]
+        assert checkpoint["safe"] is True
+        assert checkpoint["failed_node_id"] == "fetch"
+        assert checkpoint["graph_resume"]["node_id"] == "fetch"
+        assert "send" in checkpoint["graph_resume"]["node_outputs"]
+        assert len(action_calls) == 1
+        assert fetch_calls["count"] == 1
+
+        retried = runtime.retry_failed(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=failed,
+        )
+
+        assert retried.id == original_run_id
+        assert retried.status == "success"
+        assert retried.output_data["retry"]["status"] == "succeeded"
+        assert retried.output_data["retry_attempts"] == 1
+        assert len(action_calls) == 1
+        assert fetch_calls["count"] == 2
+        outputs = retried.output_data["steps"][-1]["result"]["graph_outputs"]
+        assert outputs["send"]["scheduled_action_result"]["ok"] is True
+        assert outputs["fetch"]["result"]["value"] == 42
+
+    engine.dispose()
+
+
+def test_failed_foreach_retry_resumes_failed_item_without_replaying_prior_items(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    action_items = []
+    ai_messages = []
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_capability(*args, **kwargs):
+        details = dict(kwargs.get("details") or {})
+        action_items.append(details.get("id"))
+        return {"ok": True, "id": details.get("id")}
+
+    def fake_chat(**kwargs):
+        message = str(kwargs.get("message") or "")
+        ai_messages.append(message)
+        if message == "2" and ai_messages.count("2") == 1:
+            raise ValueError("temporary AI failure")
+        return {
+            "response": {"content": f"ok-{message}"},
+            "conversation_id": 1,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "execute_generic_capability",
+        fake_capability,
+    )
+    monkeypatch.setattr(
+        automation_runtime_module.agent_runtime,
+        "chat",
+        fake_chat,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Foreach Retry", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Loop Worker",
+                system_prompt="work",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "send_item": {
+                            "enabled": True,
+                            "confirmation_required": False,
+                            "_xvond_permission_mode": "automatic",
+                            "destination": {
+                                "type": "xvond_internal",
+                                "adapter": "generic_capability",
+                            },
+                        }
+                    }
+                },
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Foreach retry graph",
+            trigger_type="manual",
+            trigger_config={},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "each",
+                                "type": "foreach",
+                                "depends_on": [],
+                                "params": {
+                                    "items": [{"id": 1}, {"id": 2}],
+                                    "graph": {
+                                        "version": 1,
+                                        "nodes": [
+                                            {
+                                                "id": "send",
+                                                "type": "action",
+                                                "depends_on": [],
+                                                "params": {
+                                                    "action_type": "send_item",
+                                                    "arguments": {"id": "$item.id"},
+                                                },
+                                            },
+                                            {
+                                                "id": "judge",
+                                                "type": "ai",
+                                                "depends_on": ["send"],
+                                                "params": {"prompt": "$item.id"},
+                                            },
+                                        ],
+                                    },
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        with pytest.raises(ValueError, match="temporary AI failure"):
+            runtime.execute(
+                db=db,
+                company_id=1,
+                workflow=workflow,
+                input_data={"_xvond_execution_key": "foreach-safe-retry"},
+            )
+
+        failed = db.query(AutomationRun).one()
+        checkpoint = failed.output_data["retry_checkpoint"]
+        graph_resume = checkpoint["graph_resume"]
+        assert checkpoint["safe"] is True
+        assert checkpoint["failed_node_id"] == "judge"
+        assert checkpoint["failed_node_scope"] == "each[1]/judge"
+        assert graph_resume["node_id"] == "each"
+        assert graph_resume["foreach"]["loop_index"] == 1
+        assert len(graph_resume["foreach"]["completed_results"]) == 1
+        assert graph_resume["foreach"]["child_resume"]["node_id"] == "judge"
+        assert "send" in graph_resume["foreach"]["child_resume"]["node_outputs"]
+        assert action_items == [1, 2]
+        assert ai_messages == ["1", "2"]
+
+        retried = runtime.retry_failed(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=failed,
+        )
+
+        assert retried.status == "success"
+        assert action_items == [1, 2]
+        assert ai_messages == ["1", "2", "2"]
+        outputs = retried.output_data["steps"][-1]["result"]["graph_outputs"]
+        assert outputs["each"]["count"] == 2
+
+    engine.dispose()
+
+
+def test_failed_external_action_retry_is_blocked_when_outcome_is_uncertain(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    external_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_integration(*args, **kwargs):
+        external_calls["count"] += 1
+        return SimpleNamespace(
+            success=False,
+            error="external outcome is unknown",
+            data={"reconciliation_required": True},
+        )
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "_integration_call",
+        fake_integration,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Unsafe Retry", active=True))
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="External Worker",
+                system_prompt="work",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={
+                    "actions": {
+                        "publish": {
+                            "enabled": True,
+                            "confirmation_required": False,
+                            "_xvond_permission_mode": "automatic",
+                            "destination": {
+                                "type": "integration",
+                                "integration_id": 999,
+                            },
+                        }
+                    }
+                },
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Unsafe external action",
+            trigger_type="manual",
+            trigger_config={},
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "publish",
+                                "type": "action",
+                                "depends_on": [],
+                                "params": {
+                                    "action_type": "publish",
+                                    "arguments": {"post": "hello"},
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        with pytest.raises(ValueError, match="external outcome is unknown"):
+            runtime.execute(
+                db=db,
+                company_id=1,
+                workflow=workflow,
+                input_data={"_xvond_execution_key": "unsafe-external-retry"},
+            )
+
+        failed = db.query(AutomationRun).one()
+        checkpoint = failed.output_data["retry_checkpoint"]
+        assert checkpoint["safe"] is False
+        assert checkpoint["failed_node_id"] == "publish"
+        assert "external integration" in checkpoint["reason"]
+        assert external_calls["count"] == 1
+
+        with pytest.raises(ValueError, match="external integration"):
+            runtime.retry_failed(
+                db,
+                company_id=1,
+                workflow=workflow,
+                run=failed,
+            )
+
+        assert external_calls["count"] == 1
+
+    engine.dispose()
+
+def test_safe_background_failure_is_retried_automatically_on_same_run(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = lambda: Session(engine, autoflush=False)
+    calls = {"fetch": 0}
+
+    monkeypatch.setattr(scheduler, "SessionLocal", factory)
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_request(**kwargs):
+        calls["fetch"] += 1
+        if calls["fetch"] == 1:
+            raise ValueError("temporary upstream failure")
+        return {
+            "status_code": 200,
+            "response": '{"value":42}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        fake_request,
+    )
+
+    with factory() as db:
+        db.add(
+            Company(
+                id=1,
+                name="Automatic Recovery",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Background Worker",
+                system_prompt="work",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Safe background routine",
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "monitor",
+                "schedule": {"kind": "interval", "every_minutes": 5},
+            },
+            steps=[
+                {
+                    "type": "graph",
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "fetch",
+                                "type": "http_get_json",
+                                "depends_on": [],
+                                "params": {"url": "https://example.com/data"},
+                            }
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        with pytest.raises(ValueError, match="temporary upstream failure"):
+            automation_runtime_module.AutomationRuntime().execute(
+                db=db,
+                company_id=1,
+                workflow=workflow,
+                input_data={"_xvond_execution_key": "automatic-retry"},
+            )
+
+        run = db.query(AutomationRun).one()
+        original_run_id = run.id
+        assert run.status == "waiting_retry"
+        assert run.resume_at is not None
+        assert run.finished_at is None
+        assert run.output_data["retry"]["status"] == "scheduled"
+        assert run.output_data["retry"]["attempt"] == 1
+        assert run.output_data["retry"]["max_attempts"] == 2
+        due_at = run.resume_at
+
+    result = scheduler.run_due_retry_run(original_run_id, now=due_at)
+
+    assert result["run_id"] == original_run_id
+    assert result["status"] == "success"
+    assert calls["fetch"] == 2
+    with factory() as db:
+        run = db.get(AutomationRun, original_run_id)
+        assert run.status == "success"
+        assert run.resume_at is None
+        assert run.output_data["retry_attempts"] == 1
+        assert run.output_data["retry"]["status"] == "succeeded"
+
+    engine.dispose()
+
+
+def test_automatic_safe_retry_stops_after_bounded_attempts(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = lambda: Session(engine, autoflush=False)
+    calls = {"fetch": 0}
+
+    monkeypatch.setattr(scheduler, "SessionLocal", factory)
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def always_fail(**kwargs):
+        calls["fetch"] += 1
+        raise ValueError("upstream remains unavailable")
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "safe_http_request",
+        always_fail,
+    )
+
+    with factory() as db:
+        db.add(
+            Company(
+                id=1,
+                name="Bounded Recovery",
+                active=True,
+                lifecycle_status="live",
+                onboarding_source="self_service",
+            )
+        )
+        db.add(
+            AIAgent(
+                id=1,
+                company_id=1,
+                name="Background Worker",
+                system_prompt="work",
+                provider="mock",
+                model="mock",
+                enabled=True,
+            )
+        )
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Bounded background routine",
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "monitor",
+                "schedule": {"kind": "interval", "every_minutes": 5},
+            },
+            steps=[
+                {
+                    "type": "graph",
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "fetch",
+                                "type": "http_get_json",
+                                "depends_on": [],
+                                "params": {"url": "https://example.com/data"},
+                            }
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        with pytest.raises(ValueError, match="upstream remains unavailable"):
+            automation_runtime_module.AutomationRuntime().execute(
+                db=db,
+                company_id=1,
+                workflow=workflow,
+                input_data={"_xvond_execution_key": "bounded-auto-retry"},
+            )
+        run = db.query(AutomationRun).one()
+        run_id = run.id
+        first_due = run.resume_at
+        assert run.status == "waiting_retry"
+        assert run.output_data["retry"]["attempt"] == 1
+
+    first_retry = scheduler.run_due_retry_run(run_id, now=first_due)
+    assert first_retry["status"] == "waiting_retry"
+    with factory() as db:
+        run = db.get(AutomationRun, run_id)
+        second_due = run.resume_at
+        assert run.output_data["retry_attempts"] == 1
+        assert run.output_data["retry"]["attempt"] == 2
+        assert second_due is not None
+        assert second_due > first_due
+
+    second_retry = scheduler.run_due_retry_run(run_id, now=second_due)
+    assert second_retry["status"] == "failed"
+    assert calls["fetch"] == 3
+    with factory() as db:
+        run = db.get(AutomationRun, run_id)
+        assert run.status == "failed"
+        assert run.resume_at is None
+        assert run.finished_at is not None
+        assert run.output_data["retry_attempts"] == 2
+        assert run.output_data["retry"]["status"] == "failed"
+
+    engine.dispose()
+

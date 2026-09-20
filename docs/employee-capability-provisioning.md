@@ -51,6 +51,23 @@ unapproved hosts, redirects and oversized responses are rejected. A requirement
 with no executable plan remains a readiness blocker; Xvond must never present a
 stored contract as a completed real capability.
 
+## Failure recovery
+
+Graph execution stores durable node-level checkpoints on the same AutomationRun.
+Completed nodes are committed before later nodes start, so a safe retry can resume
+at the failed node without replaying completed graph work or creating a second
+billable run.
+
+Manual routines expose retry only when the checkpoint proves replay safety.
+Self-Service background routines may recover automatically with two bounded,
+backed-off attempts. The production scheduler resumes the same run and stable
+execution identity.
+
+Replay remains fail-closed when Xvond cannot prove the external outcome. In
+particular, interactive browser mutations, generated media and uncertain external
+integration actions are not automatically repeated; they require reconciliation
+or a new explicitly safe action path.
+
 ## Existing systems and secrets
 
 Self-Service owners can create company-scoped Connected Systems. Secret fields are

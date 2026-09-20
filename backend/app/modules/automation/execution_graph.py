@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
+from datetime import datetime
 from typing import Any
 
 GRAPH_VERSION = 1
@@ -21,7 +23,27 @@ ALLOWED_GRAPH_NODE_TYPES = {
     "state_read",
     "state_write",
     "state_delete",
+    "wait",
+    "await_event",
 }
+
+GRAPH_COMPARE_OPERATORS = {"eq", "neq", "gt", "gte", "lt", "lte", "contains", "in"}
+GRAPH_AGGREGATE_OPERATIONS = {"count", "sum", "avg", "min", "max"}
+BROWSER_ACTION_OPERATIONS = {
+    "goto",
+    "wait_for",
+    "extract_text",
+    "extract_attribute",
+    "extract_html",
+    "click",
+    "fill",
+    "press",
+    "select",
+}
+MAX_GRAPH_VALIDATION_DEPTH = 2
+MAX_BROWSER_ACTIONS = 30
+WAIT_DURATION_UNITS = {"seconds", "minutes", "hours", "days", "weeks"}
+MAX_WAIT_DURATION_SECONDS = 365 * 24 * 60 * 60
 
 
 def _clean_id(value: Any) -> str:
@@ -89,6 +111,268 @@ def normalize_execution_graph(value: Any) -> dict:
             break
 
     return {"version": GRAPH_VERSION, "trigger": trigger, "nodes": nodes}
+
+
+
+def _graph_node_references(value: Any) -> set[str]:
+    refs: set[str] = set()
+    if isinstance(value, str) and value.startswith("$nodes."):
+        parts = value.split(".")
+        if len(parts) >= 2:
+            node_id = _clean_id(parts[1])
+            if node_id:
+                refs.add(node_id)
+        return refs
+    if isinstance(value, dict):
+        for item in value.values():
+            refs.update(_graph_node_references(item))
+    elif isinstance(value, list):
+        for item in value:
+            refs.update(_graph_node_references(item))
+    return refs
+
+
+def graph_contract_errors(
+    value: Any,
+    *,
+    graph_agent_id: int | None = None,
+    _depth: int = 0,
+) -> list[str]:
+    """Return structural runtime blockers for a normalized execution graph.
+
+    The compiler already normalizes graph shape, but launch readiness must not
+    rely on runtime exceptions to discover missing node parameters, invalid
+    operations, or references to nodes that have not produced output yet.
+    """
+
+    if _depth > MAX_GRAPH_VALIDATION_DEPTH:
+        return [f"execution graph exceeds nested depth {MAX_GRAPH_VALIDATION_DEPTH}"]
+
+    graph = normalize_execution_graph(value)
+    errors: list[str] = []
+    previous_ids: set[str] = set()
+
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("id") or "").strip()
+        node_type = str(node.get("type") or "").strip().lower()
+        params = node.get("params") if isinstance(node.get("params"), dict) else {}
+        label = str(node.get("label") or "").strip()
+
+        refs = _graph_node_references(params)
+        if "when" in node:
+            refs.update(_graph_node_references(node.get("when")))
+        unavailable_refs = sorted(ref for ref in refs if ref not in previous_ids)
+        if unavailable_refs:
+            errors.append(
+                f"{node_id}: references unavailable node output(s): "
+                + ", ".join(unavailable_refs)
+            )
+
+        if node_type in {"ai", "media"}:
+            if not str(params.get("prompt") or label).strip():
+                errors.append(f"{node_id}: {node_type} node requires prompt or label")
+
+        elif node_type == "action":
+            if not str(params.get("action_type") or "").strip():
+                errors.append(f"{node_id}: action node requires action_type")
+            if not graph_agent_id and not params.get("agent_id"):
+                errors.append(f"{node_id}: action node requires agent_id")
+            operation = str(params.get("operation") or "execute").strip().lower()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,79}", operation):
+                errors.append(f"{node_id}: action node operation is invalid")
+
+        elif node_type in {"http_get_json", "web_fetch"}:
+            if not str(params.get("url") or "").strip():
+                errors.append(f"{node_id}: {node_type} node requires url")
+
+        elif node_type == "browser":
+            if not str(params.get("url") or "").strip():
+                errors.append(f"{node_id}: browser node requires url")
+            actions = params.get("actions")
+            if not isinstance(actions, list):
+                errors.append(f"{node_id}: browser actions must be a list")
+            else:
+                if len(actions) > MAX_BROWSER_ACTIONS:
+                    errors.append(
+                        f"{node_id}: browser actions exceed {MAX_BROWSER_ACTIONS}"
+                    )
+                for index, action in enumerate(actions):
+                    if not isinstance(action, dict):
+                        errors.append(
+                            f"{node_id}: browser action {index} must be an object"
+                        )
+                        continue
+                    op = str(action.get("op") or "").strip().lower()
+                    if op not in BROWSER_ACTION_OPERATIONS:
+                        errors.append(
+                            f"{node_id}: browser action {index} has unsupported operation"
+                        )
+                        continue
+                    if op == "goto" and not str(action.get("url") or "").strip():
+                        errors.append(
+                            f"{node_id}: browser action {index} goto requires url"
+                        )
+                    if op in {
+                        "wait_for",
+                        "extract_text",
+                        "extract_attribute",
+                        "extract_html",
+                        "click",
+                        "fill",
+                        "press",
+                        "select",
+                    } and not any(
+                        str(action.get(key) or "").strip()
+                        for key in ("selector", "text", "role")
+                    ):
+                        errors.append(
+                            f"{node_id}: browser action {index} requires a locator"
+                        )
+                    if op == "extract_attribute" and not str(
+                        action.get("attribute") or ""
+                    ).strip():
+                        errors.append(
+                            f"{node_id}: browser action {index} requires attribute"
+                        )
+                    if op in {"fill", "select"} and not isinstance(
+                        action.get("value"), (str, int, float)
+                    ):
+                        errors.append(
+                            f"{node_id}: browser action {index} requires scalar value"
+                        )
+                    if op == "press" and not str(action.get("key") or "").strip():
+                        errors.append(
+                            f"{node_id}: browser action {index} requires key"
+                        )
+
+        elif node_type in {"state_read", "state_write", "state_delete"}:
+            if not graph_agent_id and not params.get("agent_id"):
+                errors.append(f"{node_id}: {node_type} node requires agent_id")
+            if not str(params.get("key") or "").strip():
+                errors.append(f"{node_id}: {node_type} node requires key")
+
+        elif node_type == "condition":
+            operator = str(params.get("operator") or "eq").strip().lower()
+            if operator not in GRAPH_COMPARE_OPERATORS:
+                errors.append(f"{node_id}: unsupported condition operator")
+
+        elif node_type == "select":
+            if "items" not in params:
+                errors.append(f"{node_id}: select node requires items")
+            fields = params.get("fields")
+            if not isinstance(fields, list) or not any(
+                str(item or "").strip() for item in fields
+            ):
+                errors.append(f"{node_id}: select node requires fields")
+
+        elif node_type == "filter":
+            if "items" not in params:
+                errors.append(f"{node_id}: filter node requires items")
+            operator = str(params.get("operator") or "eq").strip().lower()
+            if operator not in GRAPH_COMPARE_OPERATORS:
+                errors.append(f"{node_id}: unsupported filter operator")
+
+        elif node_type == "aggregate":
+            if "items" not in params:
+                errors.append(f"{node_id}: aggregate node requires items")
+            operation = str(params.get("operation") or "count").strip().lower()
+            if operation not in GRAPH_AGGREGATE_OPERATIONS:
+                errors.append(f"{node_id}: unsupported aggregate operation")
+
+        elif node_type == "notify":
+            if not str(params.get("message") or label).strip():
+                errors.append(f"{node_id}: notify node requires message or label")
+
+        elif node_type == "await_event":
+            event_name = str(params.get("event") or "").strip().lower()
+            if not event_name or len(event_name) > 120:
+                errors.append(f"{node_id}: await_event requires a valid event name")
+            match = params.get("match")
+            if match is not None and not isinstance(match, dict):
+                errors.append(f"{node_id}: await_event match must be an object")
+            elif isinstance(match, dict):
+                if len(match) > 20:
+                    errors.append(f"{node_id}: await_event match exceeds 20 fields")
+                for raw_path, expected in match.items():
+                    path = str(raw_path or "").strip()
+                    if not path or len(path) > 200:
+                        errors.append(
+                            f"{node_id}: await_event match field is invalid"
+                        )
+                        continue
+                    if not isinstance(expected, (str, int, float, bool)) and expected is not None:
+                        errors.append(
+                            f"{node_id}: await_event match values must be scalar"
+                        )
+
+        elif node_type == "wait":
+            has_until = bool(str(params.get("until") or "").strip())
+            has_duration = params.get("duration") is not None
+            if has_until == has_duration:
+                errors.append(
+                    f"{node_id}: wait node requires exactly one of until or duration"
+                )
+            if has_until:
+                try:
+                    parsed_until = datetime.fromisoformat(
+                        str(params.get("until")).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    errors.append(f"{node_id}: wait until must be ISO-8601")
+                else:
+                    if parsed_until.tzinfo is None:
+                        errors.append(
+                            f"{node_id}: wait until must include a timezone offset"
+                        )
+            if has_duration:
+                try:
+                    duration = float(params.get("duration"))
+                except (TypeError, ValueError):
+                    errors.append(f"{node_id}: wait duration must be numeric")
+                else:
+                    unit = str(params.get("unit") or "seconds").strip().lower()
+                    if unit not in WAIT_DURATION_UNITS:
+                        errors.append(f"{node_id}: unsupported wait duration unit")
+                    multiplier = {
+                        "seconds": 1,
+                        "minutes": 60,
+                        "hours": 3600,
+                        "days": 86400,
+                        "weeks": 604800,
+                    }.get(unit, 0)
+                    seconds = duration * multiplier
+                    if seconds <= 0 or seconds > MAX_WAIT_DURATION_SECONDS:
+                        errors.append(
+                            f"{node_id}: wait duration must be positive and at most one year"
+                        )
+
+        elif node_type == "foreach":
+            if "items" not in params:
+                errors.append(f"{node_id}: foreach node requires items")
+            nested = params.get("graph")
+            if not isinstance(nested, dict):
+                errors.append(f"{node_id}: foreach node requires nested graph")
+            else:
+                nested_graph = normalize_execution_graph(nested)
+                if not nested_graph.get("nodes"):
+                    errors.append(f"{node_id}: foreach node requires nested graph nodes")
+                else:
+                    nested_errors = graph_contract_errors(
+                        nested_graph,
+                        graph_agent_id=graph_agent_id,
+                        _depth=_depth + 1,
+                    )
+                    errors.extend(
+                        f"{node_id}/{item}" for item in nested_errors
+                    )
+
+        previous_ids.add(node_id)
+        if len(errors) >= 50:
+            break
+
+    return errors[:50]
 
 
 def graph_has_side_effect(graph: dict) -> bool:

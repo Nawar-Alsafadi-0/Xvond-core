@@ -1,7 +1,9 @@
 from copy import deepcopy
+import re
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from backend.app.core.ai.engine import ProviderExecutionError, ai_engine
@@ -10,7 +12,10 @@ from backend.app.core.company_lifecycle import portal_access_allowed
 from backend.app.core.config_secrets import reveal_config
 from backend.app.core.config.settings import settings
 from backend.app.core.database.connection import SessionLocal
-from backend.app.core.dependencies import require_customer_manager
+from backend.app.core.dependencies import (
+    require_customer_admin,
+    require_customer_manager,
+)
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
 from backend.app.models.user import User
@@ -48,7 +53,15 @@ from backend.app.modules.ai_agent.self_service_policy import (
     self_service_spec_view,
 )
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
+from backend.app.modules.automation.execution_graph import (
+    graph_contract_errors,
+    normalize_execution_graph,
+)
 from backend.app.modules.automation.runtime import automation_runtime
+from backend.app.modules.automation.schedule import (
+    ScheduleConfigError,
+    next_schedule_slot,
+)
 from backend.app.modules.automation.webhook_auth import automation_webhook_key
 from backend.app.modules.billing.limits import limits_service
 from backend.app.modules.billing.service_limits import service_limits
@@ -73,6 +86,19 @@ from backend.app.modules.integrations.catalog import (
     integration_packaged_operations,
     integration_requires_operation_endpoints,
     integration_validation_ready,
+    validate_integration_config,
+)
+from backend.app.modules.integrations.capability_discovery import (
+    api_connection_probe,
+    discover_openapi_contract,
+    oauth_client_credentials_token,
+    public_api_probe,
+)
+from backend.app.modules.integrations.oauth_authorization import (
+    consume_oauth_state,
+    create_oauth_authorization,
+    exchange_authorization_code,
+    oauth_token_timing,
 )
 
 router = APIRouter(
@@ -111,6 +137,16 @@ class EmployeeBuilderIntegrationBindRequest(BaseModel):
     execute_endpoint: str | None = Field(default=None, max_length=500)
     availability_endpoint: str | None = Field(default=None, max_length=500)
     cancel_endpoint: str | None = Field(default=None, max_length=500)
+    operations: dict[str, dict] = Field(default_factory=dict)
+    operation_map: dict[str, str] = Field(default_factory=dict)
+
+
+class EmployeeBuilderDiscoveryAccessRequest(BaseModel):
+    api_key: str | None = Field(default=None, min_length=1, max_length=8000)
+    username: str | None = Field(default=None, min_length=1, max_length=500)
+    password: str | None = Field(default=None, min_length=1, max_length=8000)
+    client_id: str | None = Field(default=None, min_length=1, max_length=1000)
+    client_secret: str | None = Field(default=None, min_length=1, max_length=8000)
 
 
 class EmployeeBuilderSetupAnswerRequest(BaseModel):
@@ -119,6 +155,26 @@ class EmployeeBuilderSetupAnswerRequest(BaseModel):
 
 class EmployeeBuilderGraphRunRequest(BaseModel):
     input_data: dict = Field(default_factory=dict)
+    routine_id: str | None = Field(default=None, max_length=80)
+
+
+class EmployeeBuilderPermissionRequest(BaseModel):
+    mode: str = Field(min_length=4, max_length=20)
+
+
+class EmployeeBuilderRoutineStateRequest(BaseModel):
+    enabled: bool
+
+
+class EmployeeBuilderRoutineRetryRequest(BaseModel):
+    run_id: int = Field(gt=0)
+
+
+class EmployeeBuilderRoutinePreviewRequest(BaseModel):
+    routine_id: str = Field(min_length=1, max_length=80)
+    input_data: dict = Field(default_factory=dict)
+    simulated_outputs: dict = Field(default_factory=dict)
+    event_payloads: dict = Field(default_factory=dict)
 
 
 DEFAULT_CUSTOMER_CONTROLS = {
@@ -132,6 +188,276 @@ DEFAULT_CUSTOMER_CONTROLS = {
 
 
 BUILDER_HISTORY_LIMIT = 20
+OWNER_PERMISSION_MODES = {"automatic", "ask_before", "never"}
+
+
+def _compiled_execution_routines(spec: dict | None) -> list[dict]:
+    value = spec if isinstance(spec, dict) else {}
+    result: list[dict] = []
+    used: set[str] = set()
+
+    raw_routines = value.get("execution_routines")
+    if isinstance(raw_routines, list):
+        for index, raw in enumerate(raw_routines):
+            if not isinstance(raw, dict):
+                continue
+            graph = normalize_execution_graph(
+                raw.get("graph")
+                if isinstance(raw.get("graph"), dict)
+                else raw.get("execution_graph")
+            )
+            if not graph.get("nodes"):
+                continue
+            routine_id = (
+                normalize_requirement_key(
+                    raw.get("id")
+                    or raw.get("key")
+                    or raw.get("name")
+                    or f"routine_{index + 1}"
+                )
+                or f"routine_{index + 1}"
+            )
+            if routine_id in used:
+                continue
+            used.add(routine_id)
+            result.append(
+                {
+                    "id": routine_id,
+                    "name": str(
+                        raw.get("name")
+                        or routine_id.replace("_", " ").title()
+                    )[:200],
+                    "requirement_keys": [
+                        key
+                        for key in (
+                            normalize_requirement_key(item)
+                            for item in (raw.get("requirement_keys") or [])
+                        )
+                        if key
+                    ],
+                    "requirement_scope_declared": "requirement_keys" in raw,
+                    "graph": graph,
+                }
+            )
+
+    if result:
+        return result
+
+    graph = normalize_execution_graph(value.get("execution_graph") or {})
+    if graph.get("nodes"):
+        return [
+            {
+                "id": "primary",
+                "name": "Primary routine",
+                "requirement_keys": [],
+                "requirement_scope_declared": False,
+                "graph": graph,
+            }
+        ]
+    return []
+
+
+def _routine_preview_defaults(spec: dict, routine: dict) -> dict:
+    requirements = [
+        item
+        for item in (spec.get("requirements") or [])
+        if isinstance(item, dict)
+    ]
+    requirements_by_key = {
+        normalize_requirement_key(item.get("key")): item
+        for item in requirements
+        if normalize_requirement_key(item.get("key"))
+    }
+    keys = [
+        key
+        for key in (
+            normalize_requirement_key(item)
+            for item in (routine.get("requirement_keys") or [])
+        )
+        if key and key in requirements_by_key
+    ]
+
+    selected = (
+        [requirements_by_key[key] for key in keys]
+        if routine.get("requirement_scope_declared") is True
+        else requirements
+    )
+    defaults: dict = {}
+    conflicts: list[str] = []
+    for requirement in selected:
+        for raw_key, value in (requirement.get("runtime_inputs") or {}).items():
+            key = str(raw_key)
+            if key in defaults and defaults[key] != value:
+                if key not in conflicts:
+                    conflicts.append(key)
+                continue
+            defaults.setdefault(key, deepcopy(value))
+
+    if conflicts:
+        raise HTTPException(
+            409,
+            detail={
+                "message": "Routine runtime inputs are ambiguous",
+                "conflicting_keys": conflicts,
+            },
+        )
+    return defaults
+
+
+def _invalidate_preview_evidence(container: dict) -> None:
+    """Invalidate preview evidence after executable build or setup changes."""
+
+    for key in (
+        "last_tested_at",
+        "last_tested_compiled_at",
+        "chat_tested_at",
+        "chat_tested_compiled_at",
+        "routine_preview_evidence",
+    ):
+        container.pop(key, None)
+
+
+def _routine_preview_evidence(
+    container: dict,
+    *,
+    spec: dict,
+    routine_id: str | None = None,
+    record: bool = False,
+) -> tuple[list[str], list[str], bool]:
+    routines = _compiled_execution_routines(spec)
+    required = [str(item.get("id") or "") for item in routines if item.get("id")]
+    compiled_at = str(container.get("compiled_at") or "").strip()
+    evidence = (
+        deepcopy(container.get("routine_preview_evidence"))
+        if isinstance(container.get("routine_preview_evidence"), dict)
+        else {}
+    )
+
+    now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    if record and routine_id:
+        evidence[str(routine_id)] = {
+            "compiled_at": compiled_at,
+            "tested_at": now_iso,
+        }
+        container["routine_preview_evidence"] = evidence
+        container["routine_test_count"] = int(container.get("routine_test_count") or 0) + 1
+
+    tested = [
+        item
+        for item in required
+        if isinstance(evidence.get(item), dict)
+        and str(evidence[item].get("compiled_at") or "") == compiled_at
+    ]
+    complete = bool(required) and len(tested) == len(required)
+    if record and complete:
+        container["last_tested_at"] = now_iso
+        container["last_tested_compiled_at"] = compiled_at
+        if "status" in container:
+            container["status"] = "tested"
+    return required, tested, complete
+
+
+def _effective_compiled_permissions(spec: dict, builder: dict) -> dict:
+    """Resolve compiler suggestions against explicit company-owner grants.
+
+    Compiler output may suggest automatic execution, but it cannot grant that
+    authority. Owner/admin overrides are keyed by normalized requirement key.
+    """
+
+    prepared = deepcopy(spec)
+    raw_owner = builder.get("owner_permissions")
+    owner_permissions = {
+        normalize_requirement_key(key): str(value or "").strip().lower()
+        for key, value in (raw_owner.items() if isinstance(raw_owner, dict) else [])
+        if normalize_requirement_key(key)
+        and str(value or "").strip().lower() in OWNER_PERMISSION_MODES
+    }
+
+    raw_permissions = [
+        dict(item)
+        for item in (prepared.get("permissions") or [])
+        if isinstance(item, dict) and str(item.get("action") or "").strip()
+    ]
+    consumed: set[int] = set()
+    effective: list[dict] = []
+
+    for requirement in prepared.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        key = normalize_requirement_key(requirement.get("key"))
+        if not key:
+            continue
+        targets = {
+            key,
+            normalize_requirement_key(requirement.get("purpose")),
+        } - {""}
+        matching: list[tuple[int, dict]] = []
+        for index, permission in enumerate(raw_permissions):
+            action_key = normalize_requirement_key(permission.get("action"))
+            if action_key in targets:
+                matching.append((index, permission))
+                consumed.add(index)
+
+        suggested_modes = [
+            str(
+                permission.get("suggested_mode")
+                or permission.get("mode")
+                or "ask_before"
+            ).strip().lower()
+            for _, permission in matching
+        ]
+        suggested_mode = None
+        if "never" in suggested_modes:
+            suggested_mode = "never"
+        elif "automatic" in suggested_modes:
+            suggested_mode = "automatic"
+        elif matching:
+            suggested_mode = "ask_before"
+
+        owner_mode = owner_permissions.get(key)
+        if owner_mode is not None:
+            effective.append(
+                {
+                    "action": key,
+                    "mode": owner_mode,
+                    "suggested_mode": suggested_mode or "ask_before",
+                    "source": "owner",
+                }
+            )
+        elif matching:
+            effective.append(
+                {
+                    "action": key,
+                    "mode": "never" if suggested_mode == "never" else "ask_before",
+                    "suggested_mode": suggested_mode or "ask_before",
+                    "source": "compiler_suggestion",
+                }
+            )
+
+    for index, permission in enumerate(raw_permissions):
+        if index in consumed:
+            continue
+        suggested_mode = str(
+            permission.get("suggested_mode")
+            or permission.get("mode")
+            or "ask_before"
+        ).strip().lower()
+        if suggested_mode not in OWNER_PERMISSION_MODES:
+            suggested_mode = "ask_before"
+        effective.append(
+            {
+                "action": str(permission.get("action") or "").strip()[:500],
+                "mode": "never" if suggested_mode == "never" else "ask_before",
+                "suggested_mode": suggested_mode,
+                "source": "compiler_suggestion",
+            }
+        )
+        if len(effective) >= 50:
+            break
+
+    prepared["permissions"] = effective[:50]
+    prepared["owner_permissions"] = owner_permissions
+    return prepared
 
 
 def _snapshot_builder_version(
@@ -162,6 +488,7 @@ def _snapshot_builder_version(
             "requested_channels": list(builder.get("requested_channels") or []),
             "audience": builder.get("audience"),
             "permissions": deepcopy(dict(builder.get("permissions") or {})),
+            "owner_permissions": deepcopy(dict(builder.get("owner_permissions") or {})),
             "capabilities": dict(capabilities or {}),
         }
     )
@@ -326,17 +653,269 @@ def _record_ai_usage(db, *, company_id: int, agent_id: int, selected, response):
     )
 
 
+def _compiled_discovery_summary(spec: dict | None) -> dict:
+    pending: list[dict] = []
+    for item in ((spec or {}).get("requirements") or []):
+        if not isinstance(item, dict):
+            continue
+        discovery = item.get("discovery")
+        if not isinstance(discovery, dict) or discovery.get("needed") is not True:
+            continue
+        pending.append(
+            {
+                "requirement_key": normalize_requirement_key(item.get("key")),
+                "capability": str(discovery.get("capability") or "")[:500],
+                "service_hint": str(discovery.get("service_hint") or "")[:160],
+                "docs_url": str(discovery.get("docs_url") or "")[:1200],
+                "search_queries": list(discovery.get("search_queries") or [])[:5],
+                "customer_access": str(discovery.get("customer_access") or "unknown"),
+                "status": str(discovery.get("status") or "pending_discovery"),
+            }
+        )
+    return {
+        "needed": bool(pending),
+        "pending_count": len(pending),
+        "requirements": pending,
+    }
+
+
+def _attempt_compiled_capability_discovery(
+    db,
+    *,
+    company: Company,
+    agent: AIAgent,
+    spec: dict,
+) -> tuple[dict, list[dict]]:
+    """Resolve pending discovery plans during Build without user intervention."""
+    updated = deepcopy(spec)
+    requirements = [
+        dict(item) if isinstance(item, dict) else item
+        for item in (updated.get("requirements") or [])
+    ]
+    outcomes: list[dict] = []
+
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        key = normalize_requirement_key(requirement.get("key"))
+        discovery = requirement.get("discovery")
+        if not key or not isinstance(discovery, dict) or discovery.get("needed") is not True:
+            continue
+        if str(discovery.get("status") or "pending_discovery") == "resolved":
+            continue
+
+        result = discover_openapi_contract(discovery)
+        if result.get("status") != "resolved" or not isinstance(result.get("contract"), dict):
+            discovery = dict(discovery)
+            discovery["status"] = "not_found"
+            discovery["attempted"] = list(result.get("attempted") or [])[:20]
+            requirement["discovery"] = discovery
+            outcomes.append({"requirement_key": key, "status": "not_found"})
+            continue
+
+        contract = dict(result["contract"])
+        operations = _bounded_connection_operations(contract.get("operations") or {})
+        if not operations:
+            outcomes.append({"requirement_key": key, "status": "no_operations"})
+            continue
+
+        discovery = dict(discovery)
+        discovery.update({
+            "status": "contract_found",
+            "source": result.get("source"),
+            "docs_url": result.get("docs_url"),
+            "contract_title": str(contract.get("title") or "")[:200],
+            "base_url": str(contract.get("base_url") or "")[:1200],
+            "auth_schemes": list(contract.get("auth_schemes") or [])[:10],
+            "operation_count": len(operations),
+            "attempted": list(result.get("attempted") or [])[:20],
+        })
+        requirement["discovery"] = discovery
+        requirement["integration_operations"] = operations
+        requirement["requires_connection"] = True
+        requirement["fulfillment_mode"] = "external_connection"
+        requirement["status"] = "connection_required"
+        requirement["delivery_mode"] = "connect_and_compose"
+
+        auto_provisioned = False
+        access_mode = str(discovery.get("customer_access") or "unknown").strip().lower()
+        if access_mode == "none":
+            evidence = public_api_probe(contract)
+            base_url = str(contract.get("base_url") or "").strip().rstrip("/")
+            if evidence and base_url:
+                integration_config = {
+                    "base_url": base_url,
+                    "validation_endpoint": str(evidence.get("endpoint") or ""),
+                    "auth_type": "none",
+                    "operations": operations,
+                    "_xvond_validation": evidence,
+                    "_xvond_discovery": {
+                        "source": result.get("source"),
+                        "docs_url": result.get("docs_url"),
+                        "requirement_key": key,
+                    },
+                }
+                validate_integration_config("custom_api", integration_config)
+                current = (
+                    db.query(CompanyIntegration)
+                    .filter(
+                        CompanyIntegration.company_id == company.id,
+                        CompanyIntegration.enabled.is_(True),
+                    )
+                    .count()
+                )
+                service_limits.check_current(
+                    db, company.id, "ai_agents", "integrations", current
+                )
+                integration = CompanyIntegration(
+                    company_id=company.id,
+                    integration_type="custom_api",
+                    name=(
+                        str(discovery.get("service_hint") or "").strip()
+                        or str(contract.get("title") or "").strip()
+                        or key.replace("_", " ").title()
+                    )[:200],
+                    config=integration_config,
+                    enabled=True,
+                )
+                db.add(integration)
+                db.flush()
+                requirement["integration_id"] = integration.id
+                requirement["integration_type"] = "custom_api"
+                requirement["validation_required"] = True
+                requirement["status"] = "xvond_build"
+                requirement["delivery_mode"] = "compose"
+                discovery["status"] = "resolved"
+                discovery["auto_provisioned"] = True
+                auto_provisioned = True
+
+        outcomes.append({
+            "requirement_key": key,
+            "status": "resolved" if auto_provisioned else "contract_found",
+            "customer_access": access_mode,
+            "operation_count": len(operations),
+            "_integration_id": requirement.get("integration_id") if auto_provisioned else None,
+        })
+
+    updated["requirements"] = requirements
+    for outcome in outcomes:
+        if outcome.get("status") == "resolved":
+            resolved_key = normalize_requirement_key(outcome.get("requirement_key"))
+            updated["setup_required"] = [
+                item
+                for item in (updated.get("setup_required") or [])
+                if normalize_requirement_key(item) != resolved_key
+            ]
+            matching = next(
+                (
+                    item for item in requirements
+                    if isinstance(item, dict)
+                    and normalize_requirement_key(item.get("key")) == resolved_key
+                ),
+                None,
+            )
+            if isinstance(matching, dict):
+                updated, unresolved = _resolve_bound_graph_operations(
+                    updated,
+                    requirement_key=resolved_key,
+                    operations=matching.get("integration_operations") or {},
+                )
+                if unresolved:
+                    matching = next(
+                        item for item in updated["requirements"]
+                        if isinstance(item, dict)
+                        and normalize_requirement_key(item.get("key")) == resolved_key
+                    )
+                    matching["status"] = "connection_required"
+                    matching["delivery_mode"] = "connect_and_compose"
+                    matching.pop("integration_id", None)
+                    matching.pop("integration_type", None)
+                    matching["discovery"]["status"] = "operation_selection_required"
+                    orphan_id = outcome.get("_integration_id")
+                    if orphan_id:
+                        orphan = (
+                            db.query(CompanyIntegration)
+                            .filter(
+                                CompanyIntegration.id == int(orphan_id),
+                                CompanyIntegration.company_id == company.id,
+                            )
+                            .first()
+                        )
+                        if orphan is not None:
+                            db.delete(orphan)
+                    outcome["status"] = "operation_selection_required"
+
+    for outcome in outcomes:
+        outcome.pop("_integration_id", None)
+    return updated, outcomes
+
+
+def _compiler_connection_context(db, *, company_id: int) -> list[dict]:
+    """Expose validated connection capabilities to the compiler without secrets or IDs."""
+    rows = (
+        db.query(CompanyIntegration)
+        .filter(
+            CompanyIntegration.company_id == company_id,
+            CompanyIntegration.enabled.is_(True),
+        )
+        .order_by(CompanyIntegration.id.asc())
+        .limit(20)
+        .all()
+    )
+    result: list[dict] = []
+    executable = executable_integration_types()
+    for item in rows:
+        integration_type = str(item.integration_type or "").strip().lower()
+        definition = get_integration_definition(integration_type) or {}
+        if integration_type not in executable:
+            continue
+        plain = reveal_config(item.config) or {}
+        if not integration_validation_ready(plain):
+            continue
+        operations = integration_packaged_operations(integration_type)
+        raw_operations = plain.get("operations")
+        if isinstance(raw_operations, dict):
+            try:
+                operations.update(_bounded_connection_operations(raw_operations))
+            except HTTPException:
+                operations = {}
+        result.append(
+            {
+                "name": str(item.name or "")[:120],
+                "type": integration_type,
+                "capabilities": [
+                    normalize_requirement_key(value)
+                    for value in (definition.get("requirement_keys") or [])
+                    if normalize_requirement_key(value)
+                ][:20],
+                "operations": {
+                    key: {
+                        "method": str(value.get("method") or "").upper(),
+                        "endpoint": str(value.get("endpoint") or "")[:500],
+                        "input_mode": str(value.get("input_mode") or "")[:20],
+                        "description": str(value.get("description") or "")[:300],
+                    }
+                    for key, value in list(operations.items())[:30]
+                    if isinstance(value, dict)
+                },
+            }
+        )
+        if len(result) >= 12:
+            break
+    return result
+
+
 def _auto_bind_single_packaged_integrations(
     db,
     *,
     company_id: int,
     spec: dict,
 ) -> tuple[dict, list[str]]:
-    """Bind an unambiguous validated packaged connector without asking twice.
+    """Bind one unambiguous validated connector without asking twice.
 
-    This deliberately excludes generic/custom APIs and any connector that needs
-    customer-supplied operation endpoints. Multiple matching connections are
-    left untouched so the owner keeps the choice.
+    Packaged connectors bind by declared capability. Generic HTTP APIs may bind
+    only when the compiler reused an exact operation contract that exists on one
+    validated connection. Multiple matches remain owner-controlled.
     """
 
     updated = deepcopy(spec)
@@ -370,37 +949,75 @@ def _auto_bind_single_packaged_integrations(
         if not key:
             continue
         compatible = compatible_integration_types(key)
-        candidates: list[CompanyIntegration] = []
+        try:
+            required_operations = _bounded_connection_operations(
+                requirement.get("integration_operations")
+                if isinstance(requirement.get("integration_operations"), dict)
+                else {}
+            )
+        except HTTPException:
+            required_operations = {}
+        candidates: list[tuple[CompanyIntegration, dict]] = []
 
         for integration in integrations:
             integration_type = str(integration.integration_type or "").strip().lower()
             definition = get_integration_definition(integration_type) or {}
+            if integration_type not in executable or integration_type not in compatible:
+                continue
+            plain_config = reveal_config(integration.config) or {}
+            if not integration_validation_ready(plain_config):
+                continue
+
             packaged_keys = {
                 normalize_requirement_key(item)
                 for item in (definition.get("requirement_keys") or [])
                 if normalize_requirement_key(item)
             }
-            if key not in packaged_keys:
+            if (
+                key in packaged_keys
+                and not integration_requires_operation_endpoints(integration_type)
+            ):
+                candidates.append(
+                    (integration, integration_packaged_operations(integration_type))
+                )
                 continue
-            if integration_type not in executable or integration_type not in compatible:
+
+            if not required_operations or definition.get("generic_requirements") is not True:
                 continue
-            if integration_requires_operation_endpoints(integration_type):
+            try:
+                configured_operations = _bounded_connection_operations(
+                    plain_config.get("operations")
+                    if isinstance(plain_config.get("operations"), dict)
+                    else {}
+                )
+            except HTTPException:
                 continue
-            plain_config = reveal_config(integration.config) or {}
-            if not integration_validation_ready(plain_config):
-                continue
-            candidates.append(integration)
+            matched: dict[str, dict] = {}
+            for operation_key, required in required_operations.items():
+                configured = configured_operations.get(operation_key)
+                if not isinstance(configured, dict):
+                    matched = {}
+                    break
+                if (
+                    str(configured.get("method") or "").upper()
+                    != str(required.get("method") or "").upper()
+                    or str(configured.get("endpoint") or "")
+                    != str(required.get("endpoint") or "")
+                ):
+                    matched = {}
+                    break
+                matched[operation_key] = dict(configured)
+            if matched and len(matched) == len(required_operations):
+                candidates.append((integration, matched))
 
         if len(candidates) != 1:
             continue
 
-        integration = candidates[0]
+        integration, matched_operations = candidates[0]
         integration_type = str(integration.integration_type or "").strip().lower()
         requirement["integration_id"] = integration.id
         requirement["integration_type"] = integration_type
-        requirement["integration_operations"] = integration_packaged_operations(
-            integration_type
-        )
+        requirement["integration_operations"] = matched_operations
         requirement["fulfillment_mode"] = "external_connection"
         requirement["validation_required"] = True
         requirement["requires_connection"] = True
@@ -431,8 +1048,8 @@ def _store_provisioned_spec(
     if auto_bound:
         # Executable behavior changed, so evidence from a prior preview cannot
         # authorize launch of the newly connected build.
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
+    spec = _effective_compiled_permissions(spec, builder)
     compiled_spec, delivery = provision_compiled_capabilities(db, agent_id=agent.id, spec=spec)
     setup_answers = builder.get("setup_answers") or {}
     if isinstance(setup_answers, dict):
@@ -596,6 +1213,7 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
     company = db.query(Company).filter(Company.id == company_id).first()
     if is_self_service_company(company):
         requested_channels = communication_channels(requested_channels)
+    connection_context = _compiler_connection_context(db, company_id=company_id)
 
     selections = runtime_selections(
         db,
@@ -618,6 +1236,7 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
                 user_message=build_compiler_user_message(
                     job_brief=job_brief,
                     requested_channels=requested_channels,
+                    available_connections=connection_context,
                 ),
                 model=candidate.model,
                 tools=None,
@@ -625,6 +1244,12 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
             candidate_spec = parse_compiler_response(
                 candidate_response.text,
                 job_brief=job_brief,
+            )
+            candidate_spec, discovery_outcomes = _attempt_compiled_capability_discovery(
+                db,
+                company=company,
+                agent=agent,
+                spec=candidate_spec,
             )
             response = candidate_response
             selected = candidate
@@ -725,6 +1350,7 @@ def _compile_staged_employee_spec(
     requested_channels: list[str],
     previous_spec: dict | None,
 ) -> dict:
+    connection_context = _compiler_connection_context(db, company_id=company_id)
     selections = runtime_selections(
         db,
         company_id,
@@ -743,11 +1369,19 @@ def _compile_staged_employee_spec(
                 user_message=build_compiler_user_message(
                     job_brief=job_brief,
                     requested_channels=requested_channels,
+                    available_connections=connection_context,
                 ),
                 model=candidate.model,
                 tools=None,
             )
             spec = parse_compiler_response(response.text, job_brief=job_brief)
+            company = db.query(Company).filter(Company.id == company_id).first()
+            spec, discovery_outcomes = _attempt_compiled_capability_discovery(
+                db,
+                company=company,
+                agent=agent,
+                spec=spec,
+            )
             spec = _carry_forward_requirement_bindings(previous_spec, spec)
             spec, _auto_bound = _auto_bind_single_packaged_integrations(
                 db,
@@ -1044,6 +1678,61 @@ def _self_service_builder_journey(
             elif status == "connection_required":
                 if kind == "channel" and key in missing_channels:
                     continue
+                discovery = (
+                    requirement.get("discovery")
+                    if isinstance(requirement.get("discovery"), dict)
+                    else {}
+                )
+                discovery_status = str(discovery.get("status") or "")
+                customer_access = str(discovery.get("customer_access") or "unknown")
+                auth_schemes = [
+                    item for item in (discovery.get("auth_schemes") or [])
+                    if isinstance(item, dict)
+                ]
+                if discovery_status in {"contract_found", "operation_selection_required"} and customer_access in {"api_key", "account_connection"}:
+                    scheme = auth_schemes[0] if len(auth_schemes) == 1 else {}
+                    auth_type = str(scheme.get("auth_type") or "")
+                    fields: list[dict] = []
+                    oauth_interactive = False
+                    if auth_type == "basic":
+                        fields = [
+                            {"key": "username", "label": "Username", "type": "text"},
+                            {"key": "password", "label": "Password", "type": "password"},
+                        ]
+                    elif auth_type == "oauth":
+                        flows = [
+                            item for item in (scheme.get("flows") or [])
+                            if isinstance(item, dict)
+                        ]
+                        oauth_interactive = any(
+                            item.get("flow") == "authorization_code" for item in flows
+                        )
+                        if oauth_interactive or any(item.get("flow") == "client_credentials" for item in flows):
+                            fields = [
+                                {"key": "client_id", "label": "OAuth client ID", "type": "text"},
+                                {"key": "client_secret", "label": "OAuth client secret", "type": "password"},
+                            ]
+                    elif auth_type in {"bearer", "api_key_header", "api_key_query"} or customer_access == "api_key":
+                        fields = [{
+                            "key": "api_key",
+                            "label": "API key / token",
+                            "type": "password",
+                        }]
+                    setup_actions.append(
+                        _builder_action(
+                            "provide_discovery_access",
+                            f"Authorize {key.replace('_', ' ')}",
+                            target="builder",
+                            key=key,
+                            detail=(
+                                "Xvond already found and prepared the API contract. "
+                                "Provide only the missing credential so Xvond can validate and finish the connection."
+                            ),
+                            fields=fields,
+                            oauth_interactive=bool(auth_type == "oauth" and oauth_interactive),
+                        )
+                    )
+                    continue
                 connection_status = str(
                     requirement.get("self_service_connection_status")
                     or self_service_connection_status(requirement)
@@ -1074,41 +1763,81 @@ def _self_service_builder_journey(
             elif status == "xvond_managed":
                 execution_status = str(requirement.get("execution_status") or "")
                 schedule_status = str(requirement.get("schedule_status") or "")
-                if execution_status not in {"", "ready"} or schedule_status not in {
+                if schedule_status == "approval_required":
+                    setup_actions.append(
+                        _builder_action(
+                            "set_permission",
+                            f"Choose automation permission for {key.replace('_', ' ')}",
+                            target="builder",
+                            key=key,
+                            detail=(
+                                "Scheduled execution is ready except for owner permission. "
+                                "Choose Automatic to let it run unattended, or change the "
+                                "job so this action does not need background execution."
+                            ),
+                        )
+                    )
+                elif execution_status not in {"", "ready", "permission_denied"} or schedule_status not in {
                     "",
                     "ready",
                     "not_required",
+                    "permission_denied",
                 }:
                     waiting_reasons.append(
                         f"Xvond execution setup is still required for {key.replace('_', ' ')}."
                     )
 
-        graph_trigger = (
-            (compiled_spec.get("delivery") or {}).get("graph_trigger")
+        delivery = (
+            compiled_spec.get("delivery")
             if isinstance(compiled_spec.get("delivery"), dict)
-            else None
+            else {}
         )
-        if (
-            isinstance(graph_trigger, dict)
-            and graph_trigger.get("trigger_type") == "webhook"
-            and graph_trigger.get("status") == "ready"
-            and graph_trigger.get("workflow_id")
-        ):
-            setup_actions.append(
-                _builder_action(
-                    "setup_webhook",
-                    "Configure webhook trigger",
-                    target="builder",
-                    key="webhook_trigger",
-                    detail="Copy the Xvond webhook URL and key into the external system that should trigger this employee.",
-                )
-            )
+        graph_triggers = (
+            [
+                item
+                for item in (delivery.get("graph_triggers") or [])
+                if isinstance(item, dict)
+            ]
+            if isinstance(delivery.get("graph_triggers"), list)
+            else []
+        )
+        if not graph_triggers and isinstance(delivery.get("graph_trigger"), dict):
+            graph_triggers = [delivery["graph_trigger"]]
 
-        if isinstance(graph_trigger, dict):
-            graph_trigger_status = str(graph_trigger.get("status") or "not_required")
-            if graph_trigger_status == "nested_approval_not_ready":
+        for graph_trigger in graph_triggers:
+            routine_id = str(
+                graph_trigger.get("routine_id") or "primary"
+            ).strip() or "primary"
+            routine_name = str(
+                graph_trigger.get("routine_name")
+                or routine_id.replace("_", " ").title()
+            ).strip()
+            if (
+                graph_trigger.get("trigger_type") == "webhook"
+                and graph_trigger.get("status") == "ready"
+                and graph_trigger.get("workflow_id")
+            ):
+                setup_actions.append(
+                    _builder_action(
+                        "setup_webhook",
+                        f"Configure webhook for {routine_name}",
+                        target="builder",
+                        key=f"webhook_trigger:{routine_id}",
+                        detail="Copy this routine's Xvond webhook URL and key into the external system that should trigger it.",
+                    )
+                )
+
+            graph_trigger_status = str(
+                graph_trigger.get("status") or "not_required"
+            )
+            if graph_trigger_status == "runtime_input_conflict":
+                conflicts = ", ".join(
+                    str(item)
+                    for item in (graph_trigger.get("runtime_input_conflicts") or [])
+                )
                 waiting_reasons.append(
-                    "This employee needs approval inside a foreach loop. Xvond must finish durable nested approval resume support before launch."
+                    f"{routine_name} has conflicting runtime input keys"
+                    + (f": {conflicts}." if conflicts else ".")
                 )
             elif graph_trigger_status in {
                 "schedule_required",
@@ -1117,7 +1846,7 @@ def _self_service_builder_journey(
                 "disabled",
             }:
                 waiting_reasons.append(
-                    "Xvond execution trigger setup is not ready yet."
+                    f"Xvond execution trigger setup is not ready for {routine_name}."
                 )
 
         for item in state.get("connected_system_setup") or []:
@@ -1186,6 +1915,18 @@ def _self_service_builder_journey(
         compiled_at
         and str(builder.get("last_tested_compiled_at") or "").strip() == compiled_at
     )
+    routine_required, routine_tested, _ = _routine_preview_evidence(
+        builder,
+        spec=compiled_spec or {},
+    )
+    routine_names = {
+        str(item.get("id") or ""): str(item.get("name") or item.get("id") or "")
+        for item in _compiled_execution_routines(compiled_spec or {})
+    }
+    untested_routines = [
+        item for item in routine_required if item not in routine_tested
+    ]
+
     setup_stage = next((item for item in stages if item.get("id") == "setup"), {})
     setup_complete = setup_stage.get("status") == "complete"
     if tested_build and setup_complete:
@@ -1193,16 +1934,43 @@ def _self_service_builder_journey(
             "test",
             "Preview & Test",
             "complete",
-            "The current employee build has been tested safely without live channels or business actions.",
+            (
+                "Every executable routine in the current build passed a side-effect-free preview."
+                if routine_required
+                else "The current conversational employee build has been preview-tested safely."
+            ),
         )
     elif provisioned and has_entitlement and setup_complete:
-        add_stage(
-            "test",
-            "Preview & Test",
-            "action_required",
-            "Chat with this exact draft before launch. Preview testing never sends through live channels or executes business actions.",
-            [_builder_action("test_employee", "Test employee", target="builder")],
-        )
+        if routine_required:
+            preview_actions = [
+                _builder_action(
+                    "preview_routine",
+                    f"Preview {routine_names.get(routine_id) or routine_id}",
+                    target="builder",
+                    key=routine_id,
+                    detail="Run this routine safely without sending, publishing, booking, writing state or other business side effects.",
+                )
+                for routine_id in untested_routines
+            ]
+            add_stage(
+                "test",
+                "Preview & Test",
+                "action_required",
+                (
+                    f"Preview every executable routine before launch "
+                    f"({len(routine_tested)}/{len(routine_required)} tested). "
+                    "Live business side effects are simulated."
+                ),
+                preview_actions,
+            )
+        else:
+            add_stage(
+                "test",
+                "Preview & Test",
+                "action_required",
+                "Chat with this exact draft before launch. Preview testing never sends through live channels or executes business actions.",
+                [_builder_action("test_employee", "Test employee", target="builder")],
+            )
     elif provisioned and not setup_complete:
         add_stage(
             "test",
@@ -1246,7 +2014,11 @@ def _self_service_builder_journey(
             "launch",
             "Launch",
             "blocked",
-            "Test the current employee build once before launch.",
+            (
+                "Preview every current routine before launch."
+                if routine_required
+                else "Test the current employee build once before launch."
+            ),
         )
     else:
         add_stage(
@@ -1271,6 +2043,8 @@ def _self_service_builder_journey(
         "complete_count": complete_count,
         "total_count": len(stages),
         "live": bool(agent.enabled),
+        "required_routines": routine_required,
+        "tested_routines": routine_tested,
     }
 
 
@@ -1427,6 +2201,7 @@ def create_employee(
                 "permissions": dict(blueprint.permissions),
                 "missing_information": list(blueprint.missing_information),
                 "setup_answers": {},
+                "owner_permissions": {},
                 "onboarding_source": company.onboarding_source,
                 "delivery_mode": (
                     "self_service"
@@ -1580,6 +2355,7 @@ def revise_self_service_job_brief(
                 "permissions": dict(blueprint.permissions),
                 "missing_information": list(blueprint.missing_information),
                 "setup_answers": {},
+                "owner_permissions": {},
                 "onboarding_source": company.onboarding_source,
                 "delivery_mode": "self_service",
                 "compiled_spec": None,
@@ -1978,10 +2754,16 @@ def rollback_self_service_employee(
         builder["audience"] = selected.get("audience")
         builder["permissions"] = deepcopy(dict(selected.get("permissions") or {}))
         builder["setup_answers"] = deepcopy(dict(selected.get("setup_answers") or {}))
+        builder["owner_permissions"] = deepcopy(
+            dict(selected.get("owner_permissions") or {})
+        )
         _clear_current_build_evidence(builder)
 
         if isinstance(restored_spec, dict):
-            restored_spec = deepcopy(restored_spec)
+            restored_spec = _effective_compiled_permissions(
+                deepcopy(restored_spec),
+                builder,
+            )
             restored_spec, delivery = provision_compiled_capabilities(
                 db,
                 agent_id=agent.id,
@@ -2006,6 +2788,7 @@ def rollback_self_service_employee(
             restored_capabilities = {item: True for item in blueprint.capabilities}
             builder["audience"] = blueprint.audience
             builder["permissions"] = dict(blueprint.permissions)
+            builder["owner_permissions"] = {}
             builder["missing_information"] = list(blueprint.missing_information)
             agent.system_prompt = build_employee_system_prompt(
                 owner_name=company.name,
@@ -2089,6 +2872,181 @@ def rollback_self_service_employee(
         db.close()
 
 
+def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
+    """Validate owner/API-doc supplied operations for a generic connection."""
+    result: dict[str, dict] = {}
+    if not isinstance(value, dict):
+        return result
+    for raw_name, raw in value.items():
+        name = normalize_requirement_key(raw_name)
+        if not name or not isinstance(raw, dict):
+            continue
+        method = str(raw.get("method") or "POST").strip().upper()
+        if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            raise HTTPException(400, f"Unsupported HTTP method for operation {name}")
+        endpoint = _relative_endpoint(raw.get("endpoint"), required=True)
+        try:
+            timeout = float(raw.get("timeout") or 15)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"Invalid timeout for operation {name}")
+        input_mode = str(
+            raw.get("input_mode") or ("query" if method == "GET" else "json")
+        ).strip().lower()
+        if input_mode not in {"json", "query", "none"}:
+            raise HTTPException(400, f"Invalid input mode for operation {name}")
+        path_params = list(dict.fromkeys(
+            re.findall(r"{([A-Za-z_][A-Za-z0-9_]{0,63})}", endpoint)
+        ))
+        required_query_params = [
+            str(item).strip()
+            for item in (raw.get("required_query_params") or [])
+            if re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_.-]{0,63}",
+                str(item or "").strip(),
+            )
+        ][:50]
+        result[name] = {
+            "method": method,
+            "endpoint": endpoint,
+            "input_mode": input_mode,
+            "timeout": max(1, min(timeout, 30)),
+            "path_params": path_params,
+            "required_query_params": list(dict.fromkeys(required_query_params)),
+            "description": str(raw.get("description") or "").strip()[:500],
+        }
+        if len(result) >= 50:
+            break
+    return result
+
+
+def _operation_match_tokens(value) -> set[str]:
+    stop = {
+        "a", "an", "the", "to", "for", "of", "and", "or", "api", "http",
+        "action", "operation", "request", "execute", "employee", "integration",
+        "system", "external", "data",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", str(value or "").lower())
+        if len(token) > 1 and token not in stop
+    }
+
+
+def _resolve_bound_graph_operations(
+    spec: dict,
+    *,
+    requirement_key: str,
+    operations: dict,
+    operation_map: dict | None = None,
+) -> tuple[dict, list[dict]]:
+    """Bind graph action nodes to real imported API operations, fail-closed if ambiguous."""
+    updated = deepcopy(spec)
+    available = {
+        normalize_requirement_key(key): dict(value)
+        for key, value in (operations or {}).items()
+        if normalize_requirement_key(key) and isinstance(value, dict)
+    }
+    explicit = {
+        str(node_id).strip(): normalize_requirement_key(operation)
+        for node_id, operation in (operation_map or {}).items()
+        if str(node_id).strip() and normalize_requirement_key(operation)
+    }
+    unresolved: list[dict] = []
+
+    def choose(node: dict, *, locator: str) -> str | None:
+        params = node.get("params") if isinstance(node.get("params"), dict) else {}
+        node_id = str(node.get("id") or "").strip()
+        requested = normalize_requirement_key(params.get("operation"))
+        if requested and requested in available:
+            return requested
+        forced = explicit.get(locator) or explicit.get(node_id)
+        if forced:
+            return forced if forced in available else None
+        if len(available) == 1:
+            return next(iter(available))
+        context_parts = [
+            node_id,
+            node.get("label"),
+            params.get("action_type"),
+            (params.get("arguments") or {}).keys()
+            if isinstance(params.get("arguments"), dict)
+            else "",
+        ]
+        context_tokens = _operation_match_tokens(" ".join(
+            " ".join(str(item) for item in part)
+            if not isinstance(part, str) and hasattr(part, "__iter__")
+            else str(part or "")
+            for part in context_parts
+        ))
+        ranked: list[tuple[int, str]] = []
+        for name, config in available.items():
+            name_tokens = _operation_match_tokens(name.replace("_", " "))
+            description_tokens = _operation_match_tokens(config.get("description"))
+            score = (4 * len(context_tokens & name_tokens)) + len(
+                context_tokens & description_tokens
+            )
+            ranked.append((score, name))
+        ranked.sort(reverse=True)
+        if ranked and ranked[0][0] > 0 and (
+            len(ranked) == 1 or ranked[0][0] > ranked[1][0]
+        ):
+            return ranked[0][1]
+        return None
+
+    def visit(graph: dict, *, prefix: str) -> None:
+        nodes = graph.get("nodes") if isinstance(graph, dict) else None
+        if not isinstance(nodes, list):
+            return
+        for index, raw in enumerate(nodes):
+            if not isinstance(raw, dict):
+                continue
+            node_id = str(raw.get("id") or f"node_{index + 1}").strip()
+            locator = f"{prefix}/{node_id}" if prefix else node_id
+            node_type = str(raw.get("type") or "").strip().lower()
+            params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
+            if (
+                node_type == "action"
+                and normalize_requirement_key(params.get("action_type"))
+                == requirement_key
+            ):
+                selected = choose(raw, locator=locator)
+                if selected:
+                    params = dict(params)
+                    params["operation"] = selected
+                    raw["params"] = params
+                else:
+                    unresolved.append({
+                        "node_id": node_id,
+                        "locator": locator,
+                        "label": str(raw.get("label") or "")[:200],
+                        "available_operations": sorted(available),
+                    })
+            elif node_type == "foreach":
+                nested = params.get("graph")
+                if isinstance(nested, dict):
+                    visit(nested, prefix=locator)
+
+    graph = updated.get("execution_graph")
+    if isinstance(graph, dict):
+        visit(graph, prefix="primary")
+    routines = updated.get("execution_routines")
+    if isinstance(routines, list):
+        for index, routine in enumerate(routines):
+            if not isinstance(routine, dict):
+                continue
+            routine_id = normalize_requirement_key(
+                routine.get("id") or routine.get("key") or f"routine_{index + 1}"
+            ) or f"routine_{index + 1}"
+            graph = (
+                routine.get("graph")
+                if isinstance(routine.get("graph"), dict)
+                else routine.get("execution_graph")
+            )
+            if isinstance(graph, dict):
+                visit(graph, prefix=routine_id)
+    return updated, unresolved
+
+
 def _relative_endpoint(value: str | None, *, required: bool = False) -> str | None:
     endpoint = str(value or "").strip()
     if not endpoint:
@@ -2097,7 +3055,985 @@ def _relative_endpoint(value: str | None, *, required: bool = False) -> str | No
         return None
     if endpoint.startswith("//") or endpoint.lower().startswith(("http://", "https://")):
         raise HTTPException(400, "Integration operation endpoints must be relative paths")
+    if ".." in endpoint.split("/"):
+        raise HTTPException(400, "Integration operation endpoints cannot traverse parent paths")
     return "/" + endpoint.lstrip("/")
+
+
+@router.post("/{agent_id}/discover/{requirement_key}")
+def discover_self_service_capability(
+    agent_id: int,
+    requirement_key: str,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Resolve one unseen external capability into a verified executable API contract."""
+
+    key = normalize_requirement_key(requirement_key)
+    if not key:
+        raise HTTPException(400, "Capability requirement key is invalid")
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Capability discovery is available only for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        if agent.enabled and pending is None:
+            raise HTTPException(409, "Stage a live revision before discovering new capabilities")
+
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
+        if not isinstance(compiled_spec, dict):
+            raise HTTPException(409, "Build the employee before capability discovery")
+
+        updated = deepcopy(compiled_spec)
+        requirements = [
+            dict(item) if isinstance(item, dict) else item
+            for item in (updated.get("requirements") or [])
+        ]
+        requirement = next(
+            (
+                item for item in requirements
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HTTPException(404, "Capability requirement not found")
+
+        discovery = requirement.get("discovery")
+        if not isinstance(discovery, dict) or discovery.get("needed") is not True:
+            raise HTTPException(409, "This requirement does not have a pending discovery plan")
+
+        result = discover_openapi_contract(discovery)
+        if result.get("status") != "resolved" or not isinstance(result.get("contract"), dict):
+            discovery = dict(discovery)
+            discovery["status"] = "not_found"
+            discovery["attempted"] = list(result.get("attempted") or [])[:20]
+            requirement["discovery"] = discovery
+            updated["requirements"] = requirements
+            if isinstance(pending, dict):
+                pending["compiled_spec"] = updated
+                pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+                _invalidate_preview_evidence(pending)
+                builder["pending_revision"] = pending
+            else:
+                builder["compiled_spec"] = updated
+                _invalidate_preview_evidence(builder)
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": "not_found",
+                "agent_id": agent.id,
+                "requirement_key": key,
+                "attempted": discovery["attempted"],
+            }
+
+        contract = dict(result["contract"])
+        operations = _bounded_connection_operations(contract.get("operations") or {})
+        if not operations:
+            raise HTTPException(409, "Discovered API contract has no executable operations")
+
+        discovery = dict(discovery)
+        discovery.update(
+            {
+                "status": "contract_found",
+                "source": result.get("source"),
+                "docs_url": result.get("docs_url"),
+                "contract_title": str(contract.get("title") or "")[:200],
+                "base_url": str(contract.get("base_url") or "")[:1200],
+                "auth_schemes": list(contract.get("auth_schemes") or [])[:10],
+                "operation_count": len(operations),
+                "attempted": list(result.get("attempted") or [])[:20],
+            }
+        )
+        requirement["discovery"] = discovery
+        requirement["integration_operations"] = operations
+        requirement["requires_connection"] = True
+        requirement["fulfillment_mode"] = "external_connection"
+        requirement["status"] = "connection_required"
+        requirement["delivery_mode"] = "connect_and_compose"
+
+        auto_provisioned = False
+        access_mode = str(discovery.get("customer_access") or "unknown").strip().lower()
+        if access_mode == "none":
+            evidence = public_api_probe(contract)
+            base_url = str(contract.get("base_url") or "").strip().rstrip("/")
+            if evidence and base_url:
+                integration_config = {
+                    "base_url": base_url,
+                    "validation_endpoint": str(evidence.get("endpoint") or ""),
+                    "auth_type": "none",
+                    "operations": operations,
+                    "_xvond_validation": evidence,
+                    "_xvond_discovery": {
+                        "source": result.get("source"),
+                        "docs_url": result.get("docs_url"),
+                        "requirement_key": key,
+                    },
+                }
+                validate_integration_config("custom_api", integration_config)
+                current = (
+                    db.query(CompanyIntegration)
+                    .filter(
+                        CompanyIntegration.company_id == company.id,
+                        CompanyIntegration.enabled.is_(True),
+                    )
+                    .count()
+                )
+                service_limits.check_current(
+                    db,
+                    company.id,
+                    "ai_agents",
+                    "integrations",
+                    current,
+                )
+                integration = CompanyIntegration(
+                    company_id=company.id,
+                    integration_type="custom_api",
+                    name=(
+                        str(discovery.get("service_hint") or "").strip()
+                        or str(contract.get("title") or "").strip()
+                        or key.replace("_", " ").title()
+                    )[:200],
+                    config=integration_config,
+                    enabled=True,
+                )
+                db.add(integration)
+                db.flush()
+
+                requirement["integration_id"] = integration.id
+                requirement["integration_type"] = "custom_api"
+                requirement["validation_required"] = True
+                requirement["status"] = "xvond_build"
+                requirement["delivery_mode"] = "compose"
+                discovery["status"] = "resolved"
+                discovery["auto_provisioned"] = True
+                auto_provisioned = True
+
+        updated["requirements"] = requirements
+        if auto_provisioned:
+            updated["setup_required"] = [
+                item
+                for item in (updated.get("setup_required") or [])
+                if normalize_requirement_key(item) != key
+            ]
+        updated, unresolved = _resolve_bound_graph_operations(
+            updated,
+            requirement_key=key,
+            operations=operations,
+        )
+        if auto_provisioned and unresolved:
+            requirement = next(
+                item
+                for item in updated["requirements"]
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            )
+            requirement["status"] = "connection_required"
+            requirement["delivery_mode"] = "connect_and_compose"
+            requirement.pop("integration_id", None)
+            requirement.pop("integration_type", None)
+            requirement["discovery"]["status"] = "operation_selection_required"
+            auto_provisioned = False
+
+        if isinstance(pending, dict):
+            pending["compiled_spec"] = updated
+            pending["status"] = "built"
+            pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            _invalidate_preview_evidence(pending)
+            builder["pending_revision"] = pending
+        else:
+            if auto_provisioned:
+                updated, delivery = provision_compiled_capabilities(
+                    db,
+                    agent_id=agent.id,
+                    spec=updated,
+                )
+                builder["delivery"] = delivery
+                agent.system_prompt = build_compiled_employee_system_prompt(
+                    owner_name=company.name,
+                    spec=updated,
+                )
+            builder["compiled_spec"] = updated
+            builder["missing_information"] = list(updated.get("setup_required") or [])
+            _invalidate_preview_evidence(builder)
+
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.commit()
+        return {
+            "status": "resolved" if auto_provisioned else "contract_found",
+            "agent_id": agent.id,
+            "requirement_key": key,
+            "auto_provisioned": auto_provisioned,
+            "customer_access": access_mode,
+            "docs_url": result.get("docs_url"),
+            "operation_count": len(operations),
+            "unresolved_operations": unresolved,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+
+@router.post("/{agent_id}/discover/{requirement_key}/oauth/start")
+def start_discovered_oauth_authorization(
+    agent_id: int,
+    requirement_key: str,
+    data: EmployeeBuilderDiscoveryAccessRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Start provider-neutral OAuth authorization for a discovered API."""
+    key = normalize_requirement_key(requirement_key)
+    if not key:
+        raise HTTPException(400, "Capability requirement key is invalid")
+    client_id = str(data.client_id or "").strip()
+    client_secret = str(data.client_secret or "")
+    if not client_id or not client_secret:
+        raise HTTPException(400, "OAuth client ID and client secret are required")
+    if not settings.PUBLIC_BASE_URL:
+        raise HTTPException(409, "PUBLIC_BASE_URL is required for OAuth authorization")
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "OAuth setup is available only for Self-Service employees")
+        agent = (
+            db.query(AIAgent)
+            .filter(AIAgent.id == int(agent_id), AIAgent.company_id == company.id)
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        config = _employee_config_or_404(db, agent)
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        if agent.enabled and pending is None:
+            raise HTTPException(409, "Stage a live revision before changing discovered connections")
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
+        if not isinstance(compiled_spec, dict):
+            raise HTTPException(409, "Build the employee before authorizing this capability")
+
+        requirement = next(
+            (
+                item
+                for item in (compiled_spec.get("requirements") or [])
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HTTPException(404, "Capability requirement not found")
+        discovery = requirement.get("discovery")
+        if not isinstance(discovery, dict):
+            raise HTTPException(409, "This requirement has no discovered API contract")
+        operations = _bounded_connection_operations(
+            requirement.get("integration_operations")
+            if isinstance(requirement.get("integration_operations"), dict)
+            else {}
+        )
+        base_url = str(discovery.get("base_url") or "").strip().rstrip("/")
+        if not base_url or not operations:
+            raise HTTPException(409, "Discovered API contract is incomplete")
+
+        oauth_schemes = [
+            item
+            for item in (discovery.get("auth_schemes") or [])
+            if isinstance(item, dict)
+            and str(item.get("auth_type") or "") == "oauth"
+        ]
+        if len(oauth_schemes) != 1:
+            raise HTTPException(409, "A single OAuth scheme is required for generic authorization")
+        flows = [
+            item
+            for item in (oauth_schemes[0].get("flows") or [])
+            if isinstance(item, dict)
+            and item.get("flow") == "authorization_code"
+        ]
+        if len(flows) != 1:
+            raise HTTPException(409, "This API does not expose one supported authorization-code flow")
+
+        # A retry for the same employee requirement supersedes the previous
+        # disabled OAuth attempt. Removing it keeps setup idempotent and prevents
+        # abandoned popups from consuming the customer's integration allowance.
+        stale_pending = (
+            db.query(CompanyIntegration)
+            .filter(
+                CompanyIntegration.company_id == company.id,
+                CompanyIntegration.integration_type == "custom_api",
+                CompanyIntegration.enabled.is_(False),
+            )
+            .all()
+        )
+        for candidate in stale_pending:
+            candidate_config = reveal_config(candidate.config or {})
+            candidate_pending = (
+                candidate_config.get("_xvond_oauth_pending")
+                if isinstance(candidate_config.get("_xvond_oauth_pending"), dict)
+                else {}
+            )
+            if (
+                int(candidate_pending.get("agent_id") or 0) == agent.id
+                and normalize_requirement_key(candidate_pending.get("requirement_key")) == key
+            ):
+                db.delete(candidate)
+        db.flush()
+
+        current = (
+            db.query(CompanyIntegration)
+            .filter(CompanyIntegration.company_id == company.id)
+            .count()
+        )
+        service_limits.check_current(db, company.id, "ai_agents", "integrations", current)
+
+        redirect_uri = (
+            f"{settings.PUBLIC_BASE_URL}"
+            f"/customer/employee-builder/oauth/callback"
+        )
+        integration_config = {
+            "base_url": base_url,
+            "operations": operations,
+            "_xvond_oauth_pending": {
+                "agent_id": agent.id,
+                "requirement_key": key,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "flow": flows[0],
+                "redirect_uri": redirect_uri,
+            },
+            "_xvond_discovery": {
+                "source": discovery.get("source"),
+                "docs_url": discovery.get("docs_url"),
+                "requirement_key": key,
+            },
+        }
+        integration = CompanyIntegration(
+            company_id=company.id,
+            integration_type="custom_api",
+            name=(
+                str(discovery.get("service_hint") or "").strip()
+                or str(discovery.get("contract_title") or "").strip()
+                or key.replace("_", " ").title()
+            )[:200],
+            config=integration_config,
+            enabled=False,
+        )
+        db.add(integration)
+        db.flush()
+
+        authorization = create_oauth_authorization(
+            flows[0],
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            state_secret=settings.GENERIC_OAUTH_STATE_SECRET,
+            company_id=company.id,
+            agent_id=agent.id,
+            requirement_key=key,
+            integration_id=integration.id,
+        )
+        integration_config["_xvond_oauth_pending"]["pkce_verifier_secret"] = authorization["code_verifier"]
+        integration.config = integration_config
+        db.commit()
+        return {
+            "status": "authorization_required",
+            "authorization_url": authorization["authorization_url"],
+            "expires_in": authorization["expires_in"],
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.get("/oauth/callback", response_class=HTMLResponse)
+def finish_discovered_oauth_authorization(
+    code: str | None = Query(default=None, max_length=8000),
+    state: str | None = Query(default=None, max_length=20000),
+    error: str | None = Query(default=None, max_length=1000),
+    current_user: User = Depends(require_customer_manager),
+):
+    """Finish a signed generic OAuth authorization and attach it to the employee."""
+    if error:
+        return HTMLResponse(
+            "<html><body><h3>Connection cancelled</h3>"
+            "<script>if(window.opener){window.opener.postMessage({type:'xvond-oauth',status:'error'},window.location.origin);}window.close();</script>"
+            "</body></html>",
+            status_code=400,
+        )
+    if not code or not state:
+        raise HTTPException(400, "OAuth callback is missing code or state")
+
+    db = SessionLocal()
+    try:
+        payload = consume_oauth_state(
+            state,
+            state_secret=settings.GENERIC_OAUTH_STATE_SECRET,
+        )
+        company_id = int(payload.get("company_id") or 0)
+        if company_id != int(current_user.company_id):
+            raise HTTPException(403, "OAuth state does not belong to the current customer")
+        agent_id = int(payload.get("agent_id") or 0)
+        integration_id = int(payload.get("integration_id") or 0)
+        key = normalize_requirement_key(payload.get("requirement_key"))
+        if not company_id or not agent_id or not integration_id or not key:
+            raise HTTPException(400, "OAuth state is incomplete")
+
+        integration = (
+            db.query(CompanyIntegration)
+            .filter(
+                CompanyIntegration.id == integration_id,
+                CompanyIntegration.company_id == company_id,
+            )
+            .first()
+        )
+        if integration is None:
+            raise HTTPException(404, "Pending OAuth integration was not found")
+        raw_config = reveal_config(integration.config or {})
+        pending_oauth = (
+            raw_config.get("_xvond_oauth_pending")
+            if isinstance(raw_config.get("_xvond_oauth_pending"), dict)
+            else {}
+        )
+        if (
+            int(pending_oauth.get("agent_id") or 0) != agent_id
+            or normalize_requirement_key(pending_oauth.get("requirement_key")) != key
+        ):
+            raise HTTPException(409, "OAuth state does not match the pending integration")
+
+        token = exchange_authorization_code(
+            state_payload=payload,
+            code=code,
+            client_secret=str(pending_oauth.get("client_secret") or ""),
+            code_verifier=str(pending_oauth.get("pkce_verifier_secret") or ""),
+        )
+        operations = _bounded_connection_operations(raw_config.get("operations") or {})
+        base_url = str(raw_config.get("base_url") or "").strip().rstrip("/")
+        auth_config = {
+            "auth_type": "bearer",
+            "api_key": token["access_token"],
+        }
+        evidence = api_connection_probe(
+            {"base_url": base_url, "operations": operations},
+            auth_config=auth_config,
+        )
+        if not evidence:
+            raise HTTPException(
+                409,
+                "Xvond could not safely validate the authorized account with a read-only operation",
+            )
+
+        token_timing = oauth_token_timing(token.get("expires_in"))
+        integration.config = {
+            "base_url": base_url,
+            "validation_endpoint": str(evidence.get("endpoint") or ""),
+            "operations": operations,
+            "_xvond_validation": evidence,
+            "_xvond_discovery": raw_config.get("_xvond_discovery") or {},
+            "auth_type": "bearer",
+            "api_key": token["access_token"],
+            "_xvond_oauth": {
+                "flow": "authorization_code",
+                "token_url": payload.get("token_url"),
+                "scopes": (pending_oauth.get("flow") or {}).get("scopes") or [],
+                "client_id": pending_oauth.get("client_id"),
+                "client_secret": pending_oauth.get("client_secret"),
+                "refresh_token": token.get("refresh_token"),
+                "expires_in": token.get("expires_in"),
+                "scope": token.get("scope"),
+                **token_timing,
+            },
+        }
+        integration.enabled = True
+
+        agent = (
+            db.query(AIAgent)
+            .filter(AIAgent.id == agent_id, AIAgent.company_id == company_id)
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        config = _employee_config_or_404(db, agent)
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
+        if not isinstance(compiled_spec, dict):
+            raise HTTPException(409, "Employee build state is missing")
+
+        updated = deepcopy(compiled_spec)
+        requirements = [
+            dict(item) if isinstance(item, dict) else item
+            for item in (updated.get("requirements") or [])
+        ]
+        requirement = next(
+            (
+                item for item in requirements
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HTTPException(404, "Capability requirement not found")
+
+        requirement["integration_id"] = integration.id
+        requirement["integration_type"] = "custom_api"
+        requirement["integration_operations"] = operations
+        requirement["fulfillment_mode"] = "external_connection"
+        requirement["validation_required"] = True
+        requirement["requires_connection"] = True
+        requirement["status"] = "xvond_build"
+        requirement["delivery_mode"] = "compose"
+        discovery = dict(requirement.get("discovery") or {})
+        discovery["status"] = "resolved"
+        discovery["credential_configured"] = True
+        requirement["discovery"] = discovery
+
+        updated["requirements"] = requirements
+        updated["setup_required"] = [
+            item
+            for item in (updated.get("setup_required") or [])
+            if normalize_requirement_key(item) != key
+        ]
+        updated, unresolved = _resolve_bound_graph_operations(
+            updated,
+            requirement_key=key,
+            operations=operations,
+        )
+        if unresolved:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "api_operation_selection_required",
+                    "requirement_key": key,
+                    "unresolved": unresolved,
+                },
+            )
+
+        if isinstance(pending, dict):
+            pending["compiled_spec"] = updated
+            pending["status"] = "built"
+            pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            _invalidate_preview_evidence(pending)
+            builder["pending_revision"] = pending
+        else:
+            updated, delivery = provision_compiled_capabilities(
+                db,
+                agent_id=agent.id,
+                spec=updated,
+            )
+            builder["compiled_spec"] = updated
+            builder["delivery"] = delivery
+            builder["missing_information"] = list(updated.get("setup_required") or [])
+            _invalidate_preview_evidence(builder)
+            company = _company_or_404(db, company_id)
+            agent.system_prompt = build_compiled_employee_system_prompt(
+                owner_name=company.name,
+                spec=updated,
+            )
+
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.commit()
+        return HTMLResponse(
+            "<html><body><h3>Account connected</h3>"
+            "<script>if(window.opener){window.opener.postMessage({type:'xvond-oauth',status:'connected'},window.location.origin);}window.close();</script>"
+            "</body></html>"
+        )
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/discover/{requirement_key}/access")
+def provide_discovered_capability_access(
+    agent_id: int,
+    requirement_key: str,
+    data: EmployeeBuilderDiscoveryAccessRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Provide only the credential missing from a discovered API capability."""
+
+    key = normalize_requirement_key(requirement_key)
+    if not key:
+        raise HTTPException(400, "Capability requirement key is invalid")
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Capability access setup is available only for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        if agent.enabled and pending is None:
+            raise HTTPException(409, "Stage a live revision before changing discovered connections")
+
+        compiled_spec = (
+            pending.get("compiled_spec")
+            if isinstance(pending, dict)
+            else builder.get("compiled_spec")
+        )
+        if not isinstance(compiled_spec, dict):
+            raise HTTPException(409, "Build the employee before providing capability access")
+
+        updated = deepcopy(compiled_spec)
+        requirements = [
+            dict(item) if isinstance(item, dict) else item
+            for item in (updated.get("requirements") or [])
+        ]
+        requirement = next(
+            (
+                item for item in requirements
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HTTPException(404, "Capability requirement not found")
+
+        discovery = requirement.get("discovery")
+        if not isinstance(discovery, dict):
+            raise HTTPException(409, "This requirement has no discovered API contract")
+        if str(discovery.get("status") or "") not in {
+            "contract_found",
+            "operation_selection_required",
+        }:
+            raise HTTPException(409, "Discover the API contract before providing access")
+
+        base_url = str(discovery.get("base_url") or "").strip().rstrip("/")
+        operations = _bounded_connection_operations(
+            requirement.get("integration_operations")
+            if isinstance(requirement.get("integration_operations"), dict)
+            else {}
+        )
+        if not base_url or not operations:
+            raise HTTPException(409, "Discovered API contract is incomplete")
+
+        schemes = [
+            item
+            for item in (discovery.get("auth_schemes") or [])
+            if isinstance(item, dict)
+            and str(item.get("auth_type") or "") in {
+                "bearer", "api_key_header", "api_key_query", "basic", "oauth"
+            }
+        ]
+        if len(schemes) > 1:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "auth_scheme_selection_required",
+                    "schemes": schemes,
+                    "message": "The API exposes multiple authentication schemes; choose the intended provider authorization method.",
+                },
+            )
+
+        access_mode = str(discovery.get("customer_access") or "unknown").strip().lower()
+        scheme = dict(schemes[0]) if schemes else {}
+        auth_type = str(scheme.get("auth_type") or "").strip().lower()
+        if not auth_type and access_mode == "api_key":
+            auth_type = "bearer"
+        if not auth_type:
+            raise HTTPException(
+                409,
+                "Xvond could not determine a safe generic authentication scheme from the API contract",
+            )
+
+        auth_config: dict = {"auth_type": auth_type}
+        if auth_type in {"bearer", "api_key_header", "api_key_query"}:
+            token = str(data.api_key or "").strip()
+            if not token:
+                raise HTTPException(400, "API key or token is required")
+            auth_config["api_key"] = token
+            if auth_type in {"api_key_header", "api_key_query"}:
+                name = str(scheme.get("api_key_name") or "").strip()
+                if not name:
+                    raise HTTPException(409, "API key location is missing from the discovered contract")
+                auth_config["api_key_name"] = name
+        elif auth_type == "basic":
+            username = str(data.username or "").strip()
+            password = str(data.password or "")
+            if not username or not password:
+                raise HTTPException(400, "Username and password are required")
+            auth_config["username"] = username
+            auth_config["password"] = password
+        elif auth_type == "oauth":
+            flows = [
+                item for item in (scheme.get("flows") or [])
+                if isinstance(item, dict)
+            ]
+            client_flow = next(
+                (item for item in flows if item.get("flow") == "client_credentials"),
+                None,
+            )
+            if client_flow is None:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "error": "oauth_authorization_required",
+                        "message": (
+                            "This discovered API requires an interactive OAuth authorization. "
+                            "Xvond will not invent or accept a raw OAuth token."
+                        ),
+                        "authorization_flows": flows,
+                    },
+                )
+            client_id = str(data.client_id or "").strip()
+            client_secret = str(data.client_secret or "")
+            if not client_id or not client_secret:
+                raise HTTPException(400, "OAuth client ID and client secret are required")
+            token = oauth_client_credentials_token(
+                client_flow,
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+            auth_config = {
+                "auth_type": "bearer",
+                "api_key": token["access_token"],
+                "_xvond_oauth": {
+                    "flow": "client_credentials",
+                    "token_url": client_flow.get("token_url"),
+                    "scopes": client_flow.get("scopes") or [],
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "expires_in": token.get("expires_in"),
+                    **oauth_token_timing(token.get("expires_in")),
+                },
+            }
+
+        contract = {
+            "base_url": base_url,
+            "operations": operations,
+        }
+        evidence = api_connection_probe(contract, auth_config=auth_config)
+        if not evidence:
+            raise HTTPException(
+                409,
+                "Xvond could not safely validate these credentials using a read-only API operation",
+            )
+
+        integration_config = {
+            "base_url": base_url,
+            "validation_endpoint": str(evidence.get("endpoint") or ""),
+            "operations": operations,
+            "_xvond_validation": evidence,
+            "_xvond_discovery": {
+                "source": discovery.get("source"),
+                "docs_url": discovery.get("docs_url"),
+                "requirement_key": key,
+            },
+            **auth_config,
+        }
+        validate_integration_config("custom_api", integration_config)
+
+        current = (
+            db.query(CompanyIntegration)
+            .filter(
+                CompanyIntegration.company_id == company.id,
+                CompanyIntegration.enabled.is_(True),
+            )
+            .count()
+        )
+        service_limits.check_current(
+            db,
+            company.id,
+            "ai_agents",
+            "integrations",
+            current,
+        )
+
+        integration = CompanyIntegration(
+            company_id=company.id,
+            integration_type="custom_api",
+            name=(
+                str(discovery.get("service_hint") or "").strip()
+                or str(discovery.get("contract_title") or "").strip()
+                or key.replace("_", " ").title()
+            )[:200],
+            config=integration_config,
+            enabled=True,
+        )
+        db.add(integration)
+        db.flush()
+
+        requirement["integration_id"] = integration.id
+        requirement["integration_type"] = "custom_api"
+        requirement["integration_operations"] = operations
+        requirement["fulfillment_mode"] = "external_connection"
+        requirement["validation_required"] = True
+        requirement["requires_connection"] = True
+        requirement["status"] = "xvond_build"
+        requirement["delivery_mode"] = "compose"
+        discovery = dict(discovery)
+        discovery["status"] = "resolved"
+        discovery["credential_configured"] = True
+        requirement["discovery"] = discovery
+
+        updated["requirements"] = requirements
+        updated["setup_required"] = [
+            item
+            for item in (updated.get("setup_required") or [])
+            if normalize_requirement_key(item) != key
+        ]
+        updated, unresolved = _resolve_bound_graph_operations(
+            updated,
+            requirement_key=key,
+            operations=operations,
+        )
+        if unresolved:
+            db.delete(integration)
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "api_operation_selection_required",
+                    "requirement_key": key,
+                    "unresolved": unresolved,
+                },
+            )
+
+        if isinstance(pending, dict):
+            pending["compiled_spec"] = updated
+            pending["status"] = "built"
+            pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            _invalidate_preview_evidence(pending)
+            builder["pending_revision"] = pending
+            settings_value["employee_builder"] = builder
+            config.settings = settings_value
+            db.commit()
+            return {
+                "status": "connected_to_pending_revision",
+                "agent_id": agent.id,
+                "requirement_key": key,
+                "credential_type": auth_type,
+                "live_employee_unchanged": True,
+            }
+
+        updated, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=agent.id,
+            spec=updated,
+        )
+        builder["compiled_spec"] = updated
+        builder["delivery"] = delivery
+        builder["missing_information"] = list(updated.get("setup_required") or [])
+        _invalidate_preview_evidence(builder)
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        agent.system_prompt = build_compiled_employee_system_prompt(
+            owner_name=company.name,
+            spec=updated,
+        )
+        db.commit()
+        return {
+            "status": "connected",
+            "agent_id": agent.id,
+            "requirement_key": key,
+            "credential_type": auth_type,
+            "integration_id": integration.id,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 @router.post("/{agent_id}/connections/auto-resolve")
@@ -2176,8 +4112,7 @@ def auto_resolve_self_service_integrations(
             pending["compiled_spec"] = resolved_spec
             pending["status"] = "built"
             pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-            pending.pop("last_tested_at", None)
-            pending.pop("last_tested_compiled_at", None)
+            _invalidate_preview_evidence(pending)
             builder["pending_revision"] = pending
             settings_value["employee_builder"] = builder
             config.settings = settings_value
@@ -2199,8 +4134,7 @@ def auto_resolve_self_service_integrations(
         builder["missing_information"] = list(
             resolved_spec.get("setup_required") or []
         )
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
         settings_value["employee_builder"] = builder
         config.settings = settings_value
         agent.system_prompt = build_compiled_employee_system_prompt(
@@ -2324,31 +4258,43 @@ def bind_self_service_integration(
                 "Booking needs a two-way API so Xvond can verify availability before creating the booking",
             )
 
+        compiled_operations = requirement.get("integration_operations")
+        compiled_operations = (
+            _bounded_connection_operations(compiled_operations)
+            if isinstance(compiled_operations, dict)
+            else {}
+        )
+        configured_operations = _bounded_connection_operations(
+            integration_config.get("operations")
+            if isinstance(integration_config, dict)
+            else {}
+        )
+        supplied_operations = _bounded_connection_operations(data.operations)
         execute_required = integration_requires_operation_endpoints(
             integration.integration_type
         )
+        # A generic connector is complete when the compiler/API docs already
+        # supplied one or more concrete operations; do not force a redundant
+        # legacy /execute endpoint.
+        legacy_execute_required = (
+            execute_required
+            and not compiled_operations
+            and not configured_operations
+            and not supplied_operations
+        )
         execute_endpoint = _relative_endpoint(
             data.execute_endpoint,
-            required=execute_required,
+            required=legacy_execute_required,
         )
         availability_endpoint = _relative_endpoint(data.availability_endpoint)
         cancel_endpoint = _relative_endpoint(data.cancel_endpoint)
 
-        if key == "booking" and execute_required:
-            if not availability_endpoint:
-                raise HTTPException(
-                    400,
-                    "Booking systems need an availability endpoint so the employee can check real slots",
-                )
-            if not execute_endpoint:
-                raise HTTPException(
-                    400,
-                    "Booking systems need a booking/create endpoint",
-                )
-
         operations = integration_packaged_operations(
             integration.integration_type
         )
+        operations.update(configured_operations)
+        operations.update(compiled_operations)
+        operations.update(supplied_operations)
         if execute_endpoint:
             operations["execute"] = {"method": "POST", "endpoint": execute_endpoint}
         if availability_endpoint:
@@ -2358,6 +4304,34 @@ def bind_self_service_integration(
             }
         if cancel_endpoint:
             operations["cancel"] = {"method": "POST", "endpoint": cancel_endpoint}
+
+        # Keep default graph actions runnable without guessing across ambiguous
+        # API docs. Exact requirement matches and a single imported operation
+        # are deterministic enough to alias as the conventional execute action.
+        if "execute" not in operations:
+            alias_key = key if isinstance(operations.get(key), dict) else None
+            if alias_key is None:
+                concrete = [
+                    operation_key
+                    for operation_key, operation_value in operations.items()
+                    if isinstance(operation_value, dict)
+                ]
+                if len(concrete) == 1:
+                    alias_key = concrete[0]
+            if alias_key:
+                operations["execute"] = dict(operations[alias_key])
+
+        if key == "booking" and execute_required:
+            if not isinstance(operations.get("availability"), dict):
+                raise HTTPException(
+                    400,
+                    "Booking systems need an availability operation so the employee can check real slots",
+                )
+            if not isinstance(operations.get("execute"), dict):
+                raise HTTPException(
+                    400,
+                    "Booking systems need a booking/create operation",
+                )
 
         requirement["integration_id"] = integration.id
         requirement["integration_type"] = integration.integration_type
@@ -2370,6 +4344,25 @@ def bind_self_service_integration(
 
         compiled_value = dict(compiled_spec)
         compiled_value["requirements"] = requirements
+        compiled_value, unresolved_operations = _resolve_bound_graph_operations(
+            compiled_value,
+            requirement_key=key,
+            operations=operations,
+            operation_map=data.operation_map,
+        )
+        if unresolved_operations:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "api_operation_selection_required",
+                    "requirement_key": key,
+                    "message": (
+                        "Xvond found multiple API operations and could not safely "
+                        "choose one for every employee action."
+                    ),
+                    "unresolved": unresolved_operations,
+                },
+            )
 
         if isinstance(pending, dict):
             compiled_value["setup_required"] = [
@@ -2378,8 +4371,7 @@ def bind_self_service_integration(
                 if normalize_requirement_key(item) != key
             ]
             pending["compiled_spec"] = compiled_value
-            pending.pop("last_tested_at", None)
-            pending.pop("last_tested_compiled_at", None)
+            _invalidate_preview_evidence(pending)
             pending["status"] = "built"
             builder["pending_revision"] = pending
             settings_value["employee_builder"] = builder
@@ -2408,8 +4400,7 @@ def bind_self_service_integration(
         builder["missing_information"] = list(compiled_value.get("setup_required") or [])
         # Connection changes alter executable behavior and therefore invalidate
         # preview evidence for the previous build.
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
         settings_value["employee_builder"] = builder
         config.settings = settings_value
         agent.system_prompt = build_compiled_employee_system_prompt(
@@ -2610,8 +4601,7 @@ def save_self_service_setup_answer(
                 if normalize_requirement_key(item) != key
             ]
             pending["compiled_spec"] = compiled_value
-            pending.pop("last_tested_at", None)
-            pending.pop("last_tested_compiled_at", None)
+            _invalidate_preview_evidence(pending)
             pending["status"] = "built"
             builder["pending_revision"] = pending
             settings_value["employee_builder"] = builder
@@ -2635,8 +4625,7 @@ def save_self_service_setup_answer(
         builder["missing_information"] = list(compiled_value.get("setup_required") or [])
         # Setup data changes the employee's executable behavior. A preview from
         # before this change cannot authorize launch of the updated build.
-        builder.pop("last_tested_at", None)
-        builder.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(builder)
         settings_value["employee_builder"] = builder
         config.settings = settings_value
 
@@ -2650,6 +4639,173 @@ def save_self_service_setup_answer(
             "status": "saved",
             "agent_id": agent.id,
             "requirement_key": key,
+            "compiled_spec": self_service_spec_view(compiled_value),
+            "readiness": self_service_readiness(
+                db,
+                company=company,
+                agent=agent,
+                config=config,
+            ),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.put("/{agent_id}/permissions/{requirement_key}")
+def set_self_service_permission(
+    agent_id: int,
+    requirement_key: str,
+    data: EmployeeBuilderPermissionRequest,
+    current_user: User = Depends(require_customer_admin),
+):
+    """Set an explicit owner/admin grant for one executable employee capability."""
+
+    key = normalize_requirement_key(requirement_key)
+    mode = str(data.mode or "").strip().lower()
+    if not key or len(key) > 120:
+        raise HTTPException(400, "Permission requirement key is invalid")
+    if mode not in OWNER_PERMISSION_MODES:
+        raise HTTPException(
+            400,
+            "Permission mode must be automatic, ask_before, or never",
+        )
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Owner permissions are available only for Self-Service employees",
+            )
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        # Keep the same lock order as compilation/revision.
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+        db.refresh(agent, with_for_update=True)
+
+        settings_value = dict(config.settings or {})
+        builder = dict(settings_value.get("employee_builder") or {})
+        compiled_spec = builder.get("compiled_spec")
+        if not isinstance(compiled_spec, dict):
+            raise HTTPException(409, "Build the employee before changing permissions")
+
+        requirement = next(
+            (
+                item
+                for item in (compiled_spec.get("requirements") or [])
+                if isinstance(item, dict)
+                and normalize_requirement_key(item.get("key")) == key
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HTTPException(
+                404,
+                "Permission requirement not found in the current Job Brief",
+            )
+
+        action_plan = (
+            (compiled_spec.get("delivery") or {}).get("action_plan")
+            if isinstance(compiled_spec.get("delivery"), dict)
+            else {}
+        )
+        if not isinstance(action_plan, dict) or key not in action_plan:
+            raise HTTPException(
+                409,
+                "This requirement does not expose an executable action permission",
+            )
+
+        current_mode = "ask_before"
+        for permission in compiled_spec.get("permissions") or []:
+            if not isinstance(permission, dict):
+                continue
+            if normalize_requirement_key(permission.get("action")) == key:
+                candidate = str(
+                    permission.get("mode") or "ask_before"
+                ).strip().lower()
+                if candidate in OWNER_PERMISSION_MODES:
+                    current_mode = candidate
+                break
+
+        if agent.enabled and mode == "automatic" and current_mode != "automatic":
+            raise HTTPException(
+                409,
+                detail={
+                    "message": (
+                        "Pause this employee before granting automatic execution. "
+                        "After the permission change, preview-test the updated build "
+                        "before launching it again."
+                    ),
+                    "requires_deactivation": True,
+                },
+            )
+
+        owner_permissions = dict(builder.get("owner_permissions") or {})
+        stored_mode = str(owner_permissions.get(key) or "").strip().lower()
+        if current_mode == mode and stored_mode == mode:
+            return {
+                "status": "unchanged",
+                "agent_id": agent.id,
+                "requirement_key": key,
+                "mode": mode,
+                "compiled_spec": self_service_spec_view(compiled_spec),
+                "readiness": self_service_readiness(
+                    db,
+                    company=company,
+                    agent=agent,
+                    config=config,
+                ),
+            }
+
+        builder = _snapshot_builder_version(
+            builder,
+            reason=f"permission:{key}:{mode}",
+            capabilities=dict(config.capabilities or {}),
+        )
+        owner_permissions = dict(builder.get("owner_permissions") or {})
+        owner_permissions[key] = mode
+        builder["owner_permissions"] = owner_permissions
+
+        # Permission changes alter executable behavior and therefore define a
+        # new build identity. Restrictive changes may be applied while live;
+        # automatic escalation was blocked above and must be preview-tested.
+        builder["compiled_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        _invalidate_preview_evidence(builder)
+
+        compiled_value = _store_provisioned_spec(
+            db,
+            company_id=company.id,
+            agent=agent,
+            config=config,
+            settings=settings_value,
+            builder=builder,
+            spec=compiled_spec,
+        )
+
+        db.commit()
+        return {
+            "status": "saved",
+            "agent_id": agent.id,
+            "requirement_key": key,
+            "mode": mode,
             "compiled_spec": self_service_spec_view(compiled_value),
             "readiness": self_service_readiness(
                 db,
@@ -2699,6 +4855,7 @@ def compile_employee(
             "agent_id": agent.id,
             "compiled": True,
             "spec": compiled_spec,
+            "discovery": _compiled_discovery_summary(compiled_spec),
         }
     except HTTPException:
         db.rollback()
@@ -2948,6 +5105,245 @@ def deactivate_self_service_employee(
         db.close()
 
 
+@router.post("/{agent_id}/preview-routine")
+def preview_employee_routine(
+    agent_id: int,
+    data: EmployeeBuilderRoutinePreviewRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Safely execute one compiled routine without business side effects."""
+
+    if len(data.input_data) > 100:
+        raise HTTPException(400, "Routine preview input has too many fields")
+    if len(data.simulated_outputs) > 100 or len(data.event_payloads) > 100:
+        raise HTTPException(400, "Routine preview simulation has too many node values")
+
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(
+                409,
+                "Routine preview is available only for Self-Service employees",
+            )
+        if not _has_ai_agents_entitlement(db, company.id):
+            raise HTTPException(
+                403,
+                detail={
+                    "message": "Subscribe to preview executable employee routines",
+                    "subscription_required": True,
+                },
+            )
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+
+        settings_value = deepcopy(dict(config.settings or {}))
+        builder = dict(settings_value.get("employee_builder") or {})
+        pending = (
+            deepcopy(builder.get("pending_revision"))
+            if agent.enabled and isinstance(builder.get("pending_revision"), dict)
+            else None
+        )
+        target = pending if isinstance(pending, dict) else builder
+        spec = target.get("compiled_spec")
+        if not isinstance(spec, dict):
+            raise HTTPException(409, "Build the employee before previewing a routine")
+
+        routines = _compiled_execution_routines(spec)
+        if not routines:
+            raise HTTPException(
+                409,
+                "This employee has no executable routine; use the chat preview instead",
+            )
+
+        requested_id = normalize_requirement_key(data.routine_id)
+        routine = next(
+            (item for item in routines if item.get("id") == requested_id),
+            None,
+        )
+        if routine is None:
+            raise HTTPException(
+                404,
+                detail={
+                    "message": "Employee routine not found",
+                    "available_routines": [
+                        {
+                            "routine_id": item.get("id"),
+                            "routine_name": item.get("name"),
+                        }
+                        for item in routines
+                    ],
+                },
+            )
+
+        graph = normalize_execution_graph(routine.get("graph") or {})
+        errors = graph_contract_errors(graph, graph_agent_id=agent.id)
+        if errors:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "Routine execution contract is invalid",
+                    "routine_id": requested_id,
+                    "errors": errors,
+                },
+            )
+
+        defaults = _routine_preview_defaults(spec, routine)
+        preview_input = {
+            **defaults,
+            **deepcopy(data.input_data),
+        }
+        compiled_at = str(target.get("compiled_at") or "").strip()
+        preview_system_prompt = build_compiled_employee_system_prompt(
+            owner_name=company.name,
+            spec=spec,
+        )
+
+        def preview_ai_executor(*, prompt: str, context, node_scope: str) -> dict:
+            import json
+
+            message = str(prompt or "").strip()
+            if context is not None:
+                try:
+                    context_text = json.dumps(
+                        context,
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                except (TypeError, ValueError):
+                    context_text = str(context)
+                if context_text:
+                    message = (message + "\n\nCONTEXT:\n" + context_text)[:12000]
+            if not message:
+                raise HTTPException(409, f"Preview AI node {node_scope} has no prompt")
+
+            limits_service.check_token_limit(db, company.id)
+            selections = runtime_selections(
+                db,
+                company.id,
+                agent.provider,
+                agent.model,
+                message=message,
+            )
+            if not selections:
+                raise HTTPException(503, "No eligible AI provider/model is available")
+
+            response = None
+            selected = None
+            for candidate in selections:
+                try:
+                    response = ai_engine.generate(
+                        provider_name=candidate.provider,
+                        system_prompt=preview_system_prompt,
+                        user_message=message,
+                        model=candidate.model,
+                        tools=None,
+                    )
+                    selected = candidate
+                    break
+                except ProviderExecutionError:
+                    continue
+            if response is None or selected is None:
+                raise HTTPException(503, "AI provider is temporarily unavailable")
+
+            _record_ai_usage(
+                db,
+                company_id=company.id,
+                agent_id=agent.id,
+                selected=selected,
+                response=response,
+            )
+            return {
+                "ai_response": response.text,
+                "node_scope": node_scope,
+                "usage": {
+                    "input_tokens": response.input_tokens,
+                    "output_tokens": response.output_tokens,
+                    "total_tokens": response.total_tokens,
+                },
+            }
+
+        preview_state = {
+            **preview_input,
+            "_xvond_preview": True,
+            "_xvond_execution_key": (
+                f"preview:{company.id}:{agent.id}:{requested_id}:{compiled_at or 'unversioned'}"
+            ),
+            "_xvond_preview_outputs": deepcopy(data.simulated_outputs),
+            "_xvond_preview_event_payloads": deepcopy(data.event_payloads),
+            "_xvond_preview_ai_executor": preview_ai_executor,
+        }
+
+        result = automation_runtime.execute_step(
+            db,
+            company.id,
+            {
+                "type": "graph",
+                "agent_id": agent.id,
+                "graph": graph,
+            },
+            preview_state,
+            run_id=0,
+            step_index=0,
+        )
+
+        required, tested, complete = _routine_preview_evidence(
+            target,
+            spec=spec,
+            routine_id=requested_id,
+            record=True,
+        )
+        if isinstance(pending, dict):
+            builder["pending_revision"] = target
+            test_target = "pending_revision"
+        else:
+            builder = target
+            test_target = "current_build"
+
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.commit()
+
+        return {
+            "status": "previewed",
+            "agent_id": agent.id,
+            "routine_id": requested_id,
+            "routine_name": routine.get("name"),
+            "test_target": test_target,
+            "result": result,
+            "required_routines": required,
+            "tested_routines": tested,
+            "current_build_tested": complete,
+            "safety": {
+                "business_actions_executed": False,
+                "notifications_persisted": False,
+                "state_mutated": False,
+                "interactive_browser_executed": False,
+                "media_generated": False,
+            },
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @router.post("/{agent_id}/test")
 def test_draft_employee(
     agent_id: int,
@@ -3033,10 +5429,22 @@ def test_draft_employee(
                 response=response,
             )
             now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-            pending["last_tested_at"] = now_iso
-            pending["last_tested_compiled_at"] = pending.get("compiled_at")
+            pending["chat_tested_at"] = now_iso
+            pending["chat_tested_compiled_at"] = pending.get("compiled_at")
             pending["test_count"] = int(pending.get("test_count") or 0) + 1
-            pending["status"] = "tested"
+            if _compiled_execution_routines(pending_spec):
+                _, _, routine_complete = _routine_preview_evidence(
+                    pending,
+                    spec=pending_spec,
+                )
+                if not routine_complete:
+                    pending.pop("last_tested_at", None)
+                    pending.pop("last_tested_compiled_at", None)
+                    pending["status"] = "partially_tested"
+            else:
+                pending["last_tested_at"] = now_iso
+                pending["last_tested_compiled_at"] = pending.get("compiled_at")
+                pending["status"] = "tested"
             builder["pending_revision"] = pending
             settings_value["employee_builder"] = builder
             config.settings = settings_value
@@ -3124,9 +5532,25 @@ def test_draft_employee(
         settings_value = dict(config.settings or {})
         builder = dict(settings_value.get("employee_builder") or {})
         now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-        builder["last_tested_at"] = now_iso
-        builder["last_tested_compiled_at"] = builder.get("compiled_at")
+        builder["chat_tested_at"] = now_iso
+        builder["chat_tested_compiled_at"] = builder.get("compiled_at")
         builder["test_count"] = int(builder.get("test_count") or 0) + 1
+        current_spec = (
+            builder.get("compiled_spec")
+            if isinstance(builder.get("compiled_spec"), dict)
+            else None
+        )
+        if _compiled_execution_routines(current_spec):
+            _, _, routine_complete = _routine_preview_evidence(
+                builder,
+                spec=current_spec or {},
+            )
+            if not routine_complete:
+                builder.pop("last_tested_at", None)
+                builder.pop("last_tested_compiled_at", None)
+        else:
+            builder["last_tested_at"] = now_iso
+            builder["last_tested_compiled_at"] = builder.get("compiled_at")
         settings_value["employee_builder"] = builder
         config.settings = settings_value
         db.commit()
@@ -3214,8 +5638,7 @@ def build_pending_live_revision(
         pending.update(staged)
         pending["status"] = "built"
         pending["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-        pending.pop("last_tested_at", None)
-        pending.pop("last_tested_compiled_at", None)
+        _invalidate_preview_evidence(pending)
         builder["pending_revision"] = pending
         settings_value["employee_builder"] = builder
         config.settings = settings_value
@@ -3501,10 +5924,685 @@ def apply_pending_live_revision(
         db.close()
 
 
+def _employee_routine_rows(db, *, company_id: int, agent_id: int) -> list[AutomationWorkflow]:
+    rows = (
+        db.query(AutomationWorkflow)
+        .filter(AutomationWorkflow.company_id == int(company_id))
+        .order_by(AutomationWorkflow.id.asc())
+        .all()
+    )
+    result: list[AutomationWorkflow] = []
+    for row in rows:
+        config = row.trigger_config if isinstance(row.trigger_config, dict) else {}
+        if (
+            config.get("_xvond_source") == "self_service_employee"
+            and int(config.get("_xvond_agent_id") or 0) == int(agent_id)
+            and config.get("_xvond_graph_trigger") is True
+        ):
+            result.append(row)
+    return result
+
+
+def _runtime_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.replace(microsecond=0).isoformat() + (
+        "" if value.tzinfo is not None else "Z"
+    )
+
+
+def _run_duration_ms(run: AutomationRun | None) -> int | None:
+    if run is None or run.created_at is None:
+        return None
+    end = run.finished_at
+    if end is None and run.status in {"queued", "running"}:
+        end = datetime.utcnow()
+    if end is None:
+        return None
+    start = run.created_at
+    if start.tzinfo is not None and end.tzinfo is None:
+        start = start.replace(tzinfo=None)
+    elif start.tzinfo is None and end.tzinfo is not None:
+        end = end.replace(tzinfo=None)
+    return max(0, int((end - start).total_seconds() * 1000))
+
+
+def _run_failure_detail(run: AutomationRun | None) -> dict | None:
+    if run is None or run.status not in {"failed", "waiting_retry"}:
+        return None
+
+    output = run.output_data if isinstance(run.output_data, dict) else {}
+    trace = output.get("trace") if isinstance(output.get("trace"), dict) else {}
+    spans = trace.get("spans") if isinstance(trace.get("spans"), list) else []
+    failed_span = next(
+        (
+            item
+            for item in reversed(spans)
+            if isinstance(item, dict)
+            and str(item.get("status") or "").lower() == "failed"
+        ),
+        None,
+    )
+    if isinstance(failed_span, dict):
+        error = str(failed_span.get("error") or run.error_message or "")
+        node_id = failed_span.get("node_id")
+        if not node_id and error:
+            match = re.search(
+                r"Execution graph (?:foreach )?node ([A-Za-z0-9_.:-]+)",
+                error,
+            )
+            if match:
+                node_id = match.group(1)
+        return {
+            "step_index": failed_span.get("step_index"),
+            "step_type": failed_span.get("step_type"),
+            "node_id": node_id,
+            "phase": failed_span.get("phase"),
+            "error": error or None,
+            "duration_ms": failed_span.get("duration_ms"),
+        }
+
+    error = str(run.error_message or "")
+    match = re.search(
+        r"Execution graph (?:foreach )?node ([A-Za-z0-9_.:-]+)",
+        error,
+    )
+    return {
+        "step_index": None,
+        "step_type": None,
+        "node_id": match.group(1) if match else None,
+        "phase": None,
+        "error": error or None,
+        "duration_ms": None,
+    }
+
+
+def _run_retry_state(run: AutomationRun | None) -> dict | None:
+    if run is None or run.status != "failed":
+        return None
+
+    output = run.output_data if isinstance(run.output_data, dict) else {}
+    checkpoint = (
+        output.get("retry_checkpoint")
+        if isinstance(output.get("retry_checkpoint"), dict)
+        else None
+    )
+    if checkpoint is None:
+        return {
+            "safe": False,
+            "run_id": run.id,
+            "reason": (
+                "This run has no durable node checkpoint. Start a new run instead "
+                "of replaying uncertain completed work."
+            ),
+            "node_id": None,
+            "node_type": None,
+            "node_scope": None,
+            "attempts": int(output.get("retry_attempts") or 0),
+        }
+
+    safe = bool(checkpoint.get("safe"))
+    reason = str(checkpoint.get("reason") or "").strip()
+    if safe and not reason:
+        reason = (
+            "Retry will resume from the last durable node checkpoint without "
+            "replaying completed nodes."
+        )
+    elif not safe and not reason:
+        reason = "Xvond cannot prove that replaying the failed node is safe."
+
+    return {
+        "safe": safe,
+        "run_id": run.id,
+        "reason": reason,
+        "node_id": checkpoint.get("failed_node_id"),
+        "node_type": checkpoint.get("failed_node_type"),
+        "node_scope": checkpoint.get("failed_node_scope"),
+        "attempts": int(output.get("retry_attempts") or 0),
+    }
+
+
+def _routine_health_summary(recent_runs: list[AutomationRun]) -> dict:
+    runs = list(recent_runs or [])
+    successes = [run for run in runs if run.status == "success"]
+    failures = [run for run in runs if run.status == "failed"]
+    rejected = [run for run in runs if run.status == "rejected"]
+    terminal_count = len(successes) + len(failures) + len(rejected)
+
+    consecutive_failures = 0
+    for run in runs:
+        if run.status == "failed":
+            consecutive_failures += 1
+            continue
+        if run.status in {"success", "rejected"}:
+            break
+
+    success_rate = (
+        round((len(successes) / terminal_count) * 100, 1)
+        if terminal_count
+        else None
+    )
+    last_success = successes[0] if successes else None
+    last_failure = failures[0] if failures else None
+
+    return {
+        "window_size": len(runs),
+        "success_count": len(successes),
+        "failure_count": len(failures),
+        "rejected_count": len(rejected),
+        "success_rate_percent": success_rate,
+        "consecutive_failures": consecutive_failures,
+        "last_success_at": _runtime_datetime(
+            last_success.finished_at or last_success.created_at
+        ) if last_success is not None else None,
+        "last_failure_at": _runtime_datetime(
+            last_failure.finished_at or last_failure.created_at
+        ) if last_failure is not None else None,
+    }
+
+
+def _routine_operational_state(
+    *,
+    workflow: AutomationWorkflow,
+    recent_runs: list[AutomationRun],
+    employee_enabled: bool,
+) -> dict:
+    latest_run = recent_runs[0] if recent_runs else None
+    trigger_config = (
+        workflow.trigger_config
+        if isinstance(workflow.trigger_config, dict)
+        else {}
+    )
+
+    if not employee_enabled:
+        state = "employee_paused"
+    elif not workflow.enabled:
+        state = "paused"
+    elif latest_run is None:
+        state = "never_run"
+    elif latest_run.status in {"queued", "running"}:
+        state = "running"
+    elif latest_run.status == "waiting_time":
+        state = "waiting_time"
+    elif latest_run.status == "waiting_event":
+        state = "waiting_event"
+    elif latest_run.status == "waiting_approval":
+        state = "waiting_approval"
+    elif latest_run.status == "waiting_retry":
+        state = "recovering"
+    elif latest_run.status == "failed":
+        state = "needs_attention"
+    elif latest_run.status == "success":
+        state = "healthy"
+    elif latest_run.status == "rejected":
+        state = "rejected"
+    else:
+        state = str(latest_run.status or "unknown")
+
+    next_scheduled_at = None
+    schedule = trigger_config.get("schedule")
+    if (
+        workflow.trigger_type == "schedule"
+        and isinstance(schedule, dict)
+        and workflow.enabled
+        and employee_enabled
+    ):
+        schedule_start = workflow.created_at
+        resumed_at = str(trigger_config.get("_xvond_resumed_at") or "").strip()
+        if resumed_at:
+            try:
+                schedule_start = datetime.fromisoformat(
+                    resumed_at.replace("Z", "+00:00")
+                )
+            except ValueError:
+                schedule_start = workflow.created_at
+        try:
+            next_slot = next_schedule_slot(
+                schedule,
+                after=datetime.utcnow(),
+                created_at=schedule_start,
+            )
+            next_scheduled_at = _runtime_datetime(next_slot)
+        except (ScheduleConfigError, ValueError):
+            next_scheduled_at = None
+
+    waiting = None
+    if latest_run is not None and latest_run.status == "waiting_time":
+        waiting = {
+            "type": "time",
+            "resume_at": _runtime_datetime(latest_run.resume_at),
+        }
+    elif latest_run is not None and latest_run.status == "waiting_event":
+        waiting = {
+            "type": "event",
+            "event_name": latest_run.resume_event_name,
+        }
+    elif latest_run is not None and latest_run.status == "waiting_approval":
+        approval = (
+            (latest_run.output_data or {}).get("approval")
+            if isinstance(latest_run.output_data, dict)
+            else None
+        )
+        waiting = {
+            "type": "approval",
+            "request_id": (
+                approval.get("request_id")
+                if isinstance(approval, dict)
+                else None
+            ),
+            "action_type": (
+                approval.get("action_type")
+                if isinstance(approval, dict)
+                else None
+            ),
+        }
+    elif latest_run is not None and latest_run.status == "waiting_retry":
+        retry_meta = (
+            (latest_run.output_data or {}).get("retry")
+            if isinstance(latest_run.output_data, dict)
+            else None
+        )
+        waiting = {
+            "type": "retry",
+            "resume_at": _runtime_datetime(latest_run.resume_at),
+            "attempt": (
+                retry_meta.get("attempt")
+                if isinstance(retry_meta, dict)
+                else None
+            ),
+            "max_attempts": (
+                retry_meta.get("max_attempts")
+                if isinstance(retry_meta, dict)
+                else None
+            ),
+            "last_error": latest_run.error_message,
+        }
+
+    failure = _run_failure_detail(latest_run)
+    return {
+        "operational_state": state,
+        "next_scheduled_at": next_scheduled_at,
+        "waiting": waiting,
+        "health": _routine_health_summary(recent_runs),
+        "failure": failure,
+        "retry": _run_retry_state(latest_run),
+        "last_run": (
+            {
+                "id": latest_run.id,
+                "status": latest_run.status,
+                "created_at": _runtime_datetime(latest_run.created_at),
+                "finished_at": _runtime_datetime(latest_run.finished_at),
+                "duration_ms": _run_duration_ms(latest_run),
+                "error_message": latest_run.error_message,
+            }
+            if latest_run is not None
+            else None
+        ),
+    }
+
+
+def _workflow_routine_id(workflow: AutomationWorkflow) -> str:
+    config = workflow.trigger_config if isinstance(workflow.trigger_config, dict) else {}
+    return normalize_requirement_key(config.get("_xvond_routine_id") or "primary") or "primary"
+
+
+def _sync_routine_delivery_state(
+    config: AgentConfig,
+    *,
+    workflow: AutomationWorkflow,
+    routine_id: str,
+    enabled: bool,
+) -> None:
+    settings_value = deepcopy(dict(config.settings or {}))
+    builder = dict(settings_value.get("employee_builder") or {})
+    compiled_spec = (
+        deepcopy(builder.get("compiled_spec"))
+        if isinstance(builder.get("compiled_spec"), dict)
+        else None
+    )
+    if not isinstance(compiled_spec, dict):
+        return
+
+    delivery = (
+        deepcopy(compiled_spec.get("delivery"))
+        if isinstance(compiled_spec.get("delivery"), dict)
+        else {}
+    )
+    status = "ready" if enabled else "disabled"
+
+    graph_triggers = [
+        dict(item)
+        for item in (delivery.get("graph_triggers") or [])
+        if isinstance(item, dict)
+    ]
+    for item in graph_triggers:
+        stored_id = normalize_requirement_key(item.get("routine_id") or "primary") or "primary"
+        if stored_id == routine_id or int(item.get("workflow_id") or 0) == int(workflow.id):
+            item["status"] = status
+    if graph_triggers:
+        delivery["graph_triggers"] = graph_triggers
+
+    graph_trigger = delivery.get("graph_trigger")
+    if isinstance(graph_trigger, dict):
+        primary = dict(graph_trigger)
+        stored_id = normalize_requirement_key(primary.get("routine_id") or "primary") or "primary"
+        if stored_id == routine_id or int(primary.get("workflow_id") or 0) == int(workflow.id):
+            primary["status"] = status
+        delivery["graph_trigger"] = primary
+
+    compiled_spec["delivery"] = delivery
+    builder["compiled_spec"] = compiled_spec
+    builder["delivery"] = deepcopy(delivery)
+    settings_value["employee_builder"] = builder
+    config.settings = settings_value
+
+
+@router.get("/{agent_id}/routines")
+def customer_employee_routines(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        company = _company_or_404(db, company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Routine controls are available only for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+
+        workflow_rows = _employee_routine_rows(
+            db,
+            company_id=company_id,
+            agent_id=agent.id,
+        )
+        recent_runs_by_workflow: dict[int, list[AutomationRun]] = {}
+        for workflow in workflow_rows:
+            recent_runs_by_workflow[workflow.id] = (
+                db.query(AutomationRun)
+                .filter(
+                    AutomationRun.company_id == company_id,
+                    AutomationRun.workflow_id == workflow.id,
+                )
+                .order_by(AutomationRun.id.desc())
+                .limit(20)
+                .all()
+            )
+
+        routines = []
+        for workflow in workflow_rows:
+            trigger_config = (
+                workflow.trigger_config
+                if isinstance(workflow.trigger_config, dict)
+                else {}
+            )
+            operational = _routine_operational_state(
+                workflow=workflow,
+                recent_runs=recent_runs_by_workflow.get(workflow.id) or [],
+                employee_enabled=bool(agent.enabled),
+            )
+            routines.append(
+                {
+                    "routine_id": _workflow_routine_id(workflow),
+                    "routine_name": trigger_config.get("_xvond_routine_name") or workflow.name,
+                    "workflow_id": workflow.id,
+                    "trigger_type": workflow.trigger_type,
+                    "enabled": bool(workflow.enabled),
+                    "paused_at": trigger_config.get("_xvond_paused_at"),
+                    "resumed_at": trigger_config.get("_xvond_resumed_at"),
+                    "schedule": (
+                        deepcopy(trigger_config.get("schedule"))
+                        if isinstance(trigger_config.get("schedule"), dict)
+                        else None
+                    ),
+                    **operational,
+                }
+            )
+
+        return {
+            "agent_id": agent.id,
+            "employee_enabled": bool(agent.enabled),
+            "routines": routines,
+        }
+    finally:
+        db.close()
+
+
+@router.put("/{agent_id}/routines/{routine_id}")
+def customer_employee_set_routine_state(
+    agent_id: int,
+    routine_id: str,
+    data: EmployeeBuilderRoutineStateRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    normalized_routine = normalize_requirement_key(routine_id)
+    if not normalized_routine:
+        raise HTTPException(400, "Routine id is invalid")
+
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        company = _company_or_404(db, company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Routine controls are available only for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+        config = _employee_config_or_404(db, agent)
+        db.refresh(config, with_for_update=True)
+
+        workflow = next(
+            (
+                row
+                for row in _employee_routine_rows(
+                    db,
+                    company_id=company_id,
+                    agent_id=agent.id,
+                )
+                if _workflow_routine_id(row) == normalized_routine
+            ),
+            None,
+        )
+        if workflow is None:
+            raise HTTPException(404, "Employee routine not found")
+
+        trigger_config = dict(workflow.trigger_config or {})
+        now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        workflow.enabled = bool(data.enabled)
+        if data.enabled:
+            trigger_config["_xvond_resumed_at"] = now_iso
+            trigger_config.pop("_xvond_paused_at", None)
+        else:
+            trigger_config["_xvond_paused_at"] = now_iso
+        workflow.trigger_config = trigger_config
+
+        _sync_routine_delivery_state(
+            config,
+            workflow=workflow,
+            routine_id=normalized_routine,
+            enabled=bool(data.enabled),
+        )
+        db.commit()
+
+        return {
+            "status": "resumed" if data.enabled else "paused",
+            "agent_id": agent.id,
+            "routine_id": normalized_routine,
+            "routine_name": trigger_config.get("_xvond_routine_name") or workflow.name,
+            "workflow_id": workflow.id,
+            "trigger_type": workflow.trigger_type,
+            "enabled": bool(workflow.enabled),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/routines/{routine_id}/retry")
+def customer_employee_retry_routine(
+    agent_id: int,
+    routine_id: str,
+    data: EmployeeBuilderRoutineRetryRequest,
+    current_user: User = Depends(require_customer_manager),
+):
+    normalized_routine = normalize_requirement_key(routine_id)
+    if not normalized_routine:
+        raise HTTPException(400, "Routine id is invalid")
+
+    db = SessionLocal()
+    try:
+        company_id = current_user.company_id
+        if company_id is None:
+            raise HTTPException(403, "Customer company required")
+        company = _company_or_404(db, company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Routine retry is available only for Self-Service employees")
+
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company_id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "Employee not found")
+        if not agent.enabled:
+            raise HTTPException(409, "Launch this employee before retrying its routine")
+
+        workflow = next(
+            (
+                row
+                for row in _employee_routine_rows(
+                    db,
+                    company_id=company_id,
+                    agent_id=agent.id,
+                )
+                if _workflow_routine_id(row) == normalized_routine
+            ),
+            None,
+        )
+        if workflow is None:
+            raise HTTPException(404, "Employee routine not found")
+        db.refresh(workflow, with_for_update=True)
+        if not workflow.enabled:
+            raise HTTPException(409, "Resume this routine before retrying it")
+
+        latest_run = (
+            db.query(AutomationRun)
+            .filter(
+                AutomationRun.company_id == company_id,
+                AutomationRun.workflow_id == workflow.id,
+            )
+            .order_by(AutomationRun.id.desc())
+            .with_for_update()
+            .first()
+        )
+        if latest_run is None:
+            raise HTTPException(409, "This routine has no run to retry")
+        if int(latest_run.id) != int(data.run_id):
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "A newer routine run exists. Refresh before retrying.",
+                    "latest_run_id": latest_run.id,
+                },
+            )
+        if latest_run.status != "failed":
+            raise HTTPException(409, "Only a failed routine run can be retried")
+
+        retry_state = _run_retry_state(latest_run)
+        if not retry_state or not retry_state.get("safe"):
+            raise HTTPException(
+                409,
+                detail={
+                    "message": (
+                        (retry_state or {}).get("reason")
+                        or "This failed run cannot be retried safely"
+                    ),
+                    "retry": retry_state,
+                },
+            )
+
+        try:
+            retried = automation_runtime.retry_failed(
+                db,
+                company_id=company_id,
+                workflow=workflow,
+                run=latest_run,
+            )
+        except Exception as exc:
+            db.rollback()
+            current = db.get(AutomationRun, int(data.run_id))
+            if current is not None and current.status == "failed":
+                raise HTTPException(
+                    409,
+                    detail={
+                        "message": current.error_message or str(exc),
+                        "run_id": current.id,
+                        "retry": _run_retry_state(current),
+                    },
+                ) from exc
+            if isinstance(exc, ValueError):
+                raise HTTPException(409, str(exc)) from exc
+            raise
+
+        return {
+            "status": retried.status,
+            "agent_id": agent.id,
+            "routine_id": normalized_routine,
+            "routine_name": (
+                (workflow.trigger_config or {}).get("_xvond_routine_name")
+                or workflow.name
+            ),
+            "workflow_id": workflow.id,
+            "run_id": retried.id,
+            "output_data": retried.output_data,
+            "error_message": retried.error_message,
+            "finished_at": retried.finished_at,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @router.get("/{agent_id}/webhook")
 def customer_employee_webhook(
     agent_id: int,
     current_user: User = Depends(require_customer_manager),
+    routine_id: str | None = None,
 ):
     db = SessionLocal()
     try:
@@ -3529,9 +6627,52 @@ def customer_employee_webhook(
         builder = (config.settings or {}).get("employee_builder") or {}
         spec = builder.get("compiled_spec") if isinstance(builder, dict) else None
         delivery = spec.get("delivery") if isinstance(spec, dict) else None
-        graph_trigger = delivery.get("graph_trigger") if isinstance(delivery, dict) else None
-        if not isinstance(graph_trigger, dict) or graph_trigger.get("trigger_type") != "webhook":
-            raise HTTPException(404, "This employee does not use a webhook trigger")
+        graph_triggers = (
+            [
+                item
+                for item in (delivery.get("graph_triggers") or [])
+                if isinstance(item, dict)
+            ]
+            if isinstance(delivery, dict)
+            and isinstance(delivery.get("graph_triggers"), list)
+            else []
+        )
+        if not graph_triggers and isinstance(delivery, dict):
+            legacy = delivery.get("graph_trigger")
+            if isinstance(legacy, dict):
+                graph_triggers = [legacy]
+
+        webhook_triggers = [
+            item for item in graph_triggers
+            if item.get("trigger_type") == "webhook"
+        ]
+        requested_routine = normalize_requirement_key(routine_id) if routine_id else ""
+        if requested_routine:
+            webhook_triggers = [
+                item
+                for item in webhook_triggers
+                if normalize_requirement_key(item.get("routine_id") or "primary")
+                == requested_routine
+            ]
+
+        if not webhook_triggers:
+            raise HTTPException(404, "This employee does not use the requested webhook routine")
+        if not requested_routine and len(webhook_triggers) > 1:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "This employee has multiple webhook routines; choose routine_id.",
+                    "routines": [
+                        {
+                            "routine_id": item.get("routine_id") or "primary",
+                            "routine_name": item.get("routine_name") or "Webhook routine",
+                        }
+                        for item in webhook_triggers
+                    ],
+                },
+            )
+
+        graph_trigger = webhook_triggers[0]
         if graph_trigger.get("status") != "ready":
             raise HTTPException(409, "Webhook trigger is not ready yet")
 
@@ -3553,6 +6694,8 @@ def customer_employee_webhook(
 
         return {
             "workflow_id": workflow.id,
+            "routine_id": graph_trigger.get("routine_id") or "primary",
+            "routine_name": graph_trigger.get("routine_name") or workflow.name,
             "url": f"{settings.PUBLIC_BASE_URL}/webhooks/automation/{workflow.id}",
             "header": "X-Xvond-Webhook-Key",
             "key": automation_webhook_key(
@@ -3598,6 +6741,7 @@ def customer_employee_automation_runs(
         )
         workflow_ids = []
         workflow_names = {}
+        workflow_routines = {}
         for workflow in workflows:
             config = workflow.trigger_config if isinstance(workflow.trigger_config, dict) else {}
             if (
@@ -3606,6 +6750,12 @@ def customer_employee_automation_runs(
             ):
                 workflow_ids.append(workflow.id)
                 workflow_names[workflow.id] = workflow.name
+                workflow_routines[workflow.id] = {
+                    "routine_id": config.get("_xvond_routine_id") or (
+                        "primary" if config.get("_xvond_graph_trigger") is True else None
+                    ),
+                    "routine_name": config.get("_xvond_routine_name"),
+                }
 
         if not workflow_ids:
             return {"agent_id": agent.id, "runs": []}
@@ -3627,6 +6777,12 @@ def customer_employee_automation_runs(
                     "id": run.id,
                     "workflow_id": run.workflow_id,
                     "workflow_name": workflow_names.get(run.workflow_id),
+                    "routine_id": (
+                        workflow_routines.get(run.workflow_id) or {}
+                    ).get("routine_id"),
+                    "routine_name": (
+                        workflow_routines.get(run.workflow_id) or {}
+                    ).get("routine_name"),
                     "status": run.status,
                     "input_data": run.input_data,
                     "output_data": run.output_data,
@@ -3669,7 +6825,8 @@ def customer_employee_run_graph(
         if not agent.enabled:
             raise HTTPException(409, "Launch this employee before running its live execution graph")
 
-        workflow = None
+        requested_routine = normalize_requirement_key(data.routine_id) if data.routine_id else ""
+        candidates: list[AutomationWorkflow] = []
         for row in (
             db.query(AutomationWorkflow)
             .filter(
@@ -3681,16 +6838,45 @@ def customer_employee_run_graph(
             .all()
         ):
             config = row.trigger_config if isinstance(row.trigger_config, dict) else {}
+            stored_routine = normalize_requirement_key(
+                config.get("_xvond_routine_id") or "primary"
+            )
             if (
                 config.get("_xvond_source") == "self_service_employee"
                 and int(config.get("_xvond_agent_id") or 0) == int(agent_id)
                 and config.get("_xvond_graph_trigger") is True
+                and (not requested_routine or stored_routine == requested_routine)
             ):
-                workflow = row
-                break
+                candidates.append(row)
 
-        if workflow is None:
-            raise HTTPException(409, "This employee does not have a ready manual execution graph")
+        if not candidates:
+            raise HTTPException(409, "This employee does not have the requested ready manual routine")
+        if not requested_routine and len(candidates) > 1:
+            raise HTTPException(
+                409,
+                detail={
+                    "message": "This employee has multiple manual routines; choose routine_id.",
+                    "routines": [
+                        {
+                            "routine_id": (
+                                (row.trigger_config or {}).get("_xvond_routine_id")
+                                or "primary"
+                            ),
+                            "routine_name": (
+                                (row.trigger_config or {}).get("_xvond_routine_name")
+                                or row.name
+                            ),
+                        }
+                        for row in candidates
+                    ],
+                },
+            )
+        workflow = candidates[0]
+        workflow_config = (
+            workflow.trigger_config
+            if isinstance(workflow.trigger_config, dict)
+            else {}
+        )
 
         try:
             run = automation_runtime.execute(
@@ -3705,6 +6891,8 @@ def customer_employee_run_graph(
         return {
             "id": run.id,
             "workflow_id": run.workflow_id,
+            "routine_id": workflow_config.get("_xvond_routine_id") or "primary",
+            "routine_name": workflow_config.get("_xvond_routine_name") or workflow.name,
             "status": run.status,
             "output_data": run.output_data,
             "error_message": run.error_message,

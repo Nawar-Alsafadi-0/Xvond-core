@@ -1,0 +1,364 @@
+from __future__ import annotations
+
+import json
+import re
+from typing import Any
+from urllib.parse import urlparse
+
+import yaml
+
+from backend.app.core.http_security import safe_http_request
+
+
+MAX_OPENAPI_RESPONSE_BYTES = 1_000_000
+MAX_OPENAPI_OPERATIONS = 100
+_ALLOWED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+_PATH_PARAM_RE = re.compile(r"{([A-Za-z_][A-Za-z0-9_]{0,63})}")
+_OPERATION_NAME_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _operation_name(operation_id: Any, method: str, path: str, used: set[str]) -> str:
+    raw = str(operation_id or "").strip()
+    if raw:
+        raw = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", raw).lower()
+        base = _OPERATION_NAME_RE.sub("_", raw).strip("_")[:80]
+    else:
+        base = _OPERATION_NAME_RE.sub("_", f"{method}_{path}").strip("_")[:80]
+    if not base or not re.fullmatch(r"[a-z0-9][a-z0-9_]{0,79}", base):
+        base = "operation"
+    candidate = base
+    suffix = 2
+    while candidate in used:
+        candidate = f"{base[:72]}_{suffix}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
+
+
+def _normalized_auth_schemes(document: dict) -> list[dict]:
+    components = document.get("components") if isinstance(document.get("components"), dict) else {}
+    schemes = components.get("securitySchemes") if isinstance(components.get("securitySchemes"), dict) else {}
+    result: list[dict] = []
+    for raw_name, raw in list(schemes.items())[:20]:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw_name or "").strip()[:80]
+        scheme_type = str(raw.get("type") or "").strip().lower()
+        item: dict[str, Any] | None = None
+        if scheme_type == "apikey":
+            location = str(raw.get("in") or "").strip().lower()
+            param_name = str(raw.get("name") or "").strip()[:80]
+            if location == "header" and param_name:
+                item = {
+                    "name": name,
+                    "auth_type": "api_key_header",
+                    "api_key_name": param_name,
+                }
+            elif location == "query" and param_name:
+                item = {
+                    "name": name,
+                    "auth_type": "api_key_query",
+                    "api_key_name": param_name,
+                }
+        elif scheme_type == "http":
+            scheme = str(raw.get("scheme") or "").strip().lower()
+            if scheme == "bearer":
+                item = {"name": name, "auth_type": "bearer"}
+            elif scheme == "basic":
+                item = {"name": name, "auth_type": "basic"}
+        elif scheme_type == "oauth2":
+            flows = raw.get("flows") if isinstance(raw.get("flows"), dict) else {}
+            supported_flows: list[dict] = []
+            for flow_name in ("authorizationCode", "clientCredentials"):
+                flow = flows.get(flow_name)
+                if not isinstance(flow, dict):
+                    continue
+                authorization_url = str(flow.get("authorizationUrl") or "").strip()
+                token_url = str(flow.get("tokenUrl") or "").strip()
+                if flow_name == "authorizationCode" and not authorization_url:
+                    continue
+                if not token_url:
+                    continue
+                auth_parsed = urlparse(authorization_url) if authorization_url else None
+                token_parsed = urlparse(token_url)
+                if (
+                    token_parsed.scheme.lower() != "https"
+                    or not token_parsed.hostname
+                    or token_parsed.username
+                    or token_parsed.password
+                ):
+                    continue
+                if auth_parsed is not None and (
+                    auth_parsed.scheme.lower() != "https"
+                    or not auth_parsed.hostname
+                    or auth_parsed.username
+                    or auth_parsed.password
+                ):
+                    continue
+                scopes = flow.get("scopes") if isinstance(flow.get("scopes"), dict) else {}
+                supported_flows.append({
+                    "flow": "authorization_code" if flow_name == "authorizationCode" else "client_credentials",
+                    "authorization_url": authorization_url,
+                    "token_url": token_url,
+                    "scopes": list(scopes.keys())[:50],
+                })
+            if supported_flows:
+                item = {
+                    "name": name,
+                    "auth_type": "oauth",
+                    "flows": supported_flows,
+                }
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+def _static_https_server_url(document: dict) -> str | None:
+    servers = document.get("servers")
+    if not isinstance(servers, list):
+        return None
+    for item in servers[:10]:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip().rstrip("/")
+        if not url or "{" in url or "}" in url:
+            continue
+        parsed = urlparse(url)
+        if parsed.scheme.lower() == "https" and parsed.hostname and not parsed.username and not parsed.password:
+            return url
+    return None
+
+
+def normalize_openapi_document(document: dict) -> dict:
+    if not isinstance(document, dict):
+        raise ValueError("OpenAPI document must be an object")
+    if not str(document.get("openapi") or document.get("swagger") or "").strip():
+        raise ValueError("Document is not an OpenAPI/Swagger contract")
+
+    paths = document.get("paths")
+    if not isinstance(paths, dict) or not paths:
+        raise ValueError("OpenAPI contract has no paths")
+
+    operations: dict[str, dict] = {}
+    used: set[str] = set()
+
+    for raw_path, path_item in paths.items():
+        path = str(raw_path or "").strip()
+        if (
+            not path.startswith("/")
+            or path.startswith("//")
+            or len(path) > 500
+            or not isinstance(path_item, dict)
+        ):
+            continue
+
+        placeholders = re.findall(r"{([^{}]+)}", path)
+        if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) for name in placeholders):
+            continue
+
+        inherited_parameters = path_item.get("parameters")
+        inherited_parameters = inherited_parameters if isinstance(inherited_parameters, list) else []
+
+        for raw_method, operation in path_item.items():
+            method = str(raw_method or "").strip().upper()
+            if method not in _ALLOWED_METHODS or not isinstance(operation, dict):
+                continue
+
+            parameters = [*inherited_parameters]
+            if isinstance(operation.get("parameters"), list):
+                parameters.extend(operation["parameters"])
+
+            query_parameters = [
+                item
+                for item in parameters
+                if isinstance(item, dict)
+                and str(item.get("in") or "").strip().lower() == "query"
+            ]
+            has_query_parameters = bool(query_parameters)
+            required_query_params = [
+                str(item.get("name") or "").strip()
+                for item in query_parameters
+                if item.get("required") is True
+                and re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_.-]{0,63}",
+                    str(item.get("name") or "").strip(),
+                )
+            ]
+            has_request_body = isinstance(operation.get("requestBody"), dict)
+
+            if method == "GET":
+                input_mode = "query"
+            elif has_request_body:
+                input_mode = "json"
+            elif has_query_parameters:
+                input_mode = "query"
+            else:
+                input_mode = "none"
+
+            name = _operation_name(
+                operation.get("operationId"),
+                method,
+                path,
+                used,
+            )
+            operations[name] = {
+                "method": method,
+                "endpoint": path,
+                "input_mode": input_mode,
+                "timeout": 15,
+                "path_params": list(dict.fromkeys(placeholders)),
+                "required_query_params": list(dict.fromkeys(required_query_params)),
+                "description": str(
+                    operation.get("summary")
+                    or operation.get("description")
+                    or ""
+                ).strip()[:500],
+            }
+            if len(operations) >= MAX_OPENAPI_OPERATIONS:
+                break
+        if len(operations) >= MAX_OPENAPI_OPERATIONS:
+            break
+
+    if not operations:
+        raise ValueError("OpenAPI contract has no supported HTTP operations")
+
+    info = document.get("info") if isinstance(document.get("info"), dict) else {}
+    return {
+        "version": 1,
+        "title": str(info.get("title") or "Imported API").strip()[:200],
+        "openapi_version": str(document.get("openapi") or document.get("swagger") or "").strip()[:40],
+        "base_url": _static_https_server_url(document),
+        "auth_schemes": _normalized_auth_schemes(document),
+        "operations": operations,
+    }
+
+
+def parse_openapi_text(value: str) -> dict:
+    text = str(value or "")
+    if not text.strip():
+        raise ValueError("OpenAPI document is empty")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            parsed = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise ValueError("OpenAPI document is not valid JSON or YAML") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("OpenAPI document must decode to an object")
+    return normalize_openapi_document(parsed)
+
+
+def fetch_openapi_contract(url: str) -> dict:
+    result = safe_http_request(
+        url=str(url or "").strip(),
+        method="GET",
+        headers={
+            "Accept": "application/json, application/yaml, application/x-yaml, text/yaml, text/plain",
+            "User-Agent": "Xvond-OpenAPI-Importer/1.0",
+        },
+        timeout=15,
+        max_response_bytes=MAX_OPENAPI_RESPONSE_BYTES,
+    )
+    status = int(result.get("status_code") or 0)
+    if not 200 <= status < 300:
+        raise ValueError(f"OpenAPI URL returned HTTP {status}")
+    if result.get("truncated"):
+        raise ValueError("OpenAPI document is too large")
+    return parse_openapi_text(str(result.get("response") or ""))
+
+
+_OPENAPI_DISCOVERY_SUFFIXES = (
+    "openapi.json",
+    "swagger.json",
+    "api/openapi.json",
+    "openapi.yaml",
+    "swagger.yaml",
+)
+
+
+def _https_authority(value: str) -> tuple[str, int] | None:
+    parsed = urlparse(str(value or "").strip())
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        return None
+    return str(parsed.hostname).rstrip(".").lower(), int(parsed.port or 443)
+
+
+def openapi_discovery_urls(base_url: str) -> list[str]:
+    """Return bounded same-host candidate documentation URLs for a configured API."""
+
+    raw = str(base_url or "").strip().rstrip("/")
+    parsed = urlparse(raw)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("API base URL must be a plain public HTTPS URL")
+
+    origin = f"https://{parsed.netloc}"
+    roots = [raw]
+    if origin.rstrip("/") != raw:
+        roots.append(origin.rstrip("/"))
+
+    result: list[str] = []
+    for root in roots:
+        for suffix in _OPENAPI_DISCOVERY_SUFFIXES:
+            candidate = root.rstrip("/") + "/" + suffix
+            if candidate not in result:
+                result.append(candidate)
+            if len(result) >= 10:
+                return result
+    return result
+
+
+def discover_openapi_contract(base_url: str) -> dict:
+    """Probe common OpenAPI locations on the configured host only."""
+
+    configured_authority = _https_authority(base_url)
+    if configured_authority is None:
+        raise ValueError("API base URL must be a plain public HTTPS URL")
+    attempts: list[str] = []
+
+    for url in openapi_discovery_urls(base_url):
+        attempts.append(url)
+        try:
+            result = safe_http_request(
+                url=url,
+                method="GET",
+                headers={
+                    "Accept": "application/json, application/yaml, application/x-yaml, text/yaml, text/plain",
+                    "User-Agent": "Xvond-OpenAPI-Discovery/1.0",
+                },
+                timeout=8,
+                max_response_bytes=MAX_OPENAPI_RESPONSE_BYTES,
+            )
+        except Exception:
+            continue
+
+        status = int(result.get("status_code") or 0)
+        if not 200 <= status < 300 or result.get("truncated"):
+            continue
+
+        try:
+            contract = parse_openapi_text(str(result.get("response") or ""))
+        except ValueError:
+            continue
+
+        discovered_base = str(contract.get("base_url") or "").strip()
+        if discovered_base:
+            if _https_authority(discovered_base) != configured_authority:
+                # Discovery must never silently move execution to another
+                # host or port.
+                contract["base_url"] = None
+
+        return {
+            **contract,
+            "discovery_url": url,
+            "attempted_urls": attempts,
+        }
+
+    raise ValueError("No OpenAPI/Swagger contract was found on the configured API host")

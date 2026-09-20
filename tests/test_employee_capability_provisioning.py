@@ -1,5 +1,6 @@
 """Compile/provision regressions against real persisted employee/action records."""
 from copy import deepcopy
+from datetime import datetime
 import json
 from pathlib import Path
 import subprocess
@@ -18,13 +19,19 @@ from backend.app.core.database.base import Base
 from backend.app.models.company import Company
 from backend.app.models.company_module import CompanyModule
 from backend.app.models.company_profile import CompanyProfile
-from backend.app.modules.ai_agent.employee_capability_builder import build_managed_action_config
+from backend.app.modules.ai_agent.employee_capability_builder import (
+    build_managed_action_config,
+    provision_compiled_capabilities,
+)
 from backend.app.modules.ai_agent.employee_compiler import normalize_compiled_spec
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent, AIUsage
 from backend.app.modules.automation.models import AutomationRun, AutomationWorkflow
+from backend.app.modules.automation.runtime import automation_runtime
 from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.tools.business_models import ActionRequest
+from backend.app.modules.tools.action_request import _integration_call
 from backend.app.modules.tools.models import AgentToolAssignment
 from backend.app.modules.tools.executor import ToolExecutor
 from backend.app.modules.tools.workflow_action_request import WorkflowActionRequestTool
@@ -99,11 +106,17 @@ def _assignment(db):
     return db.query(AgentToolAssignment).filter_by(agent_id=1, tool_name="action_request").one()
 
 
-def _cache(factory, spec):
+def _cache(factory, spec, owner_permissions=None):
     with factory() as db:
         config = db.query(AgentConfig).filter_by(agent_id=1).one()
         settings = deepcopy(config.settings)
-        settings["employee_builder"].update({"compiled_spec": spec, "compiled_at": "original-time"})
+        settings["employee_builder"].update(
+            {
+                "compiled_spec": spec,
+                "compiled_at": "original-time",
+                "owner_permissions": dict(owner_permissions or {}),
+            }
+        )
         config.settings = settings
         db.commit()
 
@@ -331,7 +344,7 @@ def test_runtime_ready_generated_plan_is_exposed_to_employee(database):
 
 
 @pytest.mark.parametrize("mode,enabled,confirmation", [
-    ("automatic", True, False), ("ask_before", True, True), ("never", False, True),
+    ("automatic", True, False), ("ask_before", True, True), ("never", True, True),
 ])
 def test_generated_contract_respects_exact_permission(mode, enabled, confirmation):
     action = build_managed_action_config(requirement=PAYLOAD["requirements"][0], spec={
@@ -373,7 +386,11 @@ def test_stored_contract_reaches_generic_runtime_and_fails_closed_without_plan(d
     factory, _ = database
     payload = deepcopy(PAYLOAD)
     payload["permissions"] = [{"action": KEY, "mode": "automatic"}]
-    _cache(factory, normalize_compiled_spec(payload, job_brief=BRIEF))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=BRIEF),
+        owner_permissions={KEY: "automatic"},
+    )
     api.compile_employee(1, USER)
     captured = []
 
@@ -474,7 +491,7 @@ def test_self_service_recurring_capability_provisions_one_real_schedule_workflow
         db.commit()
 
     spec = normalize_compiled_spec(payload, job_brief=brief)
-    _cache(factory, spec)
+    _cache(factory, spec, owner_permissions={KEY: "automatic"})
     result = api.compile_employee(1, USER)
 
     requirement = result["spec"]["requirements"][0]
@@ -541,7 +558,11 @@ def test_self_service_content_generation_schedule_builds_ai_then_action(database
         company.onboarding_source = "self_service"
         db.commit()
 
-    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={KEY: "automatic"},
+    )
     result = api.compile_employee(1, USER)
     requirement = result["spec"]["requirements"][0]
 
@@ -659,6 +680,136 @@ def test_self_service_graph_schedule_owns_the_full_pipeline(database):
         ]
 
 
+
+def test_novel_unbacked_graph_action_stays_setup_required(database):
+    factory, _ = database
+    brief = (
+        "Every 60 minutes inspect a public specialist source, reason about the result, "
+        "and record the novel finding automatically."
+    )
+    payload = {
+        "role": "Novel specialist worker",
+        "scope": "personal",
+        "requirements": [{
+            "key": "never_seen_before_capability",
+            "kind": "custom",
+            "purpose": "Record the novel finding",
+            "primitives": ["web_research", "content_generation", "scheduler", "workflow_engine"],
+            "schedule": {
+                "kind": "interval",
+                "every_minutes": 60,
+                "source_text": "Every 60 minutes",
+            },
+        }],
+        "permissions": [{"action": "Record the novel finding", "mode": "automatic"}],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {
+                "type": "schedule",
+                "schedule": {
+                    "kind": "interval",
+                    "every_minutes": 60,
+                    "source_text": "Every 60 minutes",
+                },
+            },
+            "nodes": [
+                {
+                    "id": "inspect",
+                    "type": "ai",
+                    "depends_on": [],
+                    "params": {"prompt": "Inspect and reason about the supplied specialist source."},
+                },
+                {
+                    "id": "record",
+                    "type": "action",
+                    "depends_on": ["inspect"],
+                    "params": {
+                        "action_type": "never_seen_before_capability",
+                        "arguments": {"finding": "$nodes.inspect.ai_response"},
+                    },
+                },
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={"never_seen_before_capability": "automatic"},
+    )
+    result = api.compile_employee(1, USER)
+
+    requirement = result["spec"]["requirements"][0]
+    assert requirement["execution_status"] == "setup_required"
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "setup_required"
+
+    with factory() as db:
+        action = reveal_config(_assignment(db).config)["actions"]["never_seen_before_capability"]
+        destination = action["destination"]
+        assert destination["graph_backed"] is True
+        assert destination["delivery_mode"] == "graph"
+        assert destination["execution_plan"] == []
+
+
+def test_novel_graph_native_capability_runs_without_profession_specific_code(database):
+    factory, _ = database
+    brief = "Every 60 minutes inspect data, reason about it, and remember the latest finding."
+    payload = {
+        "role": "Novel specialist worker",
+        "scope": "personal",
+        "requirements": [],
+        "permissions": [],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {
+                "type": "schedule",
+                "schedule": {
+                    "kind": "interval",
+                    "every_minutes": 60,
+                    "source_text": "Every 60 minutes",
+                },
+            },
+            "nodes": [
+                {
+                    "id": "inspect",
+                    "type": "ai",
+                    "depends_on": [],
+                    "params": {"prompt": "Inspect and reason about the supplied data."},
+                },
+                {
+                    "id": "remember",
+                    "type": "state_write",
+                    "depends_on": ["inspect"],
+                    "params": {
+                        "key": "latest_finding",
+                        "value": "$nodes.inspect.ai_response",
+                    },
+                },
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.commit()
+
+    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    result = api.compile_employee(1, USER)
+
+    trigger = result["spec"]["delivery"]["graph_trigger"]
+    assert trigger["status"] == "ready"
+
+    with factory() as db:
+        workflow = db.query(AutomationWorkflow).one()
+        assert [node["type"] for node in workflow.steps[0]["graph"]["nodes"]] == ["ai", "state_write"]
+
 def test_self_service_media_generation_schedule_builds_ai_media_then_action(database):
     factory, _ = database
     brief, payload = _scheduled_payload()
@@ -686,7 +837,11 @@ def test_self_service_media_generation_schedule_builds_ai_media_then_action(data
         company.onboarding_source = "self_service"
         db.commit()
 
-    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={KEY: "automatic"},
+    )
     result = api.compile_employee(1, USER)
     requirement = result["spec"]["requirements"][0]
 
@@ -959,7 +1114,11 @@ def test_self_service_daily_schedule_inherits_workspace_timezone(database):
         db.add(CompanyProfile(company_id=1, timezone="Asia/Muscat"))
         db.commit()
 
-    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={KEY: "automatic"},
+    )
     result = api.compile_employee(1, USER)
     requirement = result["spec"]["requirements"][0]
 
@@ -984,7 +1143,11 @@ def test_self_service_schedule_blocks_when_required_runtime_input_is_missing(dat
         company.onboarding_source = "self_service"
         db.commit()
 
-    _cache(factory, normalize_compiled_spec(payload, job_brief=brief))
+    _cache(
+        factory,
+        normalize_compiled_spec(payload, job_brief=brief),
+        owner_permissions={KEY: "automatic"},
+    )
     result = api.compile_employee(1, USER)
     requirement = result["spec"]["requirements"][0]
 
@@ -1529,3 +1692,2444 @@ def test_live_rollback_stages_previous_version_without_touching_live_runtime(dat
         assert "last_tested_compiled_at" not in pending
 
     assert calls == []
+
+
+def _seed_owner_permission_contract(factory, *, live: bool):
+    with factory() as db:
+        company = db.query(Company).filter_by(id=1).one()
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live" if live else "paused"
+        company.active = True
+
+        agent = db.query(AIAgent).filter_by(id=1).one()
+        agent.enabled = live
+
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings = deepcopy(config.settings or {})
+        builder = dict(settings.get("employee_builder") or {})
+        builder.update(
+            {
+                "compiled_at": "2026-09-19T00:00:00Z",
+                "last_tested_at": "2026-09-19T00:01:00Z",
+                "last_tested_compiled_at": "2026-09-19T00:00:00Z",
+                "owner_permissions": {},
+                "compiled_spec": {
+                    "version": 1,
+                    "job_brief": "Monitor and send a report.",
+                    "role": "Report worker",
+                    "scope": "business",
+                    "summary": "Monitor and send a report.",
+                    "tasks": [],
+                    "requirements": [
+                        {
+                            "key": KEY,
+                            "kind": "custom",
+                            "purpose": "Monitor the specialist platform",
+                            "status": "xvond_managed",
+                            "delivery_mode": "compose",
+                            "primitives": ["workflow_engine"],
+                            "runtime_inputs": {},
+                            "execution_plan": [
+                                {
+                                    "id": "notify",
+                                    "op": "notify",
+                                    "title": "Monitor",
+                                    "message": "Done.",
+                                }
+                            ],
+                            "customer_inputs": [],
+                            "requires_connection": False,
+                            "fulfillment_mode": "xvond_internal",
+                            "known_to_xvond": False,
+                        }
+                    ],
+                    "permissions": [
+                        {
+                            "action": KEY,
+                            "mode": "ask_before",
+                            "suggested_mode": "automatic",
+                            "source": "compiler_suggestion",
+                        }
+                    ],
+                    "execution_graph": {
+                        "version": 1,
+                        "trigger": {"type": "manual"},
+                        "nodes": [],
+                    },
+                    "setup_questions": [],
+                    "ready_requirements": [],
+                    "build_required": [],
+                    "setup_required": [],
+                    "unsupported_requirements": [],
+                    "delivery": {
+                        "provisioning_version": 1,
+                        "action_plan": {
+                            KEY: {
+                                "tool_name": "action_request",
+                                "action_type": KEY,
+                                "execution_status": "ready",
+                            }
+                        },
+                        "automation_plan": {},
+                        "graph_trigger": {
+                            "status": "not_required",
+                            "workflow_id": None,
+                            "trigger_type": "manual",
+                        },
+                        "managed_capabilities": [KEY],
+                        "connection_required": [],
+                        "customer_input_required": [],
+                        "unsupported": [],
+                    },
+                },
+            }
+        )
+        settings["employee_builder"] = builder
+        config.settings = settings
+
+        assignment = (
+            db.query(AgentToolAssignment)
+            .filter_by(agent_id=1, tool_name="action_request")
+            .first()
+        )
+        if assignment is None:
+            assignment = AgentToolAssignment(
+                agent_id=1,
+                tool_name="action_request",
+                enabled=True,
+                config={},
+            )
+            db.add(assignment)
+            db.flush()
+        assignment.config = {
+            "actions": {
+                KEY: {
+                    "enabled": True,
+                    "confirmation_required": True,
+                    "xvond_generated": True,
+                    "_xvond_permission_mode": "ask_before",
+                    "module": "tools",
+                    "destination": {
+                        "type": "xvond_internal",
+                        "adapter": "generic_capability",
+                        "capability_key": KEY,
+                        "execution_plan": [
+                            {
+                                "id": "notify",
+                                "op": "notify",
+                                "title": "Monitor",
+                                "message": "Done.",
+                            }
+                        ],
+                        "allowed_hosts": [],
+                    },
+                    "availability": {"mode": "none"},
+                }
+            }
+        }
+        db.commit()
+
+
+def test_live_employee_cannot_escalate_owner_permission_to_automatic(database):
+    factory, _ = database
+    _seed_owner_permission_contract(factory, live=True)
+
+    with pytest.raises(HTTPException) as exc:
+        api.set_self_service_permission(
+            1,
+            KEY,
+            api.EmployeeBuilderPermissionRequest(mode="automatic"),
+            current_user=USER,
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["requires_deactivation"] is True
+
+    with factory() as db:
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        builder = config.settings["employee_builder"]
+        assert builder.get("owner_permissions") == {}
+        action = reveal_config(_assignment(db).config)["actions"][KEY]
+        assert action["confirmation_required"] is True
+
+
+def test_paused_employee_owner_grant_becomes_authoritative_runtime_policy(database, monkeypatch):
+    factory, _ = database
+    monkeypatch.setattr(api, "self_service_readiness", lambda *args, **kwargs: {})
+    _seed_owner_permission_contract(factory, live=False)
+
+    result = api.set_self_service_permission(
+        1,
+        KEY,
+        api.EmployeeBuilderPermissionRequest(mode="automatic"),
+        current_user=USER,
+    )
+
+    assert result["status"] == "saved"
+    assert result["mode"] == "automatic"
+    permission = next(
+        item
+        for item in result["compiled_spec"]["permissions"]
+        if item["action"] == KEY
+    )
+    assert permission["mode"] == "automatic"
+    assert permission["source"] == "owner"
+
+    with factory() as db:
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        builder = config.settings["employee_builder"]
+        assert builder["owner_permissions"][KEY] == "automatic"
+        assert "last_tested_at" not in builder
+        assert "last_tested_compiled_at" not in builder
+        action = reveal_config(_assignment(db).config)["actions"][KEY]
+        assert action["confirmation_required"] is False
+        assert action["_xvond_permission_mode"] == "automatic"
+
+
+
+def test_multi_routine_provisioning_keeps_same_trigger_routines_independent(database):
+    factory, _ = database
+    spec = {
+        "role": "Multi-routine employee",
+        "scope": "personal",
+        "requirements": [],
+        "permissions": [],
+        "execution_routines": [
+            {
+                "id": "morning_summary",
+                "name": "Morning summary",
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 8,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "morning_done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Morning routine finished."},
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "evening_summary",
+                "name": "Evening summary",
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 18,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "evening_done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Evening routine finished."},
+                        }
+                    ],
+                },
+            },
+        ],
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        prepared, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=1,
+            spec=spec,
+        )
+        db.commit()
+
+        triggers = delivery["graph_triggers"]
+        assert [item["routine_id"] for item in triggers] == [
+            "morning_summary",
+            "evening_summary",
+        ]
+        assert all(item["status"] == "ready" for item in triggers)
+        assert delivery["graph_trigger"]["routine_id"] == "morning_summary"
+        assert prepared["delivery"]["provisioning_version"] == 1
+
+        workflows = (
+            db.query(AutomationWorkflow)
+            .filter(AutomationWorkflow.company_id == 1)
+            .order_by(AutomationWorkflow.id.asc())
+            .all()
+        )
+        assert len(workflows) == 2
+        assert [row.trigger_config["_xvond_routine_id"] for row in workflows] == [
+            "morning_summary",
+            "evening_summary",
+        ]
+        assert workflows[0].trigger_config["schedule"]["hour"] == 8
+        assert workflows[1].trigger_config["schedule"]["hour"] == 18
+        assert workflows[0].steps[0]["graph"]["nodes"][0]["id"] == "morning_done"
+        assert workflows[1].steps[0]["graph"]["nodes"][0]["id"] == "evening_done"
+
+
+def test_legacy_execution_graph_still_provisions_as_primary_routine(database):
+    factory, _ = database
+    spec = {
+        "role": "Legacy employee",
+        "scope": "personal",
+        "requirements": [],
+        "permissions": [],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "done",
+                    "type": "notify",
+                    "depends_on": [],
+                    "params": {"message": "Done."},
+                }
+            ],
+        },
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        prepared, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=1,
+            spec=spec,
+        )
+        db.commit()
+
+        assert len(delivery["graph_triggers"]) == 1
+        assert delivery["graph_triggers"][0]["routine_id"] == "primary"
+        assert delivery["graph_trigger"]["routine_id"] == "primary"
+        assert delivery["graph_trigger"]["trigger_type"] == "manual"
+        workflow = db.get(
+            AutomationWorkflow,
+            delivery["graph_trigger"]["workflow_id"],
+        )
+        assert workflow.trigger_config["_xvond_routine_id"] == "primary"
+        assert prepared["execution_graph"]["nodes"][0]["id"] == "done"
+
+
+
+def test_manual_run_requires_routine_id_when_employee_has_multiple_manual_routines(
+    database,
+    monkeypatch,
+):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+        db.add_all(
+            [
+                AutomationWorkflow(
+                    id=101,
+                    company_id=1,
+                    name="First manual routine",
+                    trigger_type="manual",
+                    trigger_config={
+                        "_xvond_source": "self_service_employee",
+                        "_xvond_agent_id": 1,
+                        "_xvond_graph_trigger": True,
+                        "_xvond_routine_id": "first",
+                        "_xvond_routine_name": "First",
+                    },
+                    steps=[{"type": "graph", "agent_id": 1, "graph": {"version": 1, "nodes": []}}],
+                    enabled=True,
+                ),
+                AutomationWorkflow(
+                    id=102,
+                    company_id=1,
+                    name="Second manual routine",
+                    trigger_type="manual",
+                    trigger_config={
+                        "_xvond_source": "self_service_employee",
+                        "_xvond_agent_id": 1,
+                        "_xvond_graph_trigger": True,
+                        "_xvond_routine_id": "second",
+                        "_xvond_routine_name": "Second",
+                    },
+                    steps=[{"type": "graph", "agent_id": 1, "graph": {"version": 1, "nodes": []}}],
+                    enabled=True,
+                ),
+            ]
+        )
+        db.commit()
+
+    executed = []
+
+    def fake_execute(*, db, company_id, workflow, input_data):
+        executed.append(workflow.id)
+        return SimpleNamespace(
+            id=900 + workflow.id,
+            workflow_id=workflow.id,
+            status="success",
+            output_data={"ok": True},
+            error_message=None,
+            created_at=None,
+            finished_at=None,
+        )
+
+    monkeypatch.setattr(api.automation_runtime, "execute", fake_execute)
+
+    with pytest.raises(HTTPException) as exc:
+        api.customer_employee_run_graph(
+            1,
+            api.EmployeeBuilderGraphRunRequest(input_data={}),
+            USER,
+        )
+    assert exc.value.status_code == 409
+    assert "multiple manual routines" in str(exc.value.detail)
+
+    result = api.customer_employee_run_graph(
+        1,
+        api.EmployeeBuilderGraphRunRequest(
+            input_data={"source": "owner"},
+            routine_id="second",
+        ),
+        USER,
+    )
+
+    assert executed == [102]
+    assert result["workflow_id"] == 102
+    assert result["routine_id"] == "second"
+    assert result["routine_name"] == "Second"
+
+
+def test_webhook_config_selects_requested_routine(database, monkeypatch):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings_value = deepcopy(config.settings)
+        builder = dict(settings_value.get("employee_builder") or {})
+        builder["compiled_spec"] = {
+            "role": "Webhook employee",
+            "requirements": [],
+            "delivery": {
+                "provisioning_version": 1,
+                "graph_trigger": {
+                    "routine_id": "alpha",
+                    "routine_name": "Alpha",
+                    "status": "ready",
+                    "workflow_id": 201,
+                    "trigger_type": "webhook",
+                },
+                "graph_triggers": [
+                    {
+                        "routine_id": "alpha",
+                        "routine_name": "Alpha",
+                        "status": "ready",
+                        "workflow_id": 201,
+                        "trigger_type": "webhook",
+                    },
+                    {
+                        "routine_id": "beta",
+                        "routine_name": "Beta",
+                        "status": "ready",
+                        "workflow_id": 202,
+                        "trigger_type": "webhook",
+                    },
+                ],
+            },
+        }
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.add_all(
+            [
+                AutomationWorkflow(
+                    id=201,
+                    company_id=1,
+                    name="Alpha",
+                    trigger_type="webhook",
+                    trigger_config={
+                        "_xvond_source": "self_service_employee",
+                        "_xvond_agent_id": 1,
+                        "_xvond_graph_trigger": True,
+                        "_xvond_routine_id": "alpha",
+                    },
+                    steps=[],
+                    enabled=True,
+                ),
+                AutomationWorkflow(
+                    id=202,
+                    company_id=1,
+                    name="Beta",
+                    trigger_type="webhook",
+                    trigger_config={
+                        "_xvond_source": "self_service_employee",
+                        "_xvond_agent_id": 1,
+                        "_xvond_graph_trigger": True,
+                        "_xvond_routine_id": "beta",
+                    },
+                    steps=[],
+                    enabled=True,
+                ),
+            ]
+        )
+        db.commit()
+
+    monkeypatch.setattr(api.settings, "PUBLIC_BASE_URL", "https://xvond.test")
+    monkeypatch.setattr(
+        api,
+        "automation_webhook_key",
+        lambda *, workflow_id, company_id: f"key-{company_id}-{workflow_id}",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        api.customer_employee_webhook(1, USER)
+    assert exc.value.status_code == 409
+    assert "multiple webhook routines" in str(exc.value.detail)
+
+    result = api.customer_employee_webhook(1, USER, "beta")
+
+    assert result["workflow_id"] == 202
+    assert result["routine_id"] == "beta"
+    assert result["routine_name"] == "Beta"
+    assert result["url"] == "https://xvond.test/webhooks/automation/202"
+    assert result["key"] == "key-1-202"
+
+
+
+def test_customer_can_pause_and_resume_one_employee_routine(database):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings_value = deepcopy(config.settings)
+        builder = dict(settings_value.get("employee_builder") or {})
+        builder["compiled_spec"] = {
+            "role": "Routine worker",
+            "requirements": [],
+            "delivery": {
+                "provisioning_version": 1,
+                "graph_trigger": {
+                    "routine_id": "morning",
+                    "routine_name": "Morning",
+                    "status": "ready",
+                    "workflow_id": 301,
+                    "trigger_type": "schedule",
+                },
+                "graph_triggers": [
+                    {
+                        "routine_id": "morning",
+                        "routine_name": "Morning",
+                        "status": "ready",
+                        "workflow_id": 301,
+                        "trigger_type": "schedule",
+                    },
+                    {
+                        "routine_id": "events",
+                        "routine_name": "Events",
+                        "status": "ready",
+                        "workflow_id": 302,
+                        "trigger_type": "event",
+                    },
+                ],
+            },
+        }
+        builder["delivery"] = deepcopy(builder["compiled_spec"]["delivery"])
+        settings_value["employee_builder"] = builder
+        config.settings = settings_value
+        db.add_all(
+            [
+                AutomationWorkflow(
+                    id=301,
+                    company_id=1,
+                    name="Morning",
+                    trigger_type="schedule",
+                    trigger_config={
+                        "_xvond_source": "self_service_employee",
+                        "_xvond_agent_id": 1,
+                        "_xvond_graph_trigger": True,
+                        "_xvond_routine_id": "morning",
+                        "_xvond_routine_name": "Morning",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 8,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    steps=[],
+                    enabled=True,
+                ),
+                AutomationWorkflow(
+                    id=302,
+                    company_id=1,
+                    name="Events",
+                    trigger_type="event",
+                    trigger_config={
+                        "_xvond_source": "self_service_employee",
+                        "_xvond_agent_id": 1,
+                        "_xvond_graph_trigger": True,
+                        "_xvond_routine_id": "events",
+                        "_xvond_routine_name": "Events",
+                        "event_name": "lead.created",
+                    },
+                    steps=[],
+                    enabled=True,
+                ),
+            ]
+        )
+        db.commit()
+
+    paused = api.customer_employee_set_routine_state(
+        1,
+        "morning",
+        api.EmployeeBuilderRoutineStateRequest(enabled=False),
+        USER,
+    )
+    assert paused["status"] == "paused"
+    assert paused["enabled"] is False
+
+    with factory() as db:
+        workflow = db.get(AutomationWorkflow, 301)
+        assert workflow.enabled is False
+        assert workflow.trigger_config["_xvond_paused_at"]
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        delivery = config.settings["employee_builder"]["compiled_spec"]["delivery"]
+        assert delivery["graph_trigger"]["status"] == "disabled"
+        statuses = {
+            item["routine_id"]: item["status"]
+            for item in delivery["graph_triggers"]
+        }
+        assert statuses == {"morning": "disabled", "events": "ready"}
+        assert config.settings["employee_builder"]["delivery"]["graph_trigger"]["status"] == "disabled"
+
+    resumed = api.customer_employee_set_routine_state(
+        1,
+        "morning",
+        api.EmployeeBuilderRoutineStateRequest(enabled=True),
+        USER,
+    )
+    assert resumed["status"] == "resumed"
+    assert resumed["enabled"] is True
+
+    with factory() as db:
+        workflow = db.get(AutomationWorkflow, 301)
+        assert workflow.enabled is True
+        assert "_xvond_paused_at" not in workflow.trigger_config
+        assert workflow.trigger_config["_xvond_resumed_at"]
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        delivery = config.settings["employee_builder"]["compiled_spec"]["delivery"]
+        assert delivery["graph_trigger"]["status"] == "ready"
+        statuses = {
+            item["routine_id"]: item["status"]
+            for item in delivery["graph_triggers"]
+        }
+        assert statuses == {"morning": "ready", "events": "ready"}
+
+
+def test_customer_routine_list_is_scoped_to_current_employee(database):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        db.add(
+            AutomationWorkflow(
+                id=401,
+                company_id=1,
+                name="Primary",
+                trigger_type="manual",
+                trigger_config={
+                    "_xvond_source": "self_service_employee",
+                    "_xvond_agent_id": 1,
+                    "_xvond_graph_trigger": True,
+                    "_xvond_routine_id": "primary",
+                    "_xvond_routine_name": "Primary",
+                },
+                steps=[],
+                enabled=False,
+            )
+        )
+        db.add(
+            AutomationWorkflow(
+                id=402,
+                company_id=1,
+                name="Unrelated",
+                trigger_type="manual",
+                trigger_config={
+                    "_xvond_source": "other_source",
+                    "_xvond_agent_id": 1,
+                    "_xvond_graph_trigger": True,
+                },
+                steps=[],
+                enabled=True,
+            )
+        )
+        db.commit()
+
+    result = api.customer_employee_routines(1, USER)
+
+    assert len(result["routines"]) == 1
+    assert result["routines"][0]["routine_id"] == "primary"
+    assert result["routines"][0]["enabled"] is False
+
+
+
+def test_multi_routine_runtime_inputs_are_isolated_by_requirement_scope(database):
+    factory, _ = database
+    spec = {
+        "version": 10,
+        "role": "Scoped monitor",
+        "scope": "personal",
+        "requirements": [
+            {
+                "key": "morning_source",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {
+                    "target": "morning-only",
+                    "morning_secret_name": "morning",
+                },
+            },
+            {
+                "key": "evening_source",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {
+                    "target": "evening-only",
+                    "evening_secret_name": "evening",
+                },
+            },
+        ],
+        "permissions": [],
+        "execution_routines": [
+            {
+                "id": "morning",
+                "name": "Morning routine",
+                "requirement_keys": ["morning_source"],
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 8,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Morning complete"},
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "evening",
+                "name": "Evening routine",
+                "requirement_keys": ["evening_source"],
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 18,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Evening complete"},
+                        }
+                    ],
+                },
+            },
+        ],
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        prepared, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=1,
+            spec=spec,
+        )
+        db.commit()
+
+        rows = (
+            db.query(AutomationWorkflow)
+            .filter(
+                AutomationWorkflow.company_id == 1,
+                AutomationWorkflow.trigger_type == "schedule",
+            )
+            .order_by(AutomationWorkflow.id.asc())
+            .all()
+        )
+
+        assert len(rows) == 2
+        by_routine = {
+            row.trigger_config["_xvond_routine_id"]: row
+            for row in rows
+        }
+        assert by_routine["morning"].trigger_config["_xvond_requirement_keys"] == [
+            "morning_source"
+        ]
+        assert by_routine["evening"].trigger_config["_xvond_requirement_keys"] == [
+            "evening_source"
+        ]
+        assert by_routine["morning"].trigger_config["input_data"] == {
+            "target": "morning-only",
+            "morning_secret_name": "morning",
+        }
+        assert by_routine["morning"].trigger_config["_xvond_runtime_inputs"] == {
+            "target": "morning-only",
+            "morning_secret_name": "morning",
+        }
+        assert by_routine["evening"].trigger_config["input_data"] == {
+            "target": "evening-only",
+            "evening_secret_name": "evening",
+        }
+        assert by_routine["evening"].trigger_config["_xvond_runtime_inputs"] == {
+            "target": "evening-only",
+            "evening_secret_name": "evening",
+        }
+        assert delivery["graph_triggers"][0]["requirement_keys"] == [
+            "morning_source"
+        ]
+        assert delivery["graph_triggers"][1]["requirement_keys"] == [
+            "evening_source"
+        ]
+        assert prepared["execution_routines"][0]["requirement_keys"] == [
+            "morning_source"
+        ]
+
+
+def test_pre_v10_routine_without_scope_keeps_shared_runtime_inputs(database):
+    factory, _ = database
+    spec = {
+        "version": 9,
+        "role": "Legacy scoped employee",
+        "scope": "personal",
+        "requirements": [
+            {
+                "key": "legacy_one",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {"one": 1},
+            },
+            {
+                "key": "legacy_two",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {"two": 2},
+            },
+        ],
+        "permissions": [],
+        "execution_routines": [
+            {
+                "id": "legacy",
+                "name": "Legacy",
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 9,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Done"},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        _, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=1,
+            spec=spec,
+        )
+        db.commit()
+
+        workflow = db.get(
+            AutomationWorkflow,
+            delivery["graph_triggers"][0]["workflow_id"],
+        )
+        assert workflow.trigger_config["input_data"] == {"one": 1, "two": 2}
+
+
+
+def test_v10_explicit_empty_routine_scope_does_not_inherit_shared_inputs(database):
+    factory, _ = database
+    spec = {
+        "version": 10,
+        "role": "Explicitly unscoped routine",
+        "scope": "personal",
+        "requirements": [
+            {
+                "key": "other_requirement",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {"should_not_leak": "secret-value"},
+            }
+        ],
+        "permissions": [],
+        "execution_routines": [
+            {
+                "id": "manual_only",
+                "name": "Manual only",
+                "requirement_keys": [],
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 10,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Done"},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        _, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=1,
+            spec=spec,
+        )
+        db.commit()
+
+        workflow = db.get(
+            AutomationWorkflow,
+            delivery["graph_triggers"][0]["workflow_id"],
+        )
+        assert workflow.trigger_config["input_data"] == {}
+        assert workflow.trigger_config["_xvond_runtime_inputs"] == {}
+        assert workflow.trigger_config["_xvond_requirement_keys"] == []
+
+
+
+def test_routine_runtime_input_conflict_blocks_workflow_provisioning(database):
+    factory, _ = database
+    spec = {
+        "version": 10,
+        "role": "Conflicted routine",
+        "scope": "personal",
+        "requirements": [
+            {
+                "key": "source_one",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {"target": "A"},
+            },
+            {
+                "key": "source_two",
+                "kind": "custom",
+                "status": "available",
+                "runtime_inputs": {"target": "B"},
+            },
+        ],
+        "permissions": [],
+        "execution_routines": [
+            {
+                "id": "conflicted",
+                "name": "Conflicted routine",
+                "requirement_keys": ["source_one", "source_two"],
+                "graph": {
+                    "version": 1,
+                    "trigger": {
+                        "type": "schedule",
+                        "schedule": {
+                            "kind": "daily",
+                            "hour": 8,
+                            "minute": 0,
+                            "timezone": "UTC",
+                        },
+                    },
+                    "nodes": [
+                        {
+                            "id": "done",
+                            "type": "notify",
+                            "depends_on": [],
+                            "params": {"message": "Done"},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        _, delivery = provision_compiled_capabilities(
+            db,
+            agent_id=1,
+            spec=spec,
+        )
+        db.commit()
+
+        trigger = delivery["graph_triggers"][0]
+        assert trigger["status"] == "runtime_input_conflict"
+        assert trigger["runtime_input_conflicts"] == ["target"]
+        assert trigger["workflow_id"] is None
+        assert (
+            db.query(AutomationWorkflow)
+            .filter(AutomationWorkflow.company_id == 1)
+            .count()
+            == 0
+        )
+
+
+
+def test_routine_preview_records_build_scoped_evidence_without_live_execution(
+    database,
+    monkeypatch,
+):
+    factory, _ = database
+    monkeypatch.setattr(api, "_has_ai_agents_entitlement", lambda *args, **kwargs: True)
+
+    spec = normalize_compiled_spec(
+        {
+            "role": "Background worker",
+            "scope": "personal",
+            "requirements": [],
+            "permissions": [],
+            "execution_routines": [
+                {
+                    "id": "monitor",
+                    "name": "Monitor",
+                    "requirement_keys": [],
+                    "graph": {
+                        "version": 1,
+                        "trigger": {"type": "manual"},
+                        "nodes": [
+                            {
+                                "id": "done",
+                                "type": "notify",
+                                "depends_on": [],
+                                "params": {"message": "Done"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+        job_brief="Run the monitor manually.",
+    )
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        config = db.query(AgentConfig).filter_by(agent_id=1).one()
+        settings = deepcopy(config.settings)
+        settings["employee_builder"] = {
+            "source_description": "Run the monitor manually.",
+            "job_brief": "Run the monitor manually.",
+            "compiled_spec": spec,
+            "compiled_at": "build-1",
+            "requested_channels": [],
+            "setup_answers": {},
+            "owner_permissions": {},
+        }
+        config.settings = settings
+        db.commit()
+
+    captured = {}
+
+    def fake_preview(db, company_id, step, state, *, run_id, step_index):
+        captured.update(
+            {
+                "company_id": company_id,
+                "step": deepcopy(step),
+                "state": deepcopy(state),
+                "run_id": run_id,
+                "step_index": step_index,
+            }
+        )
+        return {
+            "graph_outputs": {
+                "done": {
+                    "preview": True,
+                    "notification": {"persisted": False},
+                }
+            }
+        }
+
+    monkeypatch.setattr(api.automation_runtime, "execute_step", fake_preview)
+
+    result = api.preview_employee_routine(
+        1,
+        api.EmployeeBuilderRoutinePreviewRequest(
+            routine_id="monitor",
+            input_data={"sample": 123},
+        ),
+        USER,
+    )
+
+    assert result["status"] == "previewed"
+    assert result["routine_id"] == "monitor"
+    assert result["current_build_tested"] is True
+    assert result["safety"]["business_actions_executed"] is False
+    assert captured["run_id"] == 0
+    assert captured["state"]["_xvond_preview"] is True
+    assert captured["state"]["sample"] == 123
+
+    with factory() as db:
+        builder = _builder(db)
+        assert builder["last_tested_compiled_at"] == "build-1"
+        assert builder["routine_preview_evidence"]["monitor"]["compiled_at"] == "build-1"
+        assert db.query(AutomationRun).count() == 0
+        assert db.query(ActionRequest).count() == 0
+
+
+def test_chat_preview_does_not_unlock_build_that_has_execution_routines(database, monkeypatch):
+    factory, calls = database
+    monkeypatch.setattr(api, "_has_ai_agents_entitlement", lambda *args, **kwargs: True)
+
+    spec = normalize_compiled_spec(
+        {
+            "role": "Background worker",
+            "scope": "personal",
+            "requirements": [],
+            "permissions": [],
+            "execution_routines": [
+                {
+                    "id": "background",
+                    "name": "Background",
+                    "requirement_keys": [],
+                    "graph": {
+                        "version": 1,
+                        "trigger": {"type": "manual"},
+                        "nodes": [
+                            {
+                                "id": "done",
+                                "type": "notify",
+                                "depends_on": [],
+                                "params": {"message": "Done"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+        job_brief="Run background work manually.",
+    )
+    _cache(factory, spec)
+
+    result = api.test_draft_employee(
+        1,
+        api.EmployeeBuilderTestRequest(message="What do you do?"),
+        USER,
+    )
+
+    assert result["tools_used"] is False
+    with factory() as db:
+        builder = _builder(db)
+        assert builder["chat_tested_compiled_at"] == builder["compiled_at"]
+        assert builder.get("last_tested_compiled_at") is None
+        assert builder.get("routine_preview_evidence") in (None, {})
+    assert len(calls) == 1
+
+
+
+def test_routine_inventory_exposes_live_operational_state(database):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live"
+        company.active = True
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+
+        scheduled = AutomationWorkflow(
+            id=501,
+            company_id=1,
+            name="Scheduled monitor",
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "monitor",
+                "_xvond_routine_name": "Monitor",
+                "schedule": {"kind": "interval", "every_minutes": 60},
+            },
+            steps=[],
+            enabled=True,
+        )
+        event = AutomationWorkflow(
+            id=502,
+            company_id=1,
+            name="Event follow-up",
+            trigger_type="event",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "follow_up",
+                "_xvond_routine_name": "Follow up",
+                "event_name": "lead.created",
+            },
+            steps=[],
+            enabled=True,
+        )
+        failed = AutomationWorkflow(
+            id=503,
+            company_id=1,
+            name="Manual report",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "report",
+                "_xvond_routine_name": "Report",
+            },
+            steps=[],
+            enabled=True,
+        )
+        paused = AutomationWorkflow(
+            id=504,
+            company_id=1,
+            name="Paused routine",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "paused",
+                "_xvond_routine_name": "Paused",
+                "_xvond_paused_at": "2026-09-19T10:00:00Z",
+            },
+            steps=[],
+            enabled=False,
+        )
+        db.add_all([scheduled, event, failed, paused])
+        db.flush()
+        db.add_all(
+            [
+                AutomationRun(
+                    company_id=1,
+                    workflow_id=501,
+                    status="success",
+                    input_data={},
+                    output_data={},
+                    finished_at=datetime(2026, 9, 19, 10, 0),
+                ),
+                AutomationRun(
+                    company_id=1,
+                    workflow_id=502,
+                    status="waiting_event",
+                    input_data={},
+                    output_data={},
+                    resume_event_name="payment.confirmed",
+                ),
+                AutomationRun(
+                    company_id=1,
+                    workflow_id=503,
+                    status="failed",
+                    input_data={},
+                    output_data={},
+                    error_message="provider timeout",
+                    finished_at=datetime(2026, 9, 19, 10, 5),
+                ),
+            ]
+        )
+        db.commit()
+
+    result = api.customer_employee_routines(1, USER)
+    routines = {item["routine_id"]: item for item in result["routines"]}
+
+    assert routines["monitor"]["operational_state"] == "healthy"
+    assert routines["monitor"]["last_run"]["status"] == "success"
+    assert routines["monitor"]["next_scheduled_at"] is not None
+
+    assert routines["follow_up"]["operational_state"] == "waiting_event"
+    assert routines["follow_up"]["waiting"] == {
+        "type": "event",
+        "event_name": "payment.confirmed",
+    }
+
+    assert routines["report"]["operational_state"] == "needs_attention"
+    assert routines["report"]["last_run"]["error_message"] == "provider timeout"
+
+    assert routines["paused"]["operational_state"] == "paused"
+    assert routines["paused"]["next_scheduled_at"] is None
+
+
+
+def test_routine_observability_exposes_health_duration_and_failed_step(database):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live"
+        company.active = True
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+
+        workflow = AutomationWorkflow(
+            id=601,
+            company_id=1,
+            name="Observed routine",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "observed",
+                "_xvond_routine_name": "Observed",
+            },
+            steps=[],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.flush()
+        db.add_all(
+            [
+                AutomationRun(
+                    company_id=1,
+                    workflow_id=601,
+                    status="success",
+                    input_data={},
+                    output_data={},
+                    created_at=datetime(2026, 9, 19, 9, 0),
+                    finished_at=datetime(2026, 9, 19, 9, 0, 2),
+                ),
+                AutomationRun(
+                    company_id=1,
+                    workflow_id=601,
+                    status="failed",
+                    input_data={},
+                    output_data={
+                        "trace": {
+                            "spans": [
+                                {
+                                    "step_index": 0,
+                                    "step_type": "graph",
+                                    "phase": "execute",
+                                    "status": "failed",
+                                    "node_id": "fetch_price",
+                                    "duration_ms": 125.5,
+                                    "error": "upstream timeout",
+                                }
+                            ]
+                        }
+                    },
+                    error_message="upstream timeout",
+                    created_at=datetime(2026, 9, 19, 10, 0),
+                    finished_at=datetime(2026, 9, 19, 10, 0, 3),
+                ),
+                AutomationRun(
+                    company_id=1,
+                    workflow_id=601,
+                    status="failed",
+                    input_data={},
+                    output_data={
+                        "trace": {
+                            "spans": [
+                                {
+                                    "step_index": 1,
+                                    "step_type": "graph",
+                                    "phase": "resume",
+                                    "status": "failed",
+                                    "node_id": None,
+                                    "duration_ms": 87.25,
+                                    "error": "Execution graph node notify_owner (notify) failed: notification provider unavailable",
+                                }
+                            ]
+                        }
+                    },
+                    error_message="Execution graph node notify_owner (notify) failed: notification provider unavailable",
+                    created_at=datetime(2026, 9, 19, 11, 0),
+                    finished_at=datetime(2026, 9, 19, 11, 0, 4),
+                ),
+            ]
+        )
+        db.commit()
+
+    result = api.customer_employee_routines(1, USER)
+    observed = next(
+        item for item in result["routines"]
+        if item["routine_id"] == "observed"
+    )
+
+    assert observed["operational_state"] == "needs_attention"
+    assert observed["last_run"]["status"] == "failed"
+    assert observed["last_run"]["duration_ms"] == 4000
+    assert observed["health"] == {
+        "window_size": 3,
+        "success_count": 1,
+        "failure_count": 2,
+        "rejected_count": 0,
+        "success_rate_percent": 33.3,
+        "consecutive_failures": 2,
+        "last_success_at": "2026-09-19T09:00:02Z",
+        "last_failure_at": "2026-09-19T11:00:04Z",
+    }
+    assert observed["failure"] == {
+        "step_index": 1,
+        "step_type": "graph",
+        "node_id": "notify_owner",
+        "phase": "resume",
+        "error": "Execution graph node notify_owner (notify) failed: notification provider unavailable",
+        "duration_ms": 87.25,
+    }
+    assert observed["retry"]["safe"] is False
+    assert "no durable node checkpoint" in observed["retry"]["reason"]
+
+def test_retry_state_exposes_safe_durable_checkpoint():
+    run = SimpleNamespace(
+        id=77,
+        status="failed",
+        output_data={
+            "retry_attempts": 2,
+            "retry_checkpoint": {
+                "safe": True,
+                "reason": None,
+                "failed_node_id": "fetch_price",
+                "failed_node_type": "http_get_json",
+                "failed_node_scope": "daily/fetch_price",
+            },
+        },
+    )
+
+    retry = api._run_retry_state(run)
+
+    assert retry == {
+        "safe": True,
+        "run_id": 77,
+        "reason": (
+            "Retry will resume from the last durable node checkpoint without "
+            "replaying completed nodes."
+        ),
+        "node_id": "fetch_price",
+        "node_type": "http_get_json",
+        "node_scope": "daily/fetch_price",
+        "attempts": 2,
+    }
+
+
+def test_customer_retry_requires_latest_failed_safe_run(database, monkeypatch):
+    factory, _ = database
+    captured = {}
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live"
+        company.active = True
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+
+        workflow = AutomationWorkflow(
+            id=701,
+            company_id=1,
+            name="Retryable routine",
+            trigger_type="manual",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "retryable",
+                "_xvond_routine_name": "Retryable",
+            },
+            steps=[
+                {
+                    "type": "graph",
+                    "agent_id": 1,
+                    "graph": {
+                        "version": 1,
+                        "nodes": [
+                            {
+                                "id": "fetch",
+                                "type": "http_get_json",
+                                "depends_on": [],
+                                "params": {"url": "https://example.com/data"},
+                            }
+                        ],
+                    },
+                }
+            ],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.flush()
+        failed = AutomationRun(
+            company_id=1,
+            workflow_id=workflow.id,
+            status="failed",
+            input_data={"_xvond_execution_key": "api-retry"},
+            output_data={
+                "retry_checkpoint": {
+                    "version": 1,
+                    "safe": True,
+                    "reason": None,
+                    "failed_node_id": "fetch",
+                    "failed_node_type": "http_get_json",
+                    "failed_node_scope": "fetch",
+                }
+            },
+            error_message="temporary failure",
+            finished_at=datetime(2026, 9, 19, 12, 0),
+        )
+        db.add(failed)
+        db.commit()
+        failed_id = failed.id
+
+    def fake_retry(db, *, company_id, workflow, run):
+        captured.update(
+            {
+                "company_id": company_id,
+                "workflow_id": workflow.id,
+                "run_id": run.id,
+            }
+        )
+        run.status = "success"
+        run.error_message = None
+        run.finished_at = datetime(2026, 9, 19, 12, 1)
+        run.output_data = {
+            **dict(run.output_data or {}),
+            "retry_attempts": 1,
+            "retry": {"status": "succeeded", "attempt": 1},
+        }
+        db.commit()
+        db.refresh(run)
+        return run
+
+    monkeypatch.setattr(api.automation_runtime, "retry_failed", fake_retry)
+
+    result = api.customer_employee_retry_routine(
+        1,
+        "retryable",
+        api.EmployeeBuilderRoutineRetryRequest(run_id=failed_id),
+        USER,
+    )
+
+    assert captured == {
+        "company_id": 1,
+        "workflow_id": 701,
+        "run_id": failed_id,
+    }
+    assert result["status"] == "success"
+    assert result["run_id"] == failed_id
+
+    with factory() as db:
+        newer = AutomationRun(
+            company_id=1,
+            workflow_id=701,
+            status="failed",
+            input_data={},
+            output_data={},
+            error_message="newer failure",
+        )
+        db.add(newer)
+        db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        api.customer_employee_retry_routine(
+            1,
+            "retryable",
+            api.EmployeeBuilderRoutineRetryRequest(run_id=failed_id),
+            USER,
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["message"] == "A newer routine run exists. Refresh before retrying."
+
+def test_routine_observability_marks_automatic_retry_as_recovering(database):
+    factory, _ = database
+    with factory() as db:
+        company = db.get(Company, 1)
+        company.onboarding_source = "self_service"
+        company.lifecycle_status = "live"
+        company.active = True
+        agent = db.get(AIAgent, 1)
+        agent.enabled = True
+
+        workflow = AutomationWorkflow(
+            id=801,
+            company_id=1,
+            name="Recovering routine",
+            trigger_type="schedule",
+            trigger_config={
+                "_xvond_source": "self_service_employee",
+                "_xvond_agent_id": 1,
+                "_xvond_graph_trigger": True,
+                "_xvond_routine_id": "recovering",
+                "_xvond_routine_name": "Recovering",
+                "schedule": {"kind": "interval", "every_minutes": 5},
+            },
+            steps=[],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.flush()
+        run = AutomationRun(
+            company_id=1,
+            workflow_id=workflow.id,
+            status="waiting_retry",
+            input_data={"_xvond_execution_key": "recovering-run"},
+            output_data={
+                "trace": {
+                    "spans": [
+                        {
+                            "step_index": 0,
+                            "step_type": "graph",
+                            "phase": "execute",
+                            "status": "failed",
+                            "node_id": "fetch_price",
+                            "duration_ms": 45.0,
+                            "error": "temporary upstream failure",
+                        }
+                    ]
+                },
+                "retry": {
+                    "status": "scheduled",
+                    "attempt": 1,
+                    "max_attempts": 2,
+                },
+            },
+            error_message="temporary upstream failure",
+            resume_at=datetime(2026, 9, 19, 13, 0),
+        )
+        db.add(run)
+        db.commit()
+
+    result = api.customer_employee_routines(1, USER)
+    recovering = next(
+        item for item in result["routines"]
+        if item["routine_id"] == "recovering"
+    )
+
+    assert recovering["operational_state"] == "recovering"
+    assert recovering["last_run"]["status"] == "waiting_retry"
+    assert recovering["waiting"] == {
+        "type": "retry",
+        "resume_at": "2026-09-19T13:00:00Z",
+        "attempt": 1,
+        "max_attempts": 2,
+        "last_error": "temporary upstream failure",
+    }
+    assert recovering["failure"]["node_id"] == "fetch_price"
+    assert recovering["failure"]["error"] == "temporary upstream failure"
+    assert recovering["retry"] is None
+
+
+
+def test_graph_action_forwards_named_operation_to_connected_api(database, monkeypatch):
+    factory, _ = database
+    captured = {}
+
+    with factory() as db:
+        agent = db.query(AIAgent).filter(AIAgent.company_id == 1).first()
+        assignment = AgentToolAssignment(
+            agent_id=agent.id,
+            tool_name="action_request",
+            enabled=True,
+            config={
+                "actions": {
+                    "vendor_records": {
+                        "enabled": True,
+                        "confirmation_required": False,
+                        "_xvond_permission_mode": "automatic",
+                        "destination": {
+                            "type": "integration",
+                            "integration_id": 77,
+                            "operations": {
+                                "lookup": {"method": "GET", "endpoint": "/v1/records"}
+                            },
+                        },
+                    }
+                }
+            },
+        )
+        db.add(assignment)
+        db.commit()
+        agent_id = agent.id
+
+        def fake_call(db, context, action_type, action, arguments, operation, *, idempotency_key=None):
+            captured.update(
+                action_type=action_type,
+                operation=operation,
+                arguments=arguments,
+                idempotency_key=idempotency_key,
+            )
+            return SimpleNamespace(success=True, data={"ok": True}, error=None)
+
+        monkeypatch.setattr(
+            "backend.app.modules.automation.runtime._integration_call",
+            fake_call,
+        )
+        result = automation_runtime.execute_step(
+            db,
+            1,
+            {
+                "type": "graph",
+                "agent_id": agent_id,
+                "graph": {
+                    "version": 1,
+                    "trigger": {"type": "manual"},
+                    "nodes": [{
+                        "id": "lookup_vendor",
+                        "type": "action",
+                        "params": {
+                            "action_type": "vendor_records",
+                            "operation": "lookup",
+                            "arguments": {"query": "abc"},
+                        },
+                    }],
+                },
+            },
+            {"_xvond_execution_key": "named-op-test"},
+            run_id=1,
+            step_index=0,
+        )
+
+    assert captured["action_type"] == "vendor_records"
+    assert captured["operation"] == "lookup"
+    assert captured["arguments"]["operation"] == "lookup"
+    assert captured["arguments"]["details"]["query"] == "abc"
+    assert captured["idempotency_key"].startswith("named-op-test:")
+    assert ":graph:" in captured["idempotency_key"]
+    assert result["graph_outputs"]["lookup_vendor"]["scheduled_action_result"]["result"] == {"ok": True}
+
+
+def test_generic_api_lookup_uses_query_contract_and_fails_closed_for_unknown_operation(database, monkeypatch):
+    factory, _ = database
+    captured = {}
+
+    def fake_http(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 200, "response": "{\"ok\": true}", "truncated": False}
+
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.safe_http_request",
+        fake_http,
+    )
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.validate_public_http_url",
+        lambda url: url,
+    )
+
+    with factory() as db:
+        integration = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Novel Vendor API",
+            config={
+                "base_url": "https://api.vendor.example",
+                "validation_endpoint": "/health",
+            },
+            enabled=True,
+        )
+        db.add(integration)
+        db.commit()
+        db.refresh(integration)
+
+        action = {
+            "destination": {
+                "type": "integration",
+                "integration_id": integration.id,
+                "operations": {
+                    "lookup": {
+                        "method": "GET",
+                        "endpoint": "/v1/items/{item_id}",
+                        "input_mode": "query",
+                        "path_params": ["item_id"],
+                        "timeout": 8,
+                    }
+                },
+            }
+        }
+        result = _integration_call(
+            db,
+            {"company_id": 1, "agent_id": 1},
+            "vendor_items",
+            action,
+            {"details": {"item_id": "A/B", "q": "red shoes", "limit": 3}},
+            "lookup",
+            idempotency_key="test-key",
+        )
+        assert result.success is True
+        assert captured["method"] == "GET"
+        assert captured["json_data"] is None
+        assert "/v1/items/A%2FB?" in captured["url"]
+        assert "q=red+shoes" in captured["url"]
+        assert "limit=3" in captured["url"]
+        assert "item_id=" not in captured["url"]
+
+        captured.clear()
+        missing = _integration_call(
+            db,
+            {"company_id": 1, "agent_id": 1},
+            "vendor_items",
+            action,
+            {"details": {}},
+            "delete_everything",
+            idempotency_key="test-key-2",
+        )
+        assert missing.success is False
+        assert "not configured" in str(missing.error).lower()
+        assert captured == {}
+
+
+def test_openapi_path_parameter_is_encoded_and_removed_from_payload(database, monkeypatch):
+    factory, _ = database
+    captured = {}
+
+    def fake_http(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 200, "response": "{\"ok\": true}", "truncated": False}
+
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.safe_http_request",
+        fake_http,
+    )
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.validate_public_http_url",
+        lambda url: url,
+    )
+
+    with factory() as db:
+        integration = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="OpenAPI Vendor",
+            config={
+                "base_url": "https://api.vendor.example",
+                "validation_endpoint": "/health",
+                "auth_type": "none",
+            },
+            enabled=True,
+        )
+        db.add(integration)
+        db.commit()
+        db.refresh(integration)
+
+        action = {
+            "destination": {
+                "type": "integration",
+                "integration_id": integration.id,
+                "operations": {
+                    "get_order": {
+                        "method": "GET",
+                        "endpoint": "/orders/{order_id}",
+                        "input_mode": "query",
+                        "path_params": ["order_id"],
+                    }
+                },
+            }
+        }
+        result = _integration_call(
+            db,
+            {"company_id": 1, "agent_id": 1},
+            "orders",
+            action,
+            {"details": {"order_id": "A/B 12", "expand": "items"}},
+            "get_order",
+            idempotency_key="openapi-path-test",
+        )
+
+    assert result.success is True
+    assert "/orders/A%2FB%2012" in captured["url"]
+    assert "expand=items" in captured["url"]
+    assert "order_id=" not in captured["url"]
+    assert captured["json_data"] is None
+
+
+def test_compiler_connection_context_is_validated_tenant_safe_and_secret_free(database):
+    factory, _ = database
+    with factory() as db:
+        integration = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Vendor API",
+            config={
+                "base_url": "https://api.vendor.example",
+                "validation_endpoint": "/health",
+                "auth_type": "bearer",
+                "api_key": "super-secret",
+                "operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                        "description": "Create order",
+                    }
+                },
+                "_xvond_validation": {
+                    "validated": True,
+                    "validated_at": "2026-09-19T16:00:00Z",
+                },
+            },
+            enabled=True,
+        )
+        unvalidated = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Unvalidated API",
+            config={
+                "base_url": "https://unvalidated.example",
+                "validation_endpoint": "/health",
+                "operations": {
+                    "unsafe": {"method": "POST", "endpoint": "/unsafe"}
+                },
+            },
+            enabled=True,
+        )
+        foreign = CompanyIntegration(
+            company_id=2,
+            integration_type="custom_api",
+            name="Other Tenant API",
+            config={
+                "base_url": "https://other.example",
+                "validation_endpoint": "/health",
+                "operations": {
+                    "foreign": {"method": "POST", "endpoint": "/foreign"}
+                },
+                "_xvond_validation": {
+                    "validated": True,
+                    "validated_at": "2026-09-19T16:00:00Z",
+                },
+            },
+            enabled=True,
+        )
+        db.add_all([integration, unvalidated, foreign])
+        db.commit()
+
+        context = api._compiler_connection_context(db, company_id=1)
+
+    assert len(context) == 1
+    assert context[0]["name"] == "Vendor API"
+    assert context[0]["type"] == "custom_api"
+    assert context[0]["operations"]["create_order"]["endpoint"] == "/orders"
+    rendered = json.dumps(context)
+    assert "super-secret" not in rendered
+    assert "api_key" not in rendered
+    assert "integration_id" not in rendered
+    assert "Unvalidated API" not in rendered
+    assert "Other Tenant API" not in rendered
+
+
+def test_exact_generic_api_contract_auto_binds_only_one_validated_match(database):
+    factory, _ = database
+    with factory() as db:
+        integration = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Vendor API",
+            config={
+                "base_url": "https://api.vendor.example",
+                "validation_endpoint": "/health",
+                "operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                    }
+                },
+                "_xvond_validation": {
+                    "validated": True,
+                    "validated_at": "2026-09-19T16:00:00Z",
+                },
+            },
+            enabled=True,
+        )
+        db.add(integration)
+        db.commit()
+        db.refresh(integration)
+
+        spec = {
+            "requirements": [{
+                "key": "vendor_order_creation",
+                "kind": "integration",
+                "status": "connection_required",
+                "requires_connection": True,
+                "fulfillment_mode": "external_connection",
+                "integration_operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                    }
+                },
+            }],
+            "setup_required": ["vendor_order_creation"],
+        }
+        resolved, bound = api._auto_bind_single_packaged_integrations(
+            db,
+            company_id=1,
+            spec=spec,
+        )
+
+        requirement = resolved["requirements"][0]
+        assert bound == ["vendor_order_creation"]
+        assert requirement["integration_id"] == integration.id
+        assert requirement["status"] == "xvond_build"
+        assert requirement["integration_operations"]["create_order"]["endpoint"] == "/orders"
+        assert resolved["setup_required"] == []
+
+        db.add(CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Second Vendor API",
+            config={
+                "base_url": "https://api2.vendor.example",
+                "validation_endpoint": "/health",
+                "operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                    }
+                },
+                "_xvond_validation": {
+                    "validated": True,
+                    "validated_at": "2026-09-19T16:00:00Z",
+                },
+            },
+            enabled=True,
+        ))
+        db.commit()
+
+        ambiguous, ambiguous_bound = api._auto_bind_single_packaged_integrations(
+            db,
+            company_id=1,
+            spec=spec,
+        )
+
+    assert ambiguous_bound == []
+    assert "integration_id" not in ambiguous["requirements"][0]
+
+
+def test_openapi_required_query_parameter_fails_before_http_request(database, monkeypatch):
+    factory, _ = database
+    captured = {}
+
+    def fake_http(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 200, "response": "{\"ok\": true}", "truncated": False}
+
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.safe_http_request",
+        fake_http,
+    )
+    monkeypatch.setattr(
+        "backend.app.modules.tools.action_request.validate_public_http_url",
+        lambda url: url,
+    )
+
+    with factory() as db:
+        integration = CompanyIntegration(
+            company_id=1,
+            integration_type="custom_api",
+            name="Search API",
+            config={
+                "base_url": "https://api.vendor.example",
+                "auth_type": "none",
+            },
+            enabled=True,
+        )
+        db.add(integration)
+        db.commit()
+        db.refresh(integration)
+
+        action = {
+            "destination": {
+                "type": "integration",
+                "integration_id": integration.id,
+                "operations": {
+                    "search_items": {
+                        "method": "GET",
+                        "endpoint": "/search",
+                        "input_mode": "query",
+                        "required_query_params": ["q"],
+                    }
+                },
+            }
+        }
+        missing = _integration_call(
+            db,
+            {"company_id": 1, "agent_id": 1},
+            "search",
+            action,
+            {"details": {"page": 1}},
+            "search_items",
+            idempotency_key="required-query-missing",
+        )
+        assert missing.success is False
+        assert "requires query parameter(s): q" in str(missing.error)
+        assert captured == {}
+
+        ok = _integration_call(
+            db,
+            {"company_id": 1, "agent_id": 1},
+            "search",
+            action,
+            {"details": {"q": "shoes", "page": 1}},
+            "search_items",
+            idempotency_key="required-query-ok",
+        )
+        assert ok.success is True
+        assert "q=shoes" in captured["url"]
+
+
+def test_build_auto_discovers_and_provisions_public_api(database, monkeypatch):
+    factory, _ = database
+    monkeypatch.setattr(
+        api,
+        "discover_openapi_contract",
+        lambda discovery: {
+            "status": "resolved",
+            "source": "public_docs_search",
+            "docs_url": "https://docs.vendor.example/openapi.json",
+            "attempted": ["https://docs.vendor.example/openapi.json"],
+            "contract": {
+                "title": "Vendor API",
+                "base_url": "https://api.vendor.example",
+                "operations": {
+                    "lookup": {
+                        "method": "GET",
+                        "endpoint": "/lookup",
+                        "input_mode": "query",
+                        "path_params": [],
+                        "required_query_params": [],
+                    }
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "public_api_probe",
+        lambda contract: {
+            "validated": True,
+            "validated_at": "2026-09-19T16:00:00Z",
+            "mode": "discovered_public_api_safe_get",
+            "operation": "lookup",
+            "endpoint": "/lookup",
+            "status_code": 200,
+        },
+    )
+    monkeypatch.setattr(api.service_limits, "check_current", lambda *args, **kwargs: None)
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        agent = db.query(AIAgent).filter(AIAgent.company_id == 1).first()
+        spec = {
+            "requirements": [{
+                "key": "novel_lookup",
+                "kind": "integration",
+                "status": "connection_required",
+                "requires_connection": True,
+                "fulfillment_mode": "external_connection",
+                "discovery": {
+                    "needed": True,
+                    "status": "pending_discovery",
+                    "capability": "Look up novel vendor data",
+                    "customer_access": "none",
+                },
+            }],
+            "setup_required": ["novel_lookup"],
+            "execution_graph": {
+                "version": 1,
+                "trigger": {"type": "manual"},
+                "nodes": [{
+                    "id": "lookup",
+                    "type": "action",
+                    "params": {"action_type": "novel_lookup"},
+                }],
+            },
+        }
+
+        resolved, outcomes = api._attempt_compiled_capability_discovery(
+            db,
+            company=company,
+            agent=agent,
+            spec=spec,
+        )
+
+        requirement = resolved["requirements"][0]
+        assert outcomes[0]["status"] == "resolved"
+        assert requirement["status"] == "xvond_build"
+        assert requirement["integration_type"] == "custom_api"
+        assert requirement["discovery"]["status"] == "resolved"
+        assert resolved["setup_required"] == []
+        assert resolved["execution_graph"]["nodes"][0]["params"]["operation"] == "lookup"
+        integration = db.get(CompanyIntegration, requirement["integration_id"])
+        assert integration is not None
+        assert integration.integration_type == "custom_api"
+
+
+def test_build_discovery_prepares_private_api_but_requests_only_access(database, monkeypatch):
+    factory, _ = database
+    monkeypatch.setattr(
+        api,
+        "discover_openapi_contract",
+        lambda discovery: {
+            "status": "resolved",
+            "source": "grounded_docs_url",
+            "docs_url": "https://docs.private.example/openapi.json",
+            "attempted": ["https://docs.private.example/openapi.json"],
+            "contract": {
+                "title": "Private API",
+                "base_url": "https://api.private.example",
+                "operations": {
+                    "create_order": {
+                        "method": "POST",
+                        "endpoint": "/orders",
+                        "input_mode": "json",
+                        "path_params": [],
+                        "required_query_params": [],
+                    }
+                },
+            },
+        },
+    )
+
+    with factory() as db:
+        company = db.get(Company, 1)
+        agent = db.query(AIAgent).filter(AIAgent.company_id == 1).first()
+        spec = {
+            "requirements": [{
+                "key": "private_order_api",
+                "kind": "integration",
+                "status": "connection_required",
+                "requires_connection": True,
+                "fulfillment_mode": "external_connection",
+                "discovery": {
+                    "needed": True,
+                    "status": "pending_discovery",
+                    "capability": "Create private orders",
+                    "customer_access": "api_key",
+                },
+            }],
+            "setup_required": ["private_order_api"],
+        }
+
+        resolved, outcomes = api._attempt_compiled_capability_discovery(
+            db,
+            company=company,
+            agent=agent,
+            spec=spec,
+        )
+
+    requirement = resolved["requirements"][0]
+    assert outcomes[0]["status"] == "contract_found"
+    assert outcomes[0]["customer_access"] == "api_key"
+    assert requirement["integration_operations"]["create_order"]["endpoint"] == "/orders"
+    assert requirement["status"] == "connection_required"
+    assert requirement["discovery"]["status"] == "contract_found"
+    assert "integration_id" not in requirement
+
+
+def test_bound_api_operations_are_resolved_into_graph_actions():
+    spec = {
+        "requirements": [{"key": "orders"}],
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [
+                {
+                    "id": "create_order",
+                    "type": "action",
+                    "params": {
+                        "action_type": "orders",
+                        "arguments": {"customer": "$input.customer"},
+                    },
+                },
+                {
+                    "id": "cancel_order",
+                    "type": "action",
+                    "depends_on": ["create_order"],
+                    "params": {
+                        "action_type": "orders",
+                        "arguments": {"order_id": "$input.order_id"},
+                    },
+                },
+            ],
+        },
+    }
+    operations = {
+        "create_order": {
+            "method": "POST",
+            "endpoint": "/orders",
+            "description": "Create a new order",
+        },
+        "cancel_order": {
+            "method": "DELETE",
+            "endpoint": "/orders/{order_id}",
+            "description": "Cancel an order",
+        },
+    }
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="orders",
+        operations=operations,
+    )
+
+    assert unresolved == []
+    nodes = resolved["execution_graph"]["nodes"]
+    assert nodes[0]["params"]["operation"] == "create_order"
+    assert nodes[1]["params"]["operation"] == "cancel_order"
+
+
+def test_single_bound_api_operation_is_selected_automatically():
+    spec = {
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [{
+                "id": "sync_vendor",
+                "type": "action",
+                "params": {"action_type": "vendor_sync"},
+            }],
+        }
+    }
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="vendor_sync",
+        operations={
+            "sync": {
+                "method": "POST",
+                "endpoint": "/sync",
+            }
+        },
+    )
+
+    assert unresolved == []
+    assert resolved["execution_graph"]["nodes"][0]["params"]["operation"] == "sync"
+
+
+def test_ambiguous_bound_api_operation_fails_closed_until_resolved():
+    spec = {
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [{
+                "id": "do_vendor_work",
+                "type": "action",
+                "params": {"action_type": "vendor"},
+            }],
+        }
+    }
+    operations = {
+        "alpha": {"method": "POST", "endpoint": "/alpha"},
+        "beta": {"method": "POST", "endpoint": "/beta"},
+    }
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="vendor",
+        operations=operations,
+    )
+    assert resolved["execution_graph"]["nodes"][0]["params"].get("operation") is None
+    assert unresolved[0]["node_id"] == "do_vendor_work"
+    assert unresolved[0]["available_operations"] == ["alpha", "beta"]
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="vendor",
+        operations=operations,
+        operation_map={"primary/do_vendor_work": "beta"},
+    )
+    assert unresolved == []
+    assert resolved["execution_graph"]["nodes"][0]["params"]["operation"] == "beta"
+
+
+def test_bound_api_operation_resolution_reaches_nested_foreach_graph():
+    spec = {
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [{
+                "id": "each_order",
+                "type": "foreach",
+                "params": {
+                    "items": "$input.orders",
+                    "graph": {
+                        "version": 1,
+                        "trigger": {"type": "manual"},
+                        "nodes": [{
+                            "id": "create_order",
+                            "type": "action",
+                            "params": {"action_type": "orders"},
+                        }],
+                    },
+                },
+            }],
+        }
+    }
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="orders",
+        operations={
+            "create_order": {
+                "method": "POST",
+                "endpoint": "/orders",
+                "description": "Create order",
+            },
+            "cancel_order": {
+                "method": "DELETE",
+                "endpoint": "/orders/{order_id}",
+                "description": "Cancel order",
+            },
+        },
+    )
+
+    assert unresolved == []
+    nested = resolved["execution_graph"]["nodes"][0]["params"]["graph"]
+    assert nested["nodes"][0]["params"]["operation"] == "create_order"

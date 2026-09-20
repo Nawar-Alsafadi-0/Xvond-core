@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 import json
+import re
+from urllib.parse import quote, urlencode
 
 from sqlalchemy import text
 
@@ -13,7 +15,14 @@ from backend.app.modules.ai_agent.models import AIMessage
 from backend.app.modules.channels.handoff import activate_human_handoff
 from backend.app.modules.channels.whatsapp_models import WhatsAppSession
 from backend.app.modules.integrations.catalog import integration_validation_ready
+from backend.app.modules.integrations.capability_discovery import oauth_client_credentials_token
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.integrations.http_api_auth import apply_http_api_auth
+from backend.app.modules.integrations.oauth_authorization import (
+    oauth_access_token_needs_refresh,
+    oauth_token_timing,
+    refresh_oauth_access_token,
+)
 from backend.app.modules.integrations.email_smtp import (
     EmailConnectorError,
     send_smtp_email,
@@ -111,7 +120,11 @@ def _action(config: dict, action_type: str) -> dict | None:
     if not isinstance(actions, dict):
         return None
     value = actions.get(action_type)
-    if not isinstance(value, dict) or not value.get("enabled", True):
+    if (
+        not isinstance(value, dict)
+        or not value.get("enabled", True)
+        or str(value.get("_xvond_permission_mode") or "").strip().lower() == "never"
+    ):
         return None
     return value
 
@@ -525,6 +538,83 @@ def _email_read_call(
     return ToolResult(success=True, data=result)
 
 
+def _ensure_fresh_oauth_access_token(
+    db,
+    integration: CompanyIntegration,
+    config: dict,
+) -> tuple[dict, str | None]:
+    oauth_config = config.get("_xvond_oauth")
+    flow = (
+        str(oauth_config.get("flow") or "")
+        if isinstance(oauth_config, dict)
+        else ""
+    )
+    if flow not in {"authorization_code", "client_credentials"}:
+        return config, None
+
+    try:
+        if not oauth_access_token_needs_refresh(oauth_config):
+            return config, None
+    except ValueError as exc:
+        return config, str(exc)
+
+    if (
+        flow == "authorization_code"
+        and not str(oauth_config.get("refresh_token") or "").strip()
+    ):
+        return config, "OAuth access token has expired; reconnect this account"
+
+    claim_key = f"oauth_refresh:{integration.company_id}:{integration.id}"
+    if not execution_claims.claim(claim_key, ttl_seconds=300):
+        try:
+            db.expire(integration, ["config"])
+            db.refresh(integration)
+            latest = reveal_config(integration.config) or {}
+            latest_oauth = latest.get("_xvond_oauth")
+            if (
+                isinstance(latest_oauth, dict)
+                and not oauth_access_token_needs_refresh(latest_oauth)
+            ):
+                return latest, None
+        except Exception:
+            pass
+        return config, "OAuth token refresh is already in progress; retry the request"
+
+    try:
+        try:
+            if flow == "authorization_code":
+                token = refresh_oauth_access_token(oauth_config)
+            else:
+                token = oauth_client_credentials_token(
+                    {
+                        "flow": "client_credentials",
+                        "token_url": oauth_config.get("token_url"),
+                        "scopes": oauth_config.get("scopes") or [],
+                    },
+                    client_id=str(oauth_config.get("client_id") or ""),
+                    client_secret=str(oauth_config.get("client_secret") or ""),
+                )
+        except ValueError as exc:
+            return config, f"OAuth token refresh failed: {exc}"
+
+        updated = dict(config)
+        updated_oauth = dict(oauth_config)
+        if flow == "authorization_code":
+            updated_oauth["refresh_token"] = token["refresh_token"]
+        updated_oauth["expires_in"] = token.get("expires_in")
+        if token.get("scope") is not None:
+            updated_oauth["scope"] = token.get("scope")
+        updated_oauth.pop("expires_at", None)
+        updated_oauth.update(oauth_token_timing(token.get("expires_in")))
+        updated["api_key"] = token["access_token"]
+        updated["_xvond_oauth"] = updated_oauth
+        integration.config = updated
+        db.commit()
+        db.refresh(integration)
+        return reveal_config(integration.config) or {}, None
+    finally:
+        execution_claims.release(claim_key)
+
 def _integration_call(
     db,
     context: dict,
@@ -557,6 +647,9 @@ def _integration_call(
             error="Configured integration is unavailable",
         )
     config = reveal_config(integration.config) or {}
+    config, oauth_error = _ensure_fresh_oauth_access_token(db, integration, config)
+    if oauth_error:
+        return ToolResult(success=False, error=oauth_error)
     if (
         destination.get("validation_required") is True
         and not integration_validation_ready(config)
@@ -569,17 +662,17 @@ def _integration_call(
     if not operations and isinstance(config.get("operations"), dict):
         operations = config.get("operations") or {}
     op_config = operations.get(operation) if isinstance(operations, dict) else None
-    if not isinstance(op_config, dict):
-        op_config = destination
-    method = str(op_config.get("method") or "POST").upper()
+    effective_op_config = op_config if isinstance(op_config, dict) else destination
+    method = str(effective_op_config.get("method") or "POST").upper()
     headers = {
         "Content-Type": "application/json",
-        **(op_config.get("headers") or {}),
+        **(effective_op_config.get("headers") or {}),
     }
     if idempotency_key:
         headers.setdefault("Idempotency-Key", idempotency_key)
         headers.setdefault("X-Xvond-Idempotency-Key", idempotency_key)
     integration_type = integration.integration_type
+    request_payload = payload.get("details") if isinstance(payload, dict) else payload
 
     if integration_type == "instagram_publish":
         return _instagram_publish_call(
@@ -630,6 +723,12 @@ def _integration_call(
         if secret:
             headers.setdefault("X-Xvond-Webhook-Secret", str(secret))
     elif integration_type in {"custom_api", "pos", "crm", "erp"}:
+        if isinstance(operations, dict) and operations and not isinstance(op_config, dict):
+            return ToolResult(
+                success=False,
+                error=f"API operation '{operation}' is not configured for this connection",
+            )
+        op_config = op_config if isinstance(op_config, dict) else destination
         base_url = str(config.get("base_url") or "").strip().rstrip("/")
         endpoint = str(op_config.get("endpoint") or "").strip()
         if not base_url or not endpoint:
@@ -644,10 +743,31 @@ def _integration_call(
                 success=False,
                 error="Integration endpoint must be a relative path",
             )
+        path_params = op_config.get("path_params")
+        if not isinstance(path_params, list):
+            path_params = re.findall(r"{([A-Za-z_][A-Za-z0-9_]{0,63})}", endpoint)
+        clean_payload = dict(request_payload) if isinstance(request_payload, dict) else {}
+        for raw_name in path_params[:20]:
+            name = str(raw_name or "").strip()
+            placeholder = "{" + name + "}"
+            if not name or placeholder not in endpoint:
+                continue
+            if name not in clean_payload or clean_payload[name] is None:
+                return ToolResult(
+                    success=False,
+                    error=f"API operation '{operation}' requires path parameter '{name}'",
+                )
+            endpoint = endpoint.replace(
+                placeholder,
+                quote(str(clean_payload.pop(name)), safe=""),
+            )
+        if "{" in endpoint or "}" in endpoint:
+            return ToolResult(
+                success=False,
+                error=f"API operation '{operation}' has unresolved path parameters",
+            )
+        request_payload = clean_payload
         url = base_url + "/" + endpoint.lstrip("/")
-        api_key = config.get("api_key")
-        if api_key:
-            headers.setdefault("Authorization", f"Bearer {api_key}")
     else:
         return ToolResult(
             success=False,
@@ -657,14 +777,68 @@ def _integration_call(
             ),
         )
 
+    input_mode = str(
+        (op_config or {}).get("input_mode") or ("query" if method == "GET" else "json")
+    ).strip().lower()
+    if input_mode not in {"json", "query", "none"}:
+        return ToolResult(success=False, error="Integration operation input mode is invalid")
+    if input_mode == "query":
+        query_items = []
+        source = request_payload if isinstance(request_payload, dict) else {}
+        required_query_params = [
+            str(item).strip()
+            for item in ((op_config or {}).get("required_query_params") or [])
+            if str(item or "").strip()
+        ]
+        missing_query_params = [
+            key
+            for key in required_query_params
+            if key not in source or source.get(key) in (None, "")
+        ]
+        if missing_query_params:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"API operation '{operation}' requires query parameter(s): "
+                    + ", ".join(missing_query_params)
+                ),
+            )
+        for key, value in source.items():
+            if value is None:
+                continue
+            if isinstance(value, (str, int, float, bool)):
+                query_items.append((str(key), str(value)))
+            elif isinstance(value, list) and all(
+                isinstance(item, (str, int, float, bool)) for item in value
+            ):
+                query_items.extend((str(key), str(item)) for item in value)
+            else:
+                return ToolResult(
+                    success=False,
+                    error=f"Query parameter '{key}' must be scalar or a scalar list",
+                )
+        if query_items:
+            separator = "&" if "?" in url else "?"
+            url = url + separator + urlencode(query_items)
+
+    if integration_type in {"custom_api", "pos", "crm", "erp"}:
+        try:
+            url, headers = apply_http_api_auth(
+                url=url,
+                headers=headers,
+                config=config,
+            )
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc))
+
     try:
         validate_public_http_url(url)
         result = safe_http_request(
             url=url,
             method=method,
             headers=headers,
-            json_data=payload,
-            timeout=float(op_config.get("timeout") or 15),
+            json_data=request_payload if input_mode == "json" else None,
+            timeout=float((op_config or {}).get("timeout") or 15),
         )
     except Exception as exc:
         return ToolResult(success=False, error=str(exc))

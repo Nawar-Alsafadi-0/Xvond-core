@@ -49,6 +49,12 @@ class ManagedChannelConnect(BaseModel):
     connection_key: str = Field(min_length=1, max_length=200)
     provider_account_label: str | None = Field(default=None, max_length=200)
     channel_instructions: str | None = Field(default=None, max_length=4000)
+    # Optional one-shot provisioning payload. Secrets are forwarded directly to
+    # the isolated workflow plane and are never merged into AgentChannel.config.
+    provider_type: str | None = Field(default=None, max_length=80)
+    provider_url: str | None = Field(default=None, max_length=2000)
+    provider_secret: str | None = Field(default=None, min_length=32, max_length=4000)
+    provider_config: dict | None = None
 
 
 class WhatsAppConfigUpdate(BaseModel):
@@ -551,8 +557,53 @@ def connect_managed_channel(
                 "Live managed channel routing cannot be changed in place; deactivate it before changing the provider route",
             )
 
-        _managed_gateway_capability(channel)
+        capability = _managed_gateway_capability(channel)
         connection_key = str(data.connection_key or "").strip()
+
+        provision_fields = (
+            data.provider_type,
+            data.provider_url,
+            data.provider_secret,
+            data.provider_config,
+        )
+        wants_provisioning = any(value is not None for value in provision_fields)
+        if wants_provisioning:
+            if capability.get("packaged_provider") is not True:
+                raise HTTPException(
+                    409,
+                    "This managed channel does not have a packaged Xvond provider binding yet",
+                )
+            if not all(value is not None for value in provision_fields):
+                raise HTTPException(
+                    400,
+                    "provider_type, provider_url, provider_secret and provider_config are required together",
+                )
+            try:
+                provisioned = n8n_gateway.provision_channel(
+                    company_id=channel.company_id,
+                    agent_id=channel.agent_id,
+                    channel_id=channel.id,
+                    channel_type=canonical_channel_type(channel.channel_type),
+                    connection_key=connection_key,
+                    provider_type=str(data.provider_type or "").strip(),
+                    provider_url=str(data.provider_url or "").strip(),
+                    provider_secret=str(data.provider_secret or ""),
+                    provider_config=dict(data.provider_config or {}),
+                    provider_account_label=(
+                        str(data.provider_account_label or "").strip() or None
+                    ),
+                )
+            except N8NGatewayError as exc:
+                raise HTTPException(
+                    502,
+                    "Xvond managed channel route could not be provisioned",
+                ) from exc
+            if provisioned.get("success") is not True:
+                raise HTTPException(
+                    409,
+                    "The managed channel provider route could not be provisioned",
+                )
+
         verification = _verify_managed_gateway_route(
             channel,
             connection_key=connection_key,

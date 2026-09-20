@@ -14,10 +14,12 @@ from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.automation.models import AutomationWorkflow
 from backend.app.modules.automation.execution_graph import (
     graph_action_types,
+    graph_contract_errors,
     normalize_execution_graph,
 )
 from backend.app.modules.automation.schedule import ScheduleConfigError, normalize_schedule_config
 from backend.app.modules.ai_agent.employee_compiler import normalize_requirement_key
+from backend.app.modules.tools.generic_capability_runtime import generic_capability_readiness
 from backend.app.modules.tools.models import AgentToolAssignment
 
 
@@ -136,7 +138,8 @@ def build_internal_booking_action_config(*, requirement: dict, spec: dict) -> di
         {"key": "notes", "label": "Notes", "required": False, "type": "text"},
     ]
     action = {
-        "enabled": _permission_mode(spec, requirement) != "never",
+        "enabled": True,
+        "_xvond_permission_mode": _permission_mode(spec, requirement),
         "label": str(requirement.get("purpose") or "Booking").strip()[:200] or "Booking",
         "description": str(requirement.get("purpose") or "Create and manage bookings").strip()[:1000],
         "module": "booking",
@@ -212,7 +215,8 @@ def build_internal_record_action_config(*, requirement: dict, spec: dict) -> dic
     if definition is None:
         raise ValueError(f"No Xvond-native record definition for {key}")
     return {
-        "enabled": _permission_mode(spec, requirement) != "never",
+        "enabled": True,
+        "_xvond_permission_mode": _permission_mode(spec, requirement),
         "label": purpose[:200] or key,
         "description": purpose[:1000],
         "module": definition["module"],
@@ -262,7 +266,8 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
         "customer_support": "customer_support",
     }
     return {
-        "enabled": _permission_mode(spec, requirement) != "never",
+        "enabled": True,
+        "_xvond_permission_mode": _permission_mode(spec, requirement),
         "label": purpose[:200] or key,
         "description": purpose[:1000],
         "module": module_map.get(key, "tools"),
@@ -335,8 +340,20 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
     if fulfillment_mode == "external_connection" and requirement.get("integration_id"):
         return build_external_integration_action_config(requirement=requirement, spec=spec)
 
+    graph_backed = any(
+        key in graph_action_types(routine.get("graph") or {})
+        for routine in _compiled_execution_routines(spec)
+        if isinstance(routine, dict)
+    )
+    legacy_plan = [
+        dict(step)
+        for step in (requirement.get("execution_plan") or [])
+        if isinstance(step, dict)
+    ][:20]
+
     return {
-        "enabled": _permission_mode(spec, requirement) != "never",
+        "enabled": True,
+        "_xvond_permission_mode": _permission_mode(spec, requirement),
         "label": purpose[:200] or key,
         "description": purpose[:1000],
         "module": "tools",
@@ -346,13 +363,14 @@ def build_managed_action_config(*, requirement: dict, spec: dict) -> dict:
             "type": "xvond_internal",
             "adapter": "generic_capability",
             "capability_key": key,
-            "delivery_mode": "compose",
+            "delivery_mode": "graph" if graph_backed else "legacy_plan",
+            "graph_backed": graph_backed,
             "primitives": primitives,
-            "execution_plan": [
-                dict(step)
-                for step in (requirement.get("execution_plan") or [])
-                if isinstance(step, dict)
-            ][:20],
+            # execution_plan is retained only for pre-graph/tiny legacy contracts.
+            # New universal employees execute their real work through the
+            # compiled execution graph and use this action as a bounded side-effect
+            # contract only when the graph explicitly references it.
+            "execution_plan": legacy_plan,
             "allowed_hosts": _grounded_https_hosts(spec),
             "job_summary": str(spec.get("summary") or "")[:1000],
             "job_brief": str(spec.get("job_brief") or "")[:2000],
@@ -451,12 +469,95 @@ def _generated_schedule_workflow(
     return None
 
 
+MAX_EXECUTION_ROUTINES = 20
+
+
+def _compiled_execution_routines(spec: dict) -> list[dict]:
+    """Return the employee's independent executable routines.
+
+    execution_routines is the multi-routine contract. The legacy execution_graph
+    remains a supported single-routine contract and is exposed as routine
+    "primary" so old employees keep working unchanged.
+    """
+
+    raw_routines = spec.get("execution_routines")
+    result: list[dict] = []
+    used_ids: set[str] = set()
+
+    if isinstance(raw_routines, list):
+        for index, raw in enumerate(raw_routines):
+            if not isinstance(raw, dict):
+                continue
+            graph = normalize_execution_graph(
+                raw.get("graph")
+                if isinstance(raw.get("graph"), dict)
+                else raw.get("execution_graph")
+            )
+            if not graph.get("nodes"):
+                continue
+
+            base_id = normalize_requirement_key(
+                raw.get("id") or raw.get("key") or raw.get("name") or f"routine_{index + 1}"
+            )[:80] or f"routine_{index + 1}"
+            routine_id = base_id
+            suffix = 2
+            while routine_id in used_ids:
+                routine_id = f"{base_id[:70]}_{suffix}"
+                suffix += 1
+            used_ids.add(routine_id)
+
+            name = str(raw.get("name") or routine_id.replace("_", " ")).strip()[:200]
+            requirement_keys: list[str] = []
+            for raw_key in raw.get("requirement_keys") or []:
+                key = normalize_requirement_key(raw_key)
+                if key and key not in requirement_keys:
+                    requirement_keys.append(key)
+
+            result.append(
+                {
+                    "id": routine_id,
+                    "name": name or routine_id,
+                    "requirement_keys": requirement_keys,
+                    "requirement_scope_declared": "requirement_keys" in raw,
+                    "graph": graph,
+                }
+            )
+            if len(result) >= MAX_EXECUTION_ROUTINES:
+                break
+
+    if result:
+        return result
+
+    legacy_graph = normalize_execution_graph(spec.get("execution_graph") or {})
+    if legacy_graph.get("nodes"):
+        return [
+            {
+                "id": "primary",
+                "name": "Primary routine",
+                "requirement_keys": [],
+                "requirement_scope_declared": False,
+                "graph": legacy_graph,
+            }
+        ]
+    return []
+
+
+def _routine_graph_for_action(routines: list[dict], action_type: str) -> dict | None:
+    target = str(action_type or "").strip()
+    for routine in routines:
+        graph = routine.get("graph")
+        if isinstance(graph, dict) and target in graph_action_types(graph):
+            return graph
+    return None
+
+
 def _generated_graph_trigger_workflow(
     db,
     *,
     company_id: int,
     agent_id: int,
     trigger_type: str,
+    routine_id: str = "primary",
 ) -> AutomationWorkflow | None:
     rows = (
         db.query(AutomationWorkflow)
@@ -468,10 +569,16 @@ def _generated_graph_trigger_workflow(
     )
     for row in rows:
         config = row.trigger_config if isinstance(row.trigger_config, dict) else {}
+        stored_routine_id = str(config.get("_xvond_routine_id") or "").strip()
+        routine_matches = (
+            stored_routine_id == routine_id
+            or (routine_id == "primary" and not stored_routine_id)
+        )
         if (
             config.get("_xvond_source") == "self_service_employee"
             and int(config.get("_xvond_agent_id") or 0) == int(agent_id)
             and config.get("_xvond_graph_trigger") is True
+            and routine_matches
         ):
             return row
     return None
@@ -487,6 +594,9 @@ def _provision_self_service_graph_trigger(
     actions: dict,
     action_plan: dict,
     runtime_inputs: dict | None = None,
+    routine_id: str = "primary",
+    routine_name: str | None = None,
+    requirement_keys: list[str] | None = None,
 ) -> tuple[str, int | None]:
     if str(company.onboarding_source or "").strip().lower() != "self_service":
         return "managed_delivery", None
@@ -494,6 +604,8 @@ def _provision_self_service_graph_trigger(
     graph = normalize_execution_graph(execution_graph or {})
     if not graph.get("nodes"):
         return "not_required", None
+    if graph_contract_errors(graph, graph_agent_id=agent_id):
+        return "setup_required", None
     trigger = graph.get("trigger") or {"type": "manual"}
     trigger_type = str(trigger.get("type") or "manual").strip().lower()
     if trigger_type not in {"manual", "schedule", "webhook", "event"}:
@@ -519,6 +631,10 @@ def _provision_self_service_graph_trigger(
         plan = action_plan.get(action_type) or {}
         if not isinstance(action, dict):
             return "setup_required", None
+        if str(action.get("_xvond_permission_mode") or "").strip().lower() == "never":
+            # An owner-denied node is a deliberate no-op at runtime, not missing
+            # setup. Other graph work may still run normally.
+            continue
         if str(plan.get("execution_status") or "") != "ready":
             return "setup_required", None
 
@@ -527,18 +643,23 @@ def _provision_self_service_graph_trigger(
         company_id=company.id,
         agent_id=agent_id,
         trigger_type=trigger_type,
+        routine_id=routine_id,
     )
     if workflow is not None and not workflow.enabled:
         return "disabled", workflow.id
     if workflow is None:
         workflow = AutomationWorkflow(
             company_id=company.id,
-            name="AI Employee Webhook Trigger",
+            name=(routine_name or f"AI Employee {trigger_type} routine")[:200],
             trigger_type=trigger_type,
             trigger_config={
                 "_xvond_source": "self_service_employee",
                 "_xvond_agent_id": agent_id,
                 "_xvond_graph_trigger": True,
+                "_xvond_routine_id": routine_id,
+                "_xvond_routine_name": (routine_name or routine_id)[:200],
+                "_xvond_requirement_keys": list(requirement_keys or []),
+                "_xvond_runtime_inputs": dict(runtime_inputs or {}),
                 "_xvond_generated": True,
                 **(
                     {"event_name": str(trigger.get("event") or "").strip()[:120]}
@@ -582,8 +703,6 @@ def _provision_self_service_schedule(
         return "managed_delivery", None
     if "scheduler" not in (requirement.get("primitives") or []):
         return "not_required", None
-    if action.get("confirmation_required", True):
-        return "approval_required", None
     raw_schedule = requirement.get("schedule")
     if not isinstance(raw_schedule, dict):
         return "schedule_required", None
@@ -605,6 +724,11 @@ def _provision_self_service_schedule(
     if missing:
         requirement["schedule_missing_inputs"] = missing
         return "runtime_inputs_required", None
+
+    if str(action.get("_xvond_permission_mode") or "").strip().lower() == "never":
+        return "permission_denied", None
+    if action.get("confirmation_required", True):
+        return "approval_required", None
 
     key = str(requirement.get("key") or "")
     workflow = _generated_schedule_workflow(
@@ -706,6 +830,9 @@ def _provision_self_service_schedule(
             )
             selected_graph = {"version": 1, "nodes": fallback_nodes}
 
+        if graph_contract_errors(selected_graph, graph_agent_id=agent_id):
+            return "setup_required", None
+
         workflow_steps = [
             {
                 "type": "graph",
@@ -775,14 +902,17 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
     automation_plan = {}
     changed = False
     company, company_timezone = _company_context(db, agent_id)
-    normalized_graph = normalize_execution_graph(prepared.get("execution_graph") or {})
-    graph_trigger_type = str(
-        (normalized_graph.get("trigger") or {}).get("type") or "manual"
-    ).strip().lower()
-    graph_owns_schedule = bool(
-        graph_trigger_type == "schedule"
-        and normalized_graph.get("nodes")
-    )
+    execution_routines = _compiled_execution_routines(prepared)
+    scheduled_graph_action_types: set[str] = set()
+    for routine in execution_routines:
+        graph = routine.get("graph") if isinstance(routine, dict) else None
+        if not isinstance(graph, dict):
+            continue
+        trigger_type = str(
+            (graph.get("trigger") or {}).get("type") or "manual"
+        ).strip().lower()
+        if trigger_type == "schedule":
+            scheduled_graph_action_types.update(graph_action_types(graph))
     for item in requirements:
         if not isinstance(item, dict):
             continue
@@ -803,10 +933,28 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
         if not isinstance(actions.get(key), dict):
             actions[key] = build_managed_action_config(requirement=item, spec=prepared)
             changed = True
-        # Existing operator configuration, permissions and disable switches win.
+        # Existing operator configuration and destination setup win, but
+        # Xvond-generated policy flags must follow the owner's latest permission.
         action = actions[key]
+        if action.get("xvond_generated") is True:
+            permission_mode = _permission_mode(prepared, item)
+            desired_confirmation = permission_mode != "automatic"
+            if (
+                action.get("confirmation_required", True) != desired_confirmation
+                or action.get("_xvond_permission_mode") != permission_mode
+            ):
+                # Operator enable/disable is a separate, higher-priority switch.
+                # Owner policy controls whether an enabled generated action may
+                # execute automatically, require approval, or be denied.
+                action["confirmation_required"] = desired_confirmation
+                action["_xvond_permission_mode"] = permission_mode
+                actions[key] = action
+                changed = True
         destination = action.get("destination") or {}
-        if not action.get("enabled", True) or (assignment is not None and not assignment.enabled):
+        permission_mode = str(action.get("_xvond_permission_mode") or "").strip().lower()
+        if permission_mode == "never":
+            execution_status = "permission_denied"
+        elif not action.get("enabled", True) or (assignment is not None and not assignment.enabled):
             execution_status = "disabled"
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "booking":
             execution_status = (
@@ -840,14 +988,14 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "business_record":
             execution_status = "ready"
         elif destination.get("type") == "xvond_internal" and destination.get("adapter") == "generic_capability":
-            plan = destination.get("execution_plan") or []
-            needs_http = any(
-                isinstance(step, dict) and step.get("op") == "http_get_json"
-                for step in plan
-            )
+            # A graph action is still a real side effect. Merely referencing a
+            # capability from the graph does not create an executor for it.
+            # Only mark the action ready when its bounded internal execution
+            # contract is actually runnable. Novel graph-native work should use
+            # native graph nodes; external side effects should bind a connection.
             execution_status = (
                 "ready"
-                if plan and (not needs_http or destination.get("allowed_hosts"))
+                if generic_capability_readiness(action).get("ready") is True
                 else "setup_required"
             )
         elif destination.get("type") == "workflow_engine":
@@ -860,7 +1008,7 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             company is not None
             and execution_status == "ready"
             and "scheduler" in (item.get("primitives") or [])
-            and not graph_owns_schedule
+            and key not in scheduled_graph_action_types
         ):
             schedule_status, schedule_workflow_id = _provision_self_service_schedule(
                 db,
@@ -869,7 +1017,8 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
                 agent_id=agent_id,
                 requirement=item,
                 action=action,
-                execution_graph=prepared.get("execution_graph"),
+                execution_graph=_routine_graph_for_action(execution_routines, key)
+                or prepared.get("execution_graph"),
             )
             if schedule_status not in {"ready", "not_required", "managed_delivery"}:
                 execution_status = "setup_required"
@@ -900,24 +1049,96 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
             "automation_workflow_id": schedule_workflow_id,
         }
 
-    graph_trigger_status = "not_required"
-    graph_trigger_workflow_id = None
-    graph_runtime_inputs: dict = {}
+    requirements_by_key = {
+        normalize_requirement_key(item.get("key")): item
+        for item in requirements
+        if isinstance(item, dict) and normalize_requirement_key(item.get("key"))
+    }
+    shared_graph_runtime_inputs: dict = {}
     for requirement in requirements:
         if isinstance(requirement, dict):
             for key, value in (requirement.get("runtime_inputs") or {}).items():
-                graph_runtime_inputs.setdefault(str(key), value)
+                shared_graph_runtime_inputs.setdefault(str(key), value)
+
+    graph_triggers: list[dict] = []
     if company is not None:
-        graph_trigger_status, graph_trigger_workflow_id = _provision_self_service_graph_trigger(
-            db,
-            company=company,
-            timezone=company_timezone,
-            agent_id=agent_id,
-            execution_graph=prepared.get("execution_graph"),
-            actions=actions,
-            action_plan=action_plan,
-            runtime_inputs=graph_runtime_inputs,
-        )
+        for routine in execution_routines:
+            routine_id = str(routine.get("id") or "primary").strip() or "primary"
+            routine_name = str(routine.get("name") or routine_id).strip() or routine_id
+            graph = routine.get("graph") if isinstance(routine.get("graph"), dict) else {}
+            requirement_keys = [
+                key
+                for key in (
+                    normalize_requirement_key(item)
+                    for item in (routine.get("requirement_keys") or [])
+                )
+                if key and key in requirements_by_key
+            ]
+
+            runtime_input_conflicts: list[str] = []
+            if requirement_keys:
+                routine_runtime_inputs: dict = {}
+                for requirement_key in requirement_keys:
+                    requirement = requirements_by_key[requirement_key]
+                    for raw_key, value in (requirement.get("runtime_inputs") or {}).items():
+                        key = str(raw_key)
+                        if (
+                            key in routine_runtime_inputs
+                            and routine_runtime_inputs[key] != value
+                        ):
+                            if key not in runtime_input_conflicts:
+                                runtime_input_conflicts.append(key)
+                            continue
+                        routine_runtime_inputs.setdefault(key, value)
+            elif routine.get("requirement_scope_declared") is True:
+                # v10+ explicit empty scope means this routine intentionally
+                # consumes no requirement-owned runtime defaults.
+                routine_runtime_inputs = {}
+            else:
+                # Backward compatibility only for older compiled employees
+                # whose routines never had a requirement scope field.
+                routine_runtime_inputs = dict(shared_graph_runtime_inputs)
+
+            if runtime_input_conflicts:
+                status, workflow_id = "runtime_input_conflict", None
+            else:
+                status, workflow_id = _provision_self_service_graph_trigger(
+                    db,
+                    company=company,
+                    timezone=company_timezone,
+                    agent_id=agent_id,
+                    execution_graph=graph,
+                    actions=actions,
+                    action_plan=action_plan,
+                    runtime_inputs=routine_runtime_inputs,
+                    routine_id=routine_id,
+                    routine_name=routine_name,
+                    requirement_keys=requirement_keys,
+                )
+            graph_triggers.append(
+                {
+                    "routine_id": routine_id,
+                    "routine_name": routine_name,
+                    "requirement_keys": requirement_keys,
+                    "runtime_input_conflicts": runtime_input_conflicts,
+                    "status": status,
+                    "workflow_id": workflow_id,
+                    "trigger_type": str(
+                        (graph.get("trigger") or {}).get("type") or "manual"
+                    ),
+                }
+            )
+
+    if graph_triggers:
+        primary_graph_trigger = dict(graph_triggers[0])
+    else:
+        primary_graph_trigger = {
+            "routine_id": "primary",
+            "routine_name": "Primary routine",
+            "status": "not_required",
+            "workflow_id": None,
+            "trigger_type": "manual",
+        }
 
     if changed:
         config["actions"] = actions
@@ -937,14 +1158,9 @@ def provision_compiled_capabilities(db, *, agent_id: int, spec: dict) -> tuple[d
         "provisioning_version": 1,
         "action_plan": action_plan,
         "automation_plan": automation_plan,
-        "graph_trigger": {
-            "status": graph_trigger_status,
-            "workflow_id": graph_trigger_workflow_id,
-            "trigger_type": str(
-                ((prepared.get("execution_graph") or {}).get("trigger") or {}).get("type")
-                or "manual"
-            ),
-        },
+        # Keep the singular field for old portal/API consumers.
+        "graph_trigger": primary_graph_trigger,
+        "graph_triggers": graph_triggers,
         "managed_capabilities": [
             item.get("key")
             for item in requirements

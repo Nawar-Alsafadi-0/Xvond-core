@@ -612,6 +612,52 @@ def _execution_blockers(
                 blockers.append(f"{key}: scheduled workflow is disabled")
             else:
                 blockers.append(f"{key}: execution setup required")
+
+    delivery = spec.get("delivery") if isinstance(spec.get("delivery"), dict) else {}
+    graph_triggers = (
+        [
+            item
+            for item in (delivery.get("graph_triggers") or [])
+            if isinstance(item, dict)
+        ]
+        if isinstance(delivery.get("graph_triggers"), list)
+        else []
+    )
+    if not graph_triggers:
+        legacy_graph_trigger = delivery.get("graph_trigger")
+        if isinstance(legacy_graph_trigger, dict):
+            graph_triggers = [legacy_graph_trigger]
+
+    for graph_trigger in graph_triggers:
+        graph_status = str(
+            graph_trigger.get("status") or "not_required"
+        ).strip().lower()
+        if graph_status in {"ready", "not_required", "managed_delivery"}:
+            continue
+        routine_name = str(
+            graph_trigger.get("routine_name")
+            or graph_trigger.get("routine_id")
+            or "Execution graph"
+        ).strip()
+        prefix = f"{routine_name}: "
+        if graph_status == "schedule_required":
+            blockers.append(prefix + "schedule configuration required")
+        elif graph_status == "schedule_setup_required":
+            blockers.append(prefix + "valid workspace timezone or schedule setup required")
+        elif graph_status == "runtime_input_conflict":
+            conflicts = ", ".join(
+                str(item)
+                for item in (graph_trigger.get("runtime_input_conflicts") or [])
+            )
+            blockers.append(
+                prefix
+                + "conflicting runtime input keys"
+                + (f" ({conflicts})" if conflicts else "")
+            )
+        elif graph_status == "disabled":
+            blockers.append(prefix + "generated workflow is disabled")
+        else:
+            blockers.append(prefix + "trigger setup required")
     return blockers
 
 
