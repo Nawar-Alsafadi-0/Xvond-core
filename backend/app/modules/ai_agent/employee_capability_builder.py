@@ -350,8 +350,21 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
 
         for raw_key in execute_operation.get("path_params") or []:
             add_field(raw_key, required=True)
+        required_query_keys = {
+            str(item or "").strip()
+            for item in (execute_operation.get("required_query_params") or [])
+            if str(item or "").strip()
+        }
+        declared_query_keys = {
+            str(item or "").strip()
+            for item in (execute_operation.get("query_params") or [])
+            if str(item or "").strip()
+        }
+        for raw_key in execute_operation.get("query_params") or []:
+            add_field(raw_key, required=str(raw_key or "").strip() in required_query_keys)
         for raw_key in execute_operation.get("required_query_params") or []:
-            add_field(raw_key, required=True)
+            if str(raw_key or "").strip() not in declared_query_keys:
+                add_field(raw_key, required=True)
         json_field_keys: set[str] = set()
         for raw_field in execute_operation.get("json_fields") or []:
             if not isinstance(raw_field, dict):
