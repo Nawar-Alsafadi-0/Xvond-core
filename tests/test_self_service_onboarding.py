@@ -14,7 +14,7 @@ def test_self_service_build_preview_is_not_blocked_by_subscription():
     # Interactive free-test messages remain disabled; the initial compiler build itself is free.
     assert SELF_SERVICE_FREE_TEST_MESSAGES == 0
     api = (ROOT / "backend" / "app" / "api" / "customer_employee_builder.py").read_text(encoding="utf-8")
-    assert "if not is_self_service_company(company):" in api
+    assert "if not is_self_service_employee(company, config):" in api
 
 
 def test_company_source_defaults_to_managed_for_existing_manual_flow():
