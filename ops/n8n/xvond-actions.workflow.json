@@ -21,7 +21,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst suppliedSecret = headers['x-xvond-n8n-secret'] || headers['X-Xvond-N8N-Secret'];\nconst expectedSecret = $env.N8N_SHARED_SECRET;\nconst requestId = String(body.request_id || headers['x-xvond-request-id'] || '');\nconst action = String(body.action || '').trim();\nconst data = body.data && typeof body.data === 'object' ? body.data : {};\nconst configuredAction = data.action_config && typeof data.action_config === 'object' ? data.action_config : null;\nconst destination = configuredAction?.destination && typeof configuredAction.destination === 'object' ? configuredAction.destination : {};\nconst destinationType = String(destination.type || '').trim();\nconst fail = (error, code, extra = {}) => [{ json: { success: false, request_id: requestId, action, data: { code, ...extra }, error } }];\nif (!expectedSecret || suppliedSecret !== expectedSecret) return fail('Unauthorized workflow request', 'unauthorized');\nif (!requestId || !body.company_id || !body.agent_id || !action) return fail('Invalid workflow request contract', 'invalid_contract');\nif (action === 'health_check') return [{ json: { success: true, request_id: requestId, action, data: { status: 'ok', engine: 'workflow', company_id: body.company_id, agent_id: body.agent_id }, error: null } }];\nconst routes = {\n  'booking.check_availability': { adapter: 'booking', mutates: false, operation: 'check_availability' },\n  'booking.execute': { adapter: 'booking', mutates: true, operation: 'execute' },\n  'booking.cancel': { adapter: 'booking', mutates: true, operation: 'cancel' },\n  'send_email.execute': { adapter: 'email', mutates: true, operation: 'execute' },\n  'crm.upsert_contact': { adapter: 'crm', mutates: true },\n  'crm.create_lead': { adapter: 'crm', mutates: true },\n  'pos.create_order': { adapter: 'pos', mutates: true },\n  'custom_api.execute': { adapter: 'custom_api', mutates: true, operation: 'execute' },\n  'notification.send': { adapter: 'notification', mutates: true },\n  'channel.provision': { adapter: 'channel', mutates: false, operation: 'provision' },\n  'channel.check': { adapter: 'channel', mutates: false, operation: 'check' },\n  'channel.send': { adapter: 'channel', mutates: true, operation: 'send' }\n};\nlet route = routes[action];\nlet actionKey = '';\nlet operation = route?.operation || '';\nif (!route) {\n  const match = action.match(/^([a-z0-9][a-z0-9_\\-]{0,127})\\.(check_availability|execute|cancel)$/i);\n  if (!match) return fail(`Unsupported workflow action: ${action}`, 'unsupported_action');\n  actionKey = match[1];\n  operation = match[2];\n  const declaredActionType = String(data.action_type || '').trim();\n  const moduleName = String(configuredAction?.module || '').trim();\n  if (!configuredAction || !declaredActionType || declaredActionType !== actionKey || !moduleName) return fail('Invalid generic business action contract', 'invalid_business_action', { action_key: actionKey || null });\n  route = { adapter: 'business', mutates: operation !== 'check_availability', action_key: actionKey, operation, module: moduleName, destination_type: destinationType || 'unconfigured' };\n}\nconst idempotencyKey = String(data.idempotency_key || '');\nif (route.mutates && !idempotencyKey) return fail('Mutating workflow action requires idempotency_key', 'missing_idempotency_key', { adapter: route.adapter });\nif (configuredAction && destinationType === 'xvond_internal' && ['check_availability', 'execute', 'cancel'].includes(operation)) {\n  return [{ json: { _dispatch: 'xvond_internal', company_id: body.company_id, agent_id: body.agent_id, conversation_id: body.conversation_id || null, action, request_id: requestId, data } }];\n}\nif (configuredAction && destinationType === 'integration' && ['check_availability', 'execute', 'cancel'].includes(operation)) {\n  const integrationId = Number(destination.integration_id || 0);\n  if (!integrationId) return fail('Connected integration is not selected', 'provider_not_configured', { destination_type: 'integration' });\n  let registry = {};\n  try { registry = JSON.parse($env.XVOND_WORKFLOW_INTEGRATIONS_JSON || '{}'); } catch (_e) { return fail('Workflow integration registry is invalid', 'provider_not_configured'); }\n  const routeKey = `${body.company_id}:${integrationId}`;\n  const target = registry[routeKey];\n  if (!target || target.type !== 'webhook' || typeof target.url !== 'string' || !target.url.startsWith('https://')) return fail('Connected integration route is not configured', 'provider_not_configured', { integration_id: integrationId, route_key: routeKey });\n  return [{ json: { _dispatch: 'connected_integration', company_id: body.company_id, agent_id: body.agent_id, conversation_id: body.conversation_id || null, integration_id: integrationId, route_key: routeKey, action, request_id: requestId, data } }];\n}\nif (action === 'channel.provision' || action === 'channel.check' || action === 'channel.send') {\n  const channelId = Number(data.channel_id || 0);\n  const connectionKey = String(data.connection_key || '').trim();\n  if (!channelId || !connectionKey) return fail('Invalid managed channel contract', 'invalid_channel_contract');\n  const routeKey = `${body.company_id}:${connectionKey}`;\n  if (action === 'channel.provision') {\n    const providerType = String(data.provider_type || '').trim().toLowerCase();\n    const providerUrl = String(data.provider_url || '').trim();\n    const providerSecret = String(data.provider_secret || '');\n    const providerConfig = data.provider_config && typeof data.provider_config === 'object' ? data.provider_config : {};\n    const allowedProviders = new Set(['telegram','instagram','messenger','meta','slack','sms','custom']);\n    let parsed;\n    try { parsed = new URL(providerUrl); } catch (_e) { parsed = null; }\n    if (!allowedProviders.has(providerType) || !parsed || parsed.protocol !== 'https:' || parsed.username || parsed.password || providerSecret.length < 32) {\n      return fail('Invalid managed channel provisioning contract', 'invalid_channel_provisioning');\n    }\n    if (providerType !== String(data.channel_type || '').trim().toLowerCase() && !(providerType === 'meta' && ['instagram','messenger'].includes(String(data.channel_type || '').trim().toLowerCase()))) {\n      return fail('Managed channel provider does not match channel type', 'provider_type_mismatch');\n    }\n    return [{ json: { _dispatch: 'channel_provision', company_id: body.company_id, agent_id: body.agent_id, channel_id: channelId, channel_type: String(data.channel_type || '').trim().toLowerCase(), route_key: routeKey, connection_key: connectionKey, provider_type: providerType, provider_url: providerUrl, provider_secret: providerSecret, provider_config: providerConfig, provider_account_label: String(data.provider_account_label || '').trim() || null, action, request_id: requestId } }];\n  }\n  return [{ json: { _dispatch: 'channel_registry_lookup', company_id: body.company_id, agent_id: body.agent_id, conversation_id: body.conversation_id || null, channel_id: channelId, channel_type: String(data.channel_type || '').trim().toLowerCase(), route_key: routeKey, connection_key: connectionKey, action, request_id: requestId, data } }];\n}\nreturn fail(`Workflow adapter is not configured: ${route.adapter}`, 'provider_not_configured', { adapter: route.adapter, action_key: route.action_key || null, operation: route.operation || null, module: route.module || null, destination_type: destinationType || route.destination_type || null, idempotency_key: idempotencyKey || null });"
+        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst suppliedSecret = headers['x-xvond-n8n-secret'] || headers['X-Xvond-N8N-Secret'];\nconst expectedSecret = $env.N8N_SHARED_SECRET;\nconst requestId = String(body.request_id || headers['x-xvond-request-id'] || '');\nconst action = String(body.action || '').trim();\nconst data = body.data && typeof body.data === 'object' ? body.data : {};\nconst configuredAction = data.action_config && typeof data.action_config === 'object' ? data.action_config : null;\nconst destination = configuredAction?.destination && typeof configuredAction.destination === 'object' ? configuredAction.destination : {};\nconst destinationType = String(destination.type || '').trim();\nconst fail = (error, code, extra = {}) => [{ json: { success: false, request_id: requestId, action, data: { code, ...extra }, error } }];\nif (!expectedSecret || suppliedSecret !== expectedSecret) return fail('Unauthorized workflow request', 'unauthorized');\nif (!requestId || !body.company_id || !body.agent_id || !action) return fail('Invalid workflow request contract', 'invalid_contract');\nif (action === 'health_check') return [{ json: { success: true, request_id: requestId, action, data: { status: 'ok', engine: 'workflow', company_id: body.company_id, agent_id: body.agent_id }, error: null } }];\nconst routes = {\n  'booking.check_availability': { adapter: 'booking', mutates: false, operation: 'check_availability' },\n  'booking.execute': { adapter: 'booking', mutates: true, operation: 'execute' },\n  'booking.cancel': { adapter: 'booking', mutates: true, operation: 'cancel' },\n  'send_email.execute': { adapter: 'email', mutates: true, operation: 'execute' },\n  'crm.upsert_contact': { adapter: 'crm', mutates: true },\n  'crm.create_lead': { adapter: 'crm', mutates: true },\n  'pos.create_order': { adapter: 'pos', mutates: true },\n  'custom_api.execute': { adapter: 'custom_api', mutates: true, operation: 'execute' },\n  'notification.send': { adapter: 'notification', mutates: true },\n  'channel.provision': { adapter: 'channel', mutates: false, operation: 'provision' },\n  'channel.deactivate': { adapter: 'channel', mutates: false, operation: 'deactivate' },\n  'channel.check': { adapter: 'channel', mutates: false, operation: 'check' },\n  'channel.send': { adapter: 'channel', mutates: true, operation: 'send' }\n};\nlet route = routes[action];\nlet actionKey = '';\nlet operation = route?.operation || '';\nif (!route) {\n  const match = action.match(/^([a-z0-9][a-z0-9_\\-]{0,127})\\.(check_availability|execute|cancel)$/i);\n  if (!match) return fail(`Unsupported workflow action: ${action}`, 'unsupported_action');\n  actionKey = match[1];\n  operation = match[2];\n  const declaredActionType = String(data.action_type || '').trim();\n  const moduleName = String(configuredAction?.module || '').trim();\n  if (!configuredAction || !declaredActionType || declaredActionType !== actionKey || !moduleName) return fail('Invalid generic business action contract', 'invalid_business_action', { action_key: actionKey || null });\n  route = { adapter: 'business', mutates: operation !== 'check_availability', action_key: actionKey, operation, module: moduleName, destination_type: destinationType || 'unconfigured' };\n}\nconst idempotencyKey = String(data.idempotency_key || '');\nif (route.mutates && !idempotencyKey) return fail('Mutating workflow action requires idempotency_key', 'missing_idempotency_key', { adapter: route.adapter });\nif (configuredAction && destinationType === 'xvond_internal' && ['check_availability', 'execute', 'cancel'].includes(operation)) {\n  return [{ json: { _dispatch: 'xvond_internal', company_id: body.company_id, agent_id: body.agent_id, conversation_id: body.conversation_id || null, action, request_id: requestId, data } }];\n}\nif (configuredAction && destinationType === 'integration' && ['check_availability', 'execute', 'cancel'].includes(operation)) {\n  const integrationId = Number(destination.integration_id || 0);\n  if (!integrationId) return fail('Connected integration is not selected', 'provider_not_configured', { destination_type: 'integration' });\n  let registry = {};\n  try { registry = JSON.parse($env.XVOND_WORKFLOW_INTEGRATIONS_JSON || '{}'); } catch (_e) { return fail('Workflow integration registry is invalid', 'provider_not_configured'); }\n  const routeKey = `${body.company_id}:${integrationId}`;\n  const target = registry[routeKey];\n  if (!target || target.type !== 'webhook' || typeof target.url !== 'string' || !target.url.startsWith('https://')) return fail('Connected integration route is not configured', 'provider_not_configured', { integration_id: integrationId, route_key: routeKey });\n  return [{ json: { _dispatch: 'connected_integration', company_id: body.company_id, agent_id: body.agent_id, conversation_id: body.conversation_id || null, integration_id: integrationId, route_key: routeKey, action, request_id: requestId, data } }];\n}\nif (action === 'channel.provision' || action === 'channel.deactivate' || action === 'channel.check' || action === 'channel.send') {\n  const channelId = Number(data.channel_id || 0);\n  const connectionKey = String(data.connection_key || '').trim();\n  if (!channelId || !connectionKey) return fail('Invalid managed channel contract', 'invalid_channel_contract');\n  const routeKey = `${body.company_id}:${connectionKey}`;\n  if (action === 'channel.provision') {\n    const providerType = String(data.provider_type || '').trim().toLowerCase();\n    const providerUrl = String(data.provider_url || '').trim();\n    const providerSecret = String(data.provider_secret || '');\n    const providerConfig = data.provider_config && typeof data.provider_config === 'object' ? data.provider_config : {};\n    const allowedProviders = new Set(['telegram','instagram','messenger','meta','slack','sms','custom']);\n    let parsed;\n    try { parsed = new URL(providerUrl); } catch (_e) { parsed = null; }\n    if (!allowedProviders.has(providerType) || !parsed || parsed.protocol !== 'https:' || parsed.username || parsed.password || providerSecret.length < 32) {\n      return fail('Invalid managed channel provisioning contract', 'invalid_channel_provisioning');\n    }\n    if (providerType !== String(data.channel_type || '').trim().toLowerCase() && !(providerType === 'meta' && ['instagram','messenger'].includes(String(data.channel_type || '').trim().toLowerCase()))) {\n      return fail('Managed channel provider does not match channel type', 'provider_type_mismatch');\n    }\n    return [{ json: { _dispatch: 'channel_provision', company_id: body.company_id, agent_id: body.agent_id, channel_id: channelId, channel_type: String(data.channel_type || '').trim().toLowerCase(), route_key: routeKey, connection_key: connectionKey, provider_type: providerType, provider_url: providerUrl, provider_secret: providerSecret, provider_config: providerConfig, provider_account_label: String(data.provider_account_label || '').trim() || null, action, request_id: requestId } }];\n  }\n  if (action === 'channel.deactivate') {\n    return [{ json: { _dispatch: 'channel_deactivate', company_id: body.company_id, agent_id: body.agent_id, channel_id: channelId, route_key: routeKey, connection_key: connectionKey, action, request_id: requestId } }];\n  }\n  return [{ json: { _dispatch: 'channel_registry_lookup', company_id: body.company_id, agent_id: body.agent_id, conversation_id: body.conversation_id || null, channel_id: channelId, channel_type: String(data.channel_type || '').trim().toLowerCase(), route_key: routeKey, connection_key: connectionKey, action, request_id: requestId, data } }];\n}\nreturn fail(`Workflow adapter is not configured: ${route.adapter}`, 'provider_not_configured', { adapter: route.adapter, action_key: route.action_key || null, operation: route.operation || null, module: route.module || null, destination_type: destinationType || route.destination_type || null, idempotency_key: idempotencyKey || null });"
       },
       "id": "validate-dispatch",
       "name": "Validate and Dispatch",
@@ -377,6 +377,78 @@
         1250,
         800
       ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "is-deactivate",
+              "leftValue": "={{ $json._dispatch }}",
+              "rightValue": "channel_deactivate",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-channel-deactivate",
+      "name": "Channel Deactivate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        760,
+        590
+      ]
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "={{ $env.XVOND_WORKFLOW_REGISTRY_URL + '/v1/routes/' + $json.company_id + '/' + encodeURIComponent($json.connection_key) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Xvond-Registry-Secret",
+              "value": "={{ $env.XVOND_WORKFLOW_REGISTRY_SECRET }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "deactivate-channel-route",
+      "name": "Deactivate Channel Route",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1010,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response=$input.first().json; const src=$('Validate and Dispatch').first().json; if(response?.success!==true) return [{json:{success:false,request_id:src.request_id,action:src.action,data:null,error:'Managed channel deactivation failed'}}]; return [{json:{success:true,request_id:src.request_id,action:src.action,data:{deactivated:response.deactivated===true,channel_id:src.channel_id,connection_key:src.connection_key},error:null}}];"
+      },
+      "id": "normalize-deactivate-result",
+      "name": "Normalize Deactivate Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1250,
+        560
+      ]
     }
   ],
   "pinData": {},
@@ -443,7 +515,7 @@
         ],
         [
           {
-            "node": "Channel Provision?",
+            "node": "Channel Deactivate?",
             "type": "main",
             "index": 0
           }
@@ -546,6 +618,46 @@
         [
           {
             "node": "Normalize Provision Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Channel Deactivate?": {
+      "main": [
+        [
+          {
+            "node": "Deactivate Channel Route",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Channel Provision?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deactivate Channel Route": {
+      "main": [
+        [
+          {
+            "node": "Normalize Deactivate Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Deactivate Result": {
+      "main": [
+        [
+          {
+            "node": "Return to Xvond",
             "type": "main",
             "index": 0
           }
