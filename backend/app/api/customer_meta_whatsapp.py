@@ -55,6 +55,10 @@ class CustomerEmbeddedSignupComplete(BaseModel):
     connection_mode: str | None = None
 
 
+class CustomerWhatsAppDisconnect(BaseModel):
+    agent_id: int
+
+
 def _customer_agent(db, current_user: User, agent_id: int) -> AIAgent:
     agent = (
         db.query(AIAgent)
@@ -360,6 +364,66 @@ def complete_embedded_signup(
             "runtime_ready": bool(channel.enabled and not blockers),
             "ready": not blockers,
             "blockers": blockers,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/disconnect")
+def disconnect_whatsapp(
+    data: CustomerWhatsAppDisconnect,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        agent = _customer_agent(db, current_user, data.agent_id)
+        channel = (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.company_id == current_user.company_id,
+                AgentChannel.agent_id == agent.id,
+                AgentChannel.channel_type == "whatsapp",
+            )
+            .with_for_update()
+            .first()
+        )
+        if channel is None:
+            raise HTTPException(404, "WhatsApp channel not found")
+
+        current = reveal_config(channel.config) or {}
+        preserved = {
+            key: current.get(key)
+            for key in (
+                "tone",
+                "response_style",
+                "response_length",
+                "emoji_style",
+                "channel_instructions",
+            )
+            if current.get(key) not in (None, "")
+        }
+        channel.enabled = False
+        channel.config = preserved
+        audit_service.log(
+            db=db,
+            action="whatsapp.customer_disconnected",
+            resource_type="agent_channel",
+            resource_id=channel.id,
+            user_id=current_user.id,
+            company_id=channel.company_id,
+            details={"agent_id": agent.id},
+        )
+        db.commit()
+        return {
+            "status": "disconnected",
+            "channel_id": channel.id,
+            "channel_type": "whatsapp",
         }
     except HTTPException:
         db.rollback()
