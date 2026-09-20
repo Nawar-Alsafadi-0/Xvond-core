@@ -902,6 +902,12 @@ def _compiler_connection_context(db, *, company_id: int) -> list[dict]:
                             for field in (value.get("json_fields") or [])[:50]
                             if isinstance(field, dict)
                         ],
+                        "required_form_fields": list(value.get("required_form_fields") or [])[:50],
+                        "form_fields": [
+                            dict(field)
+                            for field in (value.get("form_fields") or [])[:50]
+                            if isinstance(field, dict)
+                        ],
                         "response_status": str(value.get("response_status") or "")[:3],
                         "response_kind": str(value.get("response_kind") or "")[:20],
                         "response_fields": [
@@ -2914,7 +2920,7 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
         input_mode = str(
             raw.get("input_mode") or ("query" if method == "GET" else "json")
         ).strip().lower()
-        if input_mode not in {"json", "query", "none"}:
+        if input_mode not in {"json", "form", "query", "none"}:
             raise HTTPException(400, f"Invalid input mode for operation {name}")
         path_params = list(dict.fromkeys(
             re.findall(r"{([A-Za-z_][A-Za-z0-9_]{0,63})}", endpoint)
@@ -2974,6 +2980,50 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
                 if bounded_enum:
                     field["enum"] = bounded_enum
             json_fields.append(field)
+
+        required_form_fields = [
+            str(item).strip()
+            for item in (raw.get("required_form_fields") or [])
+            if re.fullmatch(
+                r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}",
+                str(item or "").strip(),
+            )
+        ][:50]
+        form_fields: list[dict] = []
+        raw_form_fields = raw.get("form_fields")
+        raw_form_fields = raw_form_fields if isinstance(raw_form_fields, list) else []
+        for item in raw_form_fields[:50]:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}", key):
+                continue
+            field = {
+                "key": key,
+                "required": bool(item.get("required")) or key in required_form_fields,
+                "type": str(item.get("type") or "string").strip().lower()[:20],
+            }
+            fmt = str(item.get("format") or "").strip().lower()[:40]
+            if fmt:
+                field["format"] = fmt
+            description = str(item.get("description") or "").strip()[:300]
+            if description:
+                field["description"] = description
+            enum = item.get("enum")
+            if isinstance(enum, list):
+                bounded_enum = [
+                    value for value in enum[:20]
+                    if isinstance(value, (str, int, float, bool)) or value is None
+                ]
+                if bounded_enum:
+                    field["enum"] = bounded_enum
+            form_fields.append(field)
+        for field in form_fields:
+            if field["required"] and field["key"] not in required_form_fields:
+                required_form_fields.append(field["key"])
+                if len(required_form_fields) >= 50:
+                    break
+
         for field in json_fields:
             if field["required"] and field["key"] not in required_json_fields:
                 required_json_fields.append(field["key"])
@@ -3036,6 +3086,8 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
             "required_query_params": list(dict.fromkeys(required_query_params)),
             "required_json_fields": list(dict.fromkeys(required_json_fields)),
             "json_fields": json_fields,
+            "required_form_fields": list(dict.fromkeys(required_form_fields)),
+            "form_fields": form_fields,
             "description": str(raw.get("description") or "").strip()[:500],
         }
         if response_status:

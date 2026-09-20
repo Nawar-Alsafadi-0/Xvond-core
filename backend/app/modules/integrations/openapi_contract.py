@@ -207,37 +207,118 @@ def _object_schema_parts(document: dict, schema: dict, *, depth: int = 0) -> tup
     return properties, required
 
 
-def _request_json_schema(document: dict, operation: dict, parameters: list) -> dict:
+def _request_body_contract(
+    document: dict,
+    operation: dict,
+    parameters: list,
+) -> tuple[str, dict]:
+    """Return one bounded request media contract.
+
+    JSON and application/x-www-form-urlencoded are executable today. Multipart
+    and other media types stay fail-closed until Xvond has a dedicated binary
+    upload/streaming contract instead of pretending they are JSON.
+    """
     request_body = operation.get("requestBody")
     if isinstance(request_body, dict):
         request_body = _local_schema_ref(document, request_body) or request_body
         content = request_body.get("content")
-        if isinstance(content, dict):
-            candidates = []
-            if isinstance(content.get("application/json"), dict):
-                candidates.append(content["application/json"])
-            candidates.extend(
-                value
-                for media_type, value in content.items()
-                if str(media_type or "").lower().endswith("+json")
-                and isinstance(value, dict)
-            )
-            for media in candidates[:5]:
-                schema = media.get("schema")
-                if isinstance(schema, dict):
-                    return schema
+        if not isinstance(content, dict) or not content:
+            return "unsupported", {}
 
-    # Swagger 2.0 represents JSON request bodies as a body parameter.
+        json_candidates: list[dict] = []
+        if isinstance(content.get("application/json"), dict):
+            json_candidates.append(content["application/json"])
+        json_candidates.extend(
+            value
+            for media_type, value in content.items()
+            if str(media_type or "").lower().endswith("+json")
+            and isinstance(value, dict)
+        )
+        for media in json_candidates[:5]:
+            schema = media.get("schema")
+            if isinstance(schema, dict):
+                return "json", schema
+
+        form = content.get("application/x-www-form-urlencoded")
+        if isinstance(form, dict):
+            schema = form.get("schema")
+            if isinstance(schema, dict):
+                return "form", schema
+
+        # Never downgrade multipart, XML, arbitrary binary or unknown body
+        # formats to JSON. That would silently execute the wrong provider call.
+        return "unsupported", {}
+
+    # Swagger 2.0 body/formData contracts.
+    consumes = operation.get("consumes")
+    if not isinstance(consumes, list):
+        consumes = document.get("consumes")
+    consumes = [
+        str(item or "").strip().lower()
+        for item in (consumes or [])
+        if str(item or "").strip()
+    ]
+
     for parameter in parameters[:100]:
         if not isinstance(parameter, dict):
             continue
         if str(parameter.get("in") or "").strip().lower() != "body":
             continue
         schema = parameter.get("schema")
-        if isinstance(schema, dict):
-            return schema
-    return {}
+        if not isinstance(schema, dict):
+            return "unsupported", {}
+        if consumes and not any(
+            media == "application/json" or media.endswith("+json")
+            for media in consumes
+        ):
+            return "unsupported", {}
+        return "json", schema
 
+    form_parameters = [
+        parameter
+        for parameter in parameters[:100]
+        if isinstance(parameter, dict)
+        and str(parameter.get("in") or "").strip().lower() == "formdata"
+    ]
+    if form_parameters:
+        if consumes and "application/x-www-form-urlencoded" not in consumes:
+            return "unsupported", {}
+        properties: dict[str, dict] = {}
+        required: list[str] = []
+        for parameter in form_parameters[:50]:
+            key = str(parameter.get("name") or "").strip()
+            if not _BODY_FIELD_RE.fullmatch(key):
+                continue
+            field: dict[str, Any] = {
+                "type": str(parameter.get("type") or "string").strip().lower()[:20]
+            }
+            fmt = str(parameter.get("format") or "").strip().lower()[:40]
+            if fmt:
+                field["format"] = fmt
+            description = str(parameter.get("description") or "").strip()[:300]
+            if description:
+                field["description"] = description
+            enum = parameter.get("enum")
+            if isinstance(enum, list):
+                bounded_enum = [
+                    item
+                    for item in enum[:20]
+                    if isinstance(item, (str, int, float, bool)) or item is None
+                ]
+                if bounded_enum:
+                    field["enum"] = bounded_enum
+            properties[key] = field
+            if parameter.get("required") is True:
+                required.append(key)
+        if not properties:
+            return "unsupported", {}
+        return "form", {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        }
+
+    return "none", {}
 
 def _json_field_metadata(document: dict, schema: dict) -> tuple[list[str], list[dict]]:
     properties, required = _object_schema_parts(document, schema)
@@ -422,9 +503,27 @@ def normalize_openapi_document(document: dict) -> dict:
                     str(item.get("name") or "").strip(),
                 )
             ]
-            request_schema = _request_json_schema(document, operation, parameters)
-            has_request_body = bool(request_schema) or isinstance(operation.get("requestBody"), dict)
-            required_json_fields, json_fields = _json_field_metadata(
+            request_mode, request_schema = _request_body_contract(
+                document,
+                operation,
+                parameters,
+            )
+            if request_mode == "unsupported":
+                continue
+            if method == "GET" and request_mode in {"json", "form"}:
+                # GET request bodies are not portable enough for the generic
+                # adapter; fail closed instead of manufacturing semantics.
+                continue
+            if (
+                request_mode in {"json", "form"}
+                and _schema_kind(document, request_schema) != "object"
+            ):
+                # The action contract carries structured detail objects. Root
+                # arrays/scalars need a separate payload contract; pretending
+                # they are objects would send the provider the wrong shape.
+                continue
+
+            required_body_fields, body_fields = _json_field_metadata(
                 document,
                 request_schema,
             )
@@ -432,8 +531,8 @@ def normalize_openapi_document(document: dict) -> dict:
 
             if method == "GET":
                 input_mode = "query"
-            elif has_request_body:
-                input_mode = "json"
+            elif request_mode in {"json", "form"}:
+                input_mode = request_mode
             elif has_query_parameters:
                 input_mode = "query"
             else:
@@ -453,8 +552,10 @@ def normalize_openapi_document(document: dict) -> dict:
                 "path_params": list(dict.fromkeys(placeholders)),
                 "query_params": list(dict.fromkeys(query_params)),
                 "required_query_params": list(dict.fromkeys(required_query_params)),
-                "required_json_fields": required_json_fields if input_mode == "json" else [],
-                "json_fields": json_fields if input_mode == "json" else [],
+                "required_json_fields": required_body_fields if input_mode == "json" else [],
+                "json_fields": body_fields if input_mode == "json" else [],
+                "required_form_fields": required_body_fields if input_mode == "form" else [],
+                "form_fields": body_fields if input_mode == "form" else [],
                 **response_metadata,
                 "description": str(
                     operation.get("summary")

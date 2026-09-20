@@ -1066,3 +1066,134 @@ def test_connected_api_runtime_exposes_structured_provider_response(
     assert result.data["status_code"] == 201
     assert result.data["response"] == {"id": "rec-42", "state": "created"}
     assert captured["max_response_bytes"] == action_runtime.MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS
+
+def test_generic_api_urlencoded_form_is_shaped_and_sent_as_form_data(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    operation = {
+        "method": "POST",
+        "endpoint": "/session",
+        "input_mode": "form",
+        "required_form_fields": ["username"],
+        "form_fields": [
+            {"key": "username", "required": True, "type": "string"},
+            {"key": "remember", "required": False, "type": "boolean"},
+        ],
+    }
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {"execute": operation},
+            "auth_type": "none",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+        }
+        db.commit()
+
+    monkeypatch.setattr(action_runtime, "validate_public_http_url", lambda url: url)
+    captured = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status_code": 200,
+            "response": '{"session_id":"s-1"}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(action_runtime, "safe_http_request", fake_request)
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "vendor_session",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "validation_required": True,
+                    "operations": {"execute": operation},
+                }
+            },
+            {
+                "details": {
+                    "username": "nawar",
+                    "remember": True,
+                    "ai_response": "internal-only",
+                }
+            },
+            "execute",
+            idempotency_key="form-1",
+        )
+
+    assert result.success is True
+    assert captured["json_data"] is None
+    assert captured["form_data"] == {
+        "username": "nawar",
+        "remember": True,
+    }
+    assert captured["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+
+
+def test_generic_api_urlencoded_form_missing_required_field_fails_before_http(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    operation = {
+        "method": "POST",
+        "endpoint": "/session",
+        "input_mode": "form",
+        "required_form_fields": ["username"],
+        "form_fields": [
+            {"key": "username", "required": True, "type": "string"},
+        ],
+    }
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {"execute": operation},
+            "auth_type": "none",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+        }
+        db.commit()
+
+    monkeypatch.setattr(
+        action_runtime,
+        "safe_http_request",
+        lambda **kwargs: pytest.fail("Incomplete form must not reach provider"),
+    )
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "vendor_session",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "validation_required": True,
+                    "operations": {"execute": operation},
+                }
+            },
+            {"details": {"ai_response": "internal-only"}},
+            "execute",
+            idempotency_key="form-missing-1",
+        )
+
+    assert result.success is False
+    assert result.data["missing_fields"] == ["username"]
+    assert "requires form field(s): username" in str(result.error)
