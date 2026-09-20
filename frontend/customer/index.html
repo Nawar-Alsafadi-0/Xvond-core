@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/static/customer/inbox-v2.css?v=20260905-1">
     <link rel="stylesheet" href="/static/customer/portal-pro.css?v=20260905-4">
     <link rel="stylesheet" href="/static/customer/employee-builder.css?v=20260918-journey1">
+    <link rel="stylesheet" href="/static/customer/responsive-shell.css?v=20260920-final1">
 </head>
 <body>
 <div id="login-screen" class="login-screen">
@@ -15,11 +16,13 @@
         <div class="brand">Xvond</div>
         <h2>Customer Login</h2>
         <div id="normal-login-form">
+            <label class="sr-only" for="login-email">Email</label>
             <input id="login-email" type="email" placeholder="Email" autocomplete="username">
+            <label class="sr-only" for="login-password">Password</label>
             <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" onkeydown="if(event.key==='Enter') login()">
             <button onclick="login()">Login</button>
             <button type="button" onclick="showForgotPassword()" style="margin-top:10px;background:transparent !important;border:none !important;cursor:pointer;text-decoration:underline;color:#2563eb !important;font-weight:700">Forgot Password?</button>
-            <div id="login-error" class="error"></div>
+            <div id="login-error" class="error" role="status" aria-live="polite"></div>
         </div>
         <div id="forgot-password-form" class="hidden">
             <p>Enter your account email. We will send a 6-digit verification code.</p>
@@ -43,16 +46,20 @@
 </div>
 
 <div id="portal" class="portal hidden">
-    <aside class="sidebar">
+    <a class="skip-link" href="#customer-main">Skip to main content</a>
+    <aside id="customer-sidebar" class="sidebar" aria-label="Customer navigation">
         <div class="logo">Xvond</div>
         <div class="portal-label">Customer Workspace</div>
         <nav id="portal-nav"></nav>
         <button class="logout" onclick="logout()">Logout</button>
     </aside>
 
-    <main class="main">
+    <button id="customer-nav-scrim" class="nav-scrim" type="button" aria-label="Close navigation" tabindex="-1"></button>
+
+    <main id="customer-main" class="main" tabindex="-1">
         <header class="topbar">
-            <div><h1 id="page-title">Overview</h1><p>AI employees, customer operations and business workspace</p></div>
+            <button id="customer-menu-toggle" class="mobile-menu-toggle" type="button" aria-controls="customer-sidebar" aria-expanded="false" aria-label="Open navigation"><span aria-hidden="true">☰</span></button>
+            <div class="topbar-title"><h1 id="page-title">Overview</h1><p>AI employees, customer operations and business workspace</p></div>
             <div id="user-email"></div>
         </header>
 
@@ -148,7 +155,7 @@
     </main>
 </div>
 <script>localStorage.removeItem("xvond_customer_token");</script>
-<script src="/static/customer/app.js?v=20260918-journey1"></script>
+<script src="/static/customer/app.js?v=20260920-final1"></script>
 <script src="/static/customer/timezone-fix.js?v=20260915-1"></script>
 <script src="/static/customer/company-lifecycle-banner.js?v=20260914-lifecycle1"></script>
 <script src="/static/customer/cookie-session.js?v=20260911-1"></script>
