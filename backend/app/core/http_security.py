@@ -166,6 +166,7 @@ def safe_http_request(
     json_data=None,
     form_data: dict | None = None,
     multipart_data: dict | None = None,
+    multipart_files: dict | None = None,
     timeout: float = 15.0,
     max_response_bytes: int = 1_000_000,
 ) -> dict:
@@ -207,16 +208,28 @@ def safe_http_request(
         ).items()
     }
 
-    if form_data is not None and multipart_data is not None:
+    if form_data is not None and (
+        multipart_data is not None or multipart_files is not None
+    ):
         raise ValueError("Form and multipart payloads are mutually exclusive")
 
-    multipart_files = None
-    if multipart_data is not None:
-        multipart_files = {
-            str(key): (None, str(value))
-            for key, value in multipart_data.items()
-            if value is not None
-        }
+    multipart_parts = None
+    if multipart_data is not None or multipart_files is not None:
+        multipart_parts = {}
+        for key, value in (multipart_data or {}).items():
+            if value is not None:
+                multipart_parts[str(key)] = (None, str(value))
+        for key, raw in (multipart_files or {}).items():
+            if (
+                not isinstance(raw, tuple)
+                or len(raw) != 3
+                or not isinstance(raw[1], (bytes, bytearray))
+            ):
+                raise ValueError("Multipart file payload is invalid")
+            filename = str(raw[0] or "file")[:255]
+            content = bytes(raw[1])
+            content_type = str(raw[2] or "application/octet-stream")[:120]
+            multipart_parts[str(key)] = (filename, content, content_type)
 
     # Do not automatically follow redirects.
     # Prevents public URL -> private URL SSRF.
@@ -231,11 +244,11 @@ def safe_http_request(
             headers=request_headers,
             json=(
                 json_data
-                if form_data is None and multipart_data is None
+                if form_data is None and multipart_data is None and multipart_files is None
                 else None
             ),
             data=form_data,
-            files=multipart_files,
+            files=multipart_parts,
         ) as response:
 
             body = bytearray()
