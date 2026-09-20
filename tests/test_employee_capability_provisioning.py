@@ -3616,6 +3616,12 @@ def test_compiler_connection_context_is_validated_tenant_safe_and_secret_free(da
                         "method": "POST",
                         "endpoint": "/orders",
                         "input_mode": "json",
+                        "response_status": "201",
+                        "response_kind": "object",
+                        "response_fields": [
+                            {"key": "id", "required": True, "type": "string"},
+                            {"key": "state", "required": False, "type": "string"},
+                        ],
                         "description": "Create order",
                     }
                 },
@@ -3665,6 +3671,12 @@ def test_compiler_connection_context_is_validated_tenant_safe_and_secret_free(da
     assert context[0]["name"] == "Vendor API"
     assert context[0]["type"] == "custom_api"
     assert context[0]["operations"]["create_order"]["endpoint"] == "/orders"
+    assert context[0]["operations"]["create_order"]["response_status"] == "201"
+    assert context[0]["operations"]["create_order"]["response_kind"] == "object"
+    assert [
+        item["key"]
+        for item in context[0]["operations"]["create_order"]["response_fields"]
+    ] == ["id", "state"]
     rendered = json.dumps(context)
     assert "super-secret" not in rendered
     assert "api_key" not in rendered
