@@ -2922,7 +2922,9 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
             )
         ][:50]
         json_fields: list[dict] = []
-        for item in (raw.get("json_fields") or [])[:50]:
+        raw_json_fields = raw.get("json_fields")
+        raw_json_fields = raw_json_fields if isinstance(raw_json_fields, list) else []
+        for item in raw_json_fields[:50]:
             if not isinstance(item, dict):
                 continue
             key = str(item.get("key") or "").strip()
