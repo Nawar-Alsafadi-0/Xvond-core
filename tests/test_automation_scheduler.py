@@ -4359,3 +4359,360 @@ def test_automatic_safe_retry_stops_after_bounded_attempts(monkeypatch):
 
     engine.dispose()
 
+def test_graph_runtime_repeat_passes_previous_result_and_stops(monkeypatch):
+    seen = []
+    runtime = automation_runtime_module.AutomationRuntime()
+    original = runtime.execute_step
+
+    def dispatch(db, company_id, step, state, *, run_id, step_index):
+        if step.get("type") == "graph":
+            return original(
+                db, company_id, step, state,
+                run_id=run_id, step_index=step_index,
+            )
+        if step.get("type") == "scheduled_action":
+            cursor = (step.get("arguments") or {}).get("cursor")
+            seen.append(cursor)
+            next_cursor = None if cursor == 2 else cursor + 1
+            return {"cursor": cursor, "next": next_cursor}
+        raise AssertionError(step.get("type"))
+
+    monkeypatch.setattr(runtime, "execute_step", dispatch)
+
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 1,
+            "graph": {
+                "version": 1,
+                "nodes": [{
+                    "id": "pages",
+                    "type": "repeat",
+                    "params": {
+                        "max_iterations": 5,
+                        "initial": {"next": 0},
+                        "until": {
+                            "path": "next",
+                            "operator": "eq",
+                            "value": None,
+                        },
+                        "graph": {
+                            "version": 1,
+                            "nodes": [{
+                                "id": "fetch",
+                                "type": "action",
+                                "params": {
+                                    "action_type": "list_records",
+                                    "arguments": {"cursor": "$previous.next"},
+                                },
+                            }],
+                        },
+                    },
+                }],
+            },
+        },
+        state={"_xvond_execution_key": "repeat-pagination"},
+        run_id=1,
+        step_index=0,
+    )
+
+    repeat = result["graph_outputs"]["pages"]
+    assert seen == [0, 1, 2]
+    assert repeat["count"] == 3
+    assert repeat["stopped"] is True
+    assert repeat["limit_reached"] is False
+    assert repeat["last"]["next"] is None
+
+
+def test_graph_runtime_repeat_reports_limit_reached(monkeypatch):
+    runtime = automation_runtime_module.AutomationRuntime()
+    original = runtime.execute_step
+
+    def dispatch(db, company_id, step, state, *, run_id, step_index):
+        if step.get("type") == "graph":
+            return original(
+                db, company_id, step, state,
+                run_id=run_id, step_index=step_index,
+            )
+        if step.get("type") == "scheduled_action":
+            return {"done": False}
+        raise AssertionError(step.get("type"))
+
+    monkeypatch.setattr(runtime, "execute_step", dispatch)
+    result = runtime.execute_step(
+        db=object(),
+        company_id=1,
+        step={
+            "type": "graph",
+            "agent_id": 1,
+            "graph": {
+                "version": 1,
+                "nodes": [{
+                    "id": "bounded",
+                    "type": "repeat",
+                    "params": {
+                        "max_iterations": 2,
+                        "until": {
+                            "path": "done",
+                            "operator": "eq",
+                            "value": True,
+                        },
+                        "graph": {
+                            "version": 1,
+                            "nodes": [{
+                                "id": "work",
+                                "type": "action",
+                                "params": {
+                                    "action_type": "bounded_work",
+                                    "arguments": {"iteration": "$index"},
+                                },
+                            }],
+                        },
+                    },
+                }],
+            },
+        },
+        state={"_xvond_execution_key": "repeat-limit"},
+        run_id=1,
+        step_index=0,
+    )
+    repeat = result["graph_outputs"]["bounded"]
+    assert repeat["count"] == 2
+    assert repeat["stopped"] is False
+    assert repeat["limit_reached"] is True
+
+def test_nested_repeat_wait_resumes_without_replaying_completed_iterations(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    calls = {"fetch": 0}
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_request(**kwargs):
+        calls["fetch"] += 1
+        return {
+            "status_code": 200,
+            "response": '{"ok":true}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(automation_runtime_module, "safe_http_request", fake_request)
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(
+            id=1,
+            name="Repeat Wait",
+            active=True,
+            lifecycle_status="live",
+            onboarding_source="self_service",
+        ))
+        db.add(AIAgent(
+            id=1,
+            company_id=1,
+            name="Paged worker",
+            system_prompt="Process pages with durable pauses.",
+            provider="mock",
+            model="mock",
+            enabled=True,
+        ))
+        db.flush()
+        db.add(AgentConfig(
+            agent_id=1,
+            agent_type="employee",
+            settings={},
+            capabilities={},
+            customer_controls={},
+        ))
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Repeat wait graph",
+            trigger_type="manual",
+            trigger_config={"_xvond_agent_id": 1},
+            steps=[{
+                "type": "graph",
+                "agent_id": 1,
+                "graph": {
+                    "version": 1,
+                    "nodes": [{
+                        "id": "pages",
+                        "type": "repeat",
+                        "params": {
+                            "max_iterations": 5,
+                            "until": {
+                                "path": "done",
+                                "operator": "eq",
+                                "value": 1,
+                            },
+                            "graph": {
+                                "version": 1,
+                                "nodes": [
+                                    {
+                                        "id": "fetch",
+                                        "type": "http_get_json",
+                                        "params": {"url": "https://example.com/data"},
+                                    },
+                                    {
+                                        "id": "pause",
+                                        "type": "wait",
+                                        "depends_on": ["fetch"],
+                                        "params": {"duration": 1, "unit": "minutes"},
+                                    },
+                                    {
+                                        "id": "done",
+                                        "type": "transform",
+                                        "depends_on": ["pause"],
+                                        "params": {"values": {"done": "$index"}},
+                                    },
+                                ],
+                            },
+                        },
+                    }],
+                },
+            }],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        first = runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={"_xvond_execution_key": "repeat-wait-test"},
+        )
+        assert first.status == "waiting_time"
+        assert calls["fetch"] == 1
+
+        second = runtime.resume_wait(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=first,
+            now=first.resume_at,
+        )
+        assert second.status == "waiting_time"
+        assert calls["fetch"] == 2
+
+        finished = runtime.resume_wait(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=second,
+            now=second.resume_at,
+        )
+        assert finished.status == "success"
+        assert calls["fetch"] == 2
+        pages = finished.output_data["steps"][-1]["result"]["graph_outputs"]["pages"]
+        assert pages["count"] == 2
+        assert pages["stopped"] is True
+        assert pages["limit_reached"] is False
+
+    engine.dispose()
+
+def test_repeat_graph_actions_use_stable_per_iteration_idempotency_keys(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    calls = []
+
+    def fake_capability(*args, **kwargs):
+        details = dict(kwargs.get("details") or {})
+        calls.append({
+            "details": details,
+            "idempotency_key": kwargs["idempotency_key"],
+        })
+        return {
+            "iteration": details["iteration"],
+            "done": details["iteration"] >= 1,
+        }
+
+    monkeypatch.setattr(
+        automation_runtime_module,
+        "execute_generic_capability",
+        fake_capability,
+    )
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(id=1, name="Repeat Idempotency", active=True))
+        db.add(AIAgent(
+            id=1,
+            company_id=1,
+            name="Worker",
+            system_prompt="work",
+            provider="mock",
+            model="mock",
+            enabled=True,
+        ))
+        db.flush()
+        db.add(AgentToolAssignment(
+            agent_id=1,
+            tool_name="action_request",
+            enabled=True,
+            config={
+                "actions": {
+                    "page_action": {
+                        "enabled": True,
+                        "confirmation_required": False,
+                        "_xvond_permission_mode": "automatic",
+                        "destination": {
+                            "type": "xvond_internal",
+                            "adapter": "generic_capability",
+                        },
+                    }
+                }
+            },
+        ))
+        db.commit()
+
+        graph = {
+            "version": 1,
+            "nodes": [{
+                "id": "pages",
+                "type": "repeat",
+                "params": {
+                    "max_iterations": 4,
+                    "until": {"path": "scheduled_action_result.done", "operator": "eq", "value": True},
+                    "graph": {
+                        "version": 1,
+                        "nodes": [{
+                            "id": "send",
+                            "type": "action",
+                            "params": {
+                                "action_type": "page_action",
+                                "arguments": {"iteration": "$index"},
+                            },
+                        }],
+                    },
+                },
+            }],
+        }
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        for _ in range(2):
+            result = runtime.execute_step(
+                db,
+                1,
+                {"type": "graph", "agent_id": 1, "graph": graph},
+                {"_xvond_execution_key": "stable-repeat-retry"},
+                run_id=1,
+                step_index=0,
+            )
+            assert result["graph_outputs"]["pages"]["count"] == 2
+
+    assert len(calls) == 4
+    first_run_keys = [item["idempotency_key"] for item in calls[:2]]
+    second_run_keys = [item["idempotency_key"] for item in calls[2:]]
+    assert first_run_keys[0] != first_run_keys[1]
+    assert first_run_keys == second_run_keys
+    assert all(
+        key.startswith("stable-repeat-retry:") and ":graph:" in key
+        for key in first_run_keys
+    )
+    engine.dispose()

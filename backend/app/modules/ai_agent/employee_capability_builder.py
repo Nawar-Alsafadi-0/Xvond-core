@@ -254,7 +254,7 @@ def _external_graph_operations(spec: dict, requirement_key: str) -> list[str]:
                 operation = normalize_requirement_key(params.get("operation"))
                 if operation and operation not in result:
                     result.append(operation)
-            elif node_type == "foreach":
+            elif node_type in {"foreach", "repeat"}:
                 nested = params.get("graph")
                 if isinstance(nested, dict):
                     visit(nested)
