@@ -8,6 +8,7 @@ from backend.app.modules.ai_agent.employee_builder import (
     blueprint_readiness,
     build_employee_blueprint,
 )
+from backend.app.modules.ai_agent.employee_compiler import normalize_compiled_spec
 from backend.app.modules.ai_agent.self_service_policy import (
     configured_channel_types,
     self_service_spec_view,
@@ -85,6 +86,10 @@ def test_public_channel_catalog_exposes_delivery_truth_without_configs_or_secret
     assert items["custom"]["packaged_provider"] is True
     assert items["sms"]["availability"] == "xvond_managed_live"
     assert items["sms"]["packaged_provider"] is True
+    assert items["email"]["availability"] == "xvond_managed_live"
+    assert items["email"]["packaged_provider"] is True
+    assert items["teams"]["availability"] == "xvond_managed_live"
+    assert items["teams"]["packaged_provider"] is True
     assert items["xvond"]["availability"] == "built_in"
 
     for item in payload["channels"]:
@@ -96,10 +101,10 @@ def test_public_channel_catalog_exposes_delivery_truth_without_configs_or_secret
 def test_open_ended_builder_detects_managed_and_self_service_channels():
     blueprint = build_employee_blueprint(
         "بدي موظف يرد على واتساب ورسائل انستغرام، يتصل هاتفيًا، "
-        "ويتابع Telegram وSlack ويرد على العملاء بالإيميل وSMS"
+        "ويتابع Telegram وSlack وMicrosoft Teams ويرد على العملاء بالإيميل وSMS"
     )
 
-    for key in ("whatsapp", "instagram", "voice", "telegram", "slack", "email", "sms"):
+    for key in ("whatsapp", "instagram", "voice", "telegram", "slack", "teams", "email", "sms"):
         assert key in blueprint.channels
 
     readiness = blueprint_readiness(blueprint)
@@ -239,3 +244,26 @@ def test_customer_inbox_only_counts_channels_with_real_runtime():
     assert "instagram" in LIVE_INBOX_CHANNELS
     assert "telegram" in LIVE_INBOX_CHANNELS
     assert "email" in LIVE_INBOX_CHANNELS
+
+
+def test_unknown_communication_platform_uses_generic_connection_not_fake_channel_adapter():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Unknown platform responder",
+            "scope": "business",
+            "requirements": [
+                {
+                    "key": "FutureMessenger",
+                    "kind": "channel",
+                    "purpose": "Receive and reply to customer messages",
+                }
+            ],
+        },
+        job_brief="بدي الموظف يرد على FutureMessenger",
+    )
+    rendered = self_service_spec_view(spec)
+    requirement = rendered["requirements"][0]
+
+    assert requirement["kind"] == "integration"
+    assert requirement["self_service_connection_status"] == "self_service_integration_available"
+    assert "channel_delivery" not in requirement

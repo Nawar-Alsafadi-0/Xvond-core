@@ -6,6 +6,7 @@ ACCEPTANCE_COMPANY_ID="${ACCEPTANCE_COMPANY_ID:-}"
 ACCEPTANCE_AGENT_ID="${ACCEPTANCE_AGENT_ID:-}"
 ACCEPTANCE_LIVE_AI="${ACCEPTANCE_LIVE_AI:-false}"
 ACCEPTANCE_REQUIRE_LIVE="${ACCEPTANCE_REQUIRE_LIVE:-false}"
+GENERALIZATION_ACCEPTANCE="${GENERALIZATION_ACCEPTANCE:-false}"
 MARKET_ACCEPTANCE_MODE="${MARKET_ACCEPTANCE_MODE:-}"
 MARKET_ACCEPTANCE_CHANNELS="${MARKET_ACCEPTANCE_CHANNELS:-}"
 MARKET_ACCEPTANCE_REQUIRE_ONLINE_BILLING="${MARKET_ACCEPTANCE_REQUIRE_ONLINE_BILLING:-false}"
@@ -278,6 +279,16 @@ if [ -n "$ACCEPTANCE_COMPANY_ID" ]; then
     if [ "$ACCEPTANCE_LIVE_AI" = "true" ]; then set -- "$@" --live-ai; fi
     if [ "$ACCEPTANCE_REQUIRE_LIVE" = "true" ]; then set -- "$@" --require-live; fi
     compose exec -T app "$@"
+fi
+
+if [ "$GENERALIZATION_ACCEPTANCE" = "true" ]; then
+    if [ -z "$ACCEPTANCE_COMPANY_ID" ] || [ -z "$ACCEPTANCE_AGENT_ID" ]; then
+        echo "Generalization gate requires ACCEPTANCE_COMPANY_ID and ACCEPTANCE_AGENT_ID" >&2
+        exit 1
+    fi
+    compose exec -T app python -m scripts.generalization_acceptance \
+        --company-id "$ACCEPTANCE_COMPANY_ID" \
+        --agent-id "$ACCEPTANCE_AGENT_ID"
 fi
 
 if [ -n "$MARKET_ACCEPTANCE_MODE" ]; then

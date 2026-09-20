@@ -236,7 +236,7 @@ The employee contract may request any registered communication surface. Xvond ke
 - **Custom/API** — uses the packaged signed Xvond Custom Channel protocol on the shared Managed Channel Gateway. Inbound messages require a raw-body HMAC and five-minute replay window; outbound sends require an idempotency key and provider-confirmed message identity. The external endpoint still requires one real round-trip acceptance before that connection is service-ready.
 - **SMS** — uses a source-controlled Twilio Programmable Messaging provider on the shared Managed Channel Gateway. Inbound form webhooks are verified with Twilio request signatures using the exact configured webhook URL; outbound Messages API delivery must return a Twilio message SID. A real number/Messaging Service and external round-trip acceptance remain required before sale.
 - **Email** — uses a source-controlled Mailgun provider workflow on the shared Managed Channel Gateway. Inbound route forwards are verified with Mailgun HMAC-SHA256 timestamp/token signatures before normalization; outbound Messages API sends must return a Mailgun message id before Xvond accepts delivery. US/EU Mailgun API regions are supported. Each tenant still requires a configured receiving route, domain/API credentials and a real inbound/outbound round-trip before the channel is service-ready.
-- **Microsoft Teams** — uses a source-controlled Microsoft Bot Framework provider workflow on the shared Managed Channel Gateway. Inbound Bot Connector activities require a bearer JWT whose issuer, audience, service URL, validity window and RSA signature are verified against the Bot Framework OpenID/JWK metadata before normalization. Outbound sends obtain a service-to-service Bot Framework OAuth token and must return a provider activity id before Xvond accepts delivery. Each tenant still requires a valid Microsoft bot/app registration, route credentials, Teams availability/configuration and a real inbound/outbound round-trip before that channel is service-ready.
+- **Microsoft Teams** — uses a source-controlled Microsoft Bot Framework provider workflow on the shared Managed Channel Gateway. Inbound Bot Connector activities require a bearer JWT whose issuer, audience, service URL, validity window, RSA signature and Teams channel endorsement are verified against the Bot Framework OpenID/JWK metadata before normalization. Outbound sends support multi-tenant or tenant-specific single-tenant Bot Framework OAuth and obtain a service-to-service token and must return a provider activity id before Xvond accepts delivery. Each tenant still requires a valid Microsoft bot/app registration, route credentials, Teams availability/configuration and a real inbound/outbound round-trip before that channel is service-ready.
 
 A requested Managed channel creates a durable, disabled provisioning work item for Xvond Admin. Removing that channel from the current Job Brief cancels/deactivates the request without fabricating a live connection. The shared runtime does not make a provider service-ready by itself: each provider workflow, credential set, webhook and real customer round-trip still require external acceptance before that connector is sold as live.
 
@@ -366,6 +366,16 @@ Production deploy additionally:
 - requires the canonical `PUBLIC_BASE_URL/health/ready` to succeed over HTTPS with healthy production JSON
 - supports customer-specific production acceptance after cutover
 
+## Open-ended generalization gate
+
+Xvond has a live compiler acceptance gate at `scripts/generalization_acceptance.py`. It compiles a diverse set of unrelated Job Briefs through the same production AI Employee Compiler used by Self-Service, without creating or launching customer employees.
+
+The gate fails closed when a compiler result returns unsupported work, has no executable graph/routine, violates the execution-graph contract, or references an action without a matching requirement contract. This is a release-level check for the core product promise: Xvond composes novel digital work from generic primitives rather than predefined employee templates.
+
+Unknown communication providers are not added as one-off channel types. The compiler receives the live channel registry; only registered Xvond communication surfaces remain `kind=channel`. A new provider name is normalized to a generic connected integration with messaging/workflow/webhook primitives and API discovery, so a future platform can be composed from its API/webhook contract without adding a provider-specific employee type. If no usable external contract can be found or connected, launch remains blocked truthfully instead of fabricating a working channel.
+
+Production deploy can run it after cutover with `GENERALIZATION_ACCEPTANCE=true` plus `ACCEPTANCE_COMPANY_ID` and `ACCEPTANCE_AGENT_ID`. It does not replace real provider/channel acceptance.
+
 ## Market launch gate
 
 Xvond now has a fail-closed final customer-path gate at `scripts/market_launch_gate.py`. It builds on the production acceptance gate instead of duplicating platform health checks.
@@ -426,13 +436,13 @@ Repository state through the Replit-like Self-Service build loop, Market Launch 
 
 Highest-priority remaining external/product work:
 
-1. Deploy the reviewed `main` release on the canonical production server and pass the production acceptance gate.
+1. Deploy the reviewed `main` release on the canonical production server and pass the production acceptance gate plus the live open-ended compiler generalization gate.
 2. Configure production Workflow Engine route registries/secrets and provision one real Telegram bot; prove Telegram inbound -> Xvond employee -> durable provider-confirmed outbound -> handoff -> Return to AI.
 3. Configure Meta Messaging app permissions/subscriptions and real Instagram/Messenger routes; validate raw-body signature handling and one real inbound/outbound round trip for each launch channel.
 4. Re-activate Tap Payments, configure the live Tap key/Merchant ID and webhook/redirect paths, run sandbox then one real `CAPTURED` Self-Service charge, and confirm whether Save Card/recurring capability is enabled before turning on automatic renewals.
 5. Run the final Self-Service market gate for signup -> Job Brief -> Smart Intake -> plan/payment -> build -> setup -> launch -> conversation/action -> handoff/resume on the exact channels being sold.
 6. Run one Managed-customer market gate through Xvond Admin to prove operator-built and Self-Service employees converge on the same runtime without sharing lifecycle UX.
-7. After those external gates pass, the reviewed release can be truthfully exposed as the public/global Xvond AI Employee launch. Microsoft Teams now has a packaged Bot Framework binding. Email has a Mailgun packaged binding; SMS has a Twilio packaged binding; Slack and Custom/API also have packaged source-controlled bindings. All managed providers still require real tenant provisioning and external acceptance before sale. All still require real external acceptance before sale.
+7. After those external gates pass, the reviewed release can be truthfully exposed as the public/global Xvond AI Employee launch. Microsoft Teams now has a packaged Bot Framework binding. Email has a Mailgun packaged binding; SMS has a Twilio packaged binding; Slack and Custom/API also have packaged source-controlled bindings. All managed providers still require real tenant provisioning and external acceptance before sale.
 
 
 ## Branch model
