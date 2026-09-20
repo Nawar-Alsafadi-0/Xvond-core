@@ -809,7 +809,7 @@ def _integration_call(
     input_mode = str(
         (op_config or {}).get("input_mode") or ("query" if method == "GET" else "json")
     ).strip().lower()
-    if input_mode not in {"json", "query", "none"}:
+    if input_mode not in {"json", "form", "query", "none"}:
         return ToolResult(success=False, error="Integration operation input mode is invalid")
     if input_mode == "json":
         source = request_payload if isinstance(request_payload, dict) else {}
@@ -849,6 +849,54 @@ def _integration_call(
                 ),
                 data={"missing_fields": missing_json_fields},
             )
+
+    if input_mode == "form":
+        source = request_payload if isinstance(request_payload, dict) else {}
+        required_form_fields = [
+            str(item).strip()
+            for item in ((op_config or {}).get("required_form_fields") or [])
+            if str(item or "").strip()
+        ]
+        raw_form_fields = (op_config or {}).get("form_fields")
+        raw_form_fields = raw_form_fields if isinstance(raw_form_fields, list) else []
+        declared_form_fields = [
+            str(item.get("key") or "").strip()
+            for item in raw_form_fields
+            if isinstance(item, dict) and str(item.get("key") or "").strip()
+        ]
+        allowed_form_fields = list(
+            dict.fromkeys([*declared_form_fields, *required_form_fields])
+        )
+        if allowed_form_fields:
+            source = {
+                key: value
+                for key, value in source.items()
+                if key in allowed_form_fields
+            }
+        missing_form_fields = [
+            key
+            for key in required_form_fields
+            if key not in source or source.get(key) in (None, "")
+        ]
+        if missing_form_fields:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"API operation '{operation}' requires form field(s): "
+                    + ", ".join(missing_form_fields)
+                ),
+                data={"missing_fields": missing_form_fields},
+            )
+        for key, value in source.items():
+            if value is None:
+                continue
+            if not isinstance(value, (str, int, float, bool)):
+                return ToolResult(
+                    success=False,
+                    error=f"Form field '{key}' must be a scalar value",
+                )
+        request_payload = source
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
 
     if input_mode == "query":
         query_items = []
@@ -922,6 +970,7 @@ def _integration_call(
             method=method,
             headers=headers,
             json_data=request_payload if input_mode == "json" else None,
+            form_data=request_payload if input_mode == "form" else None,
             timeout=float((op_config or {}).get("timeout") or 15),
             max_response_bytes=MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS,
         )
