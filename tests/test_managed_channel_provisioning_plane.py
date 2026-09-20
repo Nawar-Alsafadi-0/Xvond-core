@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from backend.app.modules.channels.catalog import CHANNEL_CATALOG, MANAGED_PROVIDER_SETUP
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = json.loads((ROOT / "ops" / "n8n" / "xvond-actions.workflow.json").read_text())
 SQL = (ROOT / "ops" / "n8n" / "idempotency.sql").read_text()
@@ -87,3 +89,46 @@ def test_actions_workflow_deactivates_routes_through_private_registry():
     normalized = _node("Normalize Deactivate Result")["parameters"]["jsCode"]
     assert "deactivated" in normalized
     assert "Managed channel deactivation failed" in normalized
+
+
+def test_all_packaged_provider_workflows_resolve_credentials_from_private_registry():
+    provider_files = (
+        "xvond-telegram-provider.workflow.json",
+        "xvond-meta-messaging-provider.workflow.json",
+        "xvond-slack-provider.workflow.json",
+        "xvond-custom-channel-provider.workflow.json",
+        "xvond-twilio-sms-provider.workflow.json",
+        "xvond-mailgun-email-provider.workflow.json",
+        "xvond-microsoft-teams-provider.workflow.json",
+    )
+    for name in provider_files:
+        raw = (ROOT / "ops" / "n8n" / name).read_text()
+        assert "XVOND_WORKFLOW_REGISTRY_URL" in raw
+        assert "_ROUTES_JSON" not in raw
+
+
+def test_admin_managed_provisioning_generates_internal_route_material():
+    assert "secrets.token_urlsafe(24)" in ADMIN
+    assert "secrets.token_urlsafe(32)" in ADMIN
+    assert "settings.WORKFLOW_PUBLIC_URL + provider_path" in ADMIN
+    assert '"provider_inbound_url": provider_inbound_url' in ADMIN
+
+
+def test_every_packaged_managed_channel_has_its_own_provider_setup():
+    expected = {
+        "telegram": "telegram",
+        "instagram": "meta",
+        "messenger": "meta",
+        "email": "email",
+        "sms": "sms",
+        "slack": "slack",
+        "teams": "teams",
+        "custom": "custom",
+    }
+    for channel_type, provider_type in expected.items():
+        setup = CHANNEL_CATALOG[channel_type]["provider_setup"]
+        assert setup is MANAGED_PROVIDER_SETUP[channel_type]
+        assert setup["provider_type"] == provider_type
+        assert setup["fields"]
+        assert setup["provider_name"]
+        assert setup["setup_note"]

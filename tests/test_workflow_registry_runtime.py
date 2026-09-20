@@ -109,3 +109,27 @@ def test_registry_enforces_provider_channel_pairing():
 def test_registry_bounds_provider_config_size():
     with pytest.raises(ValidationError):
         registry.Provision(**_payload(provider_config={"blob": "x" * 70_000}))
+
+
+def test_registry_supports_email_and_teams_provider_pairs():
+    email = registry.Provision(
+        **_payload(
+            channel_type="email",
+            provider_type="email",
+            provider_url="https://workflow.xvond.com/webhook/xvond-mailgun-email-provider",
+        )
+    )
+    teams = registry.Provision(
+        **_payload(
+            channel_type="teams",
+            provider_type="teams",
+            provider_url="https://workflow.xvond.com/webhook/xvond-microsoft-teams-provider",
+        )
+    )
+    assert email.provider_type == "email"
+    assert teams.provider_type == "teams"
+
+
+def test_registry_has_private_meta_sender_resolution():
+    assert '@app.get("/v1/routes/resolve/meta/{sender_id}")' in SERVICE
+    assert "ambiguous_sender_id" in SERVICE

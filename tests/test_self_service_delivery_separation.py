@@ -68,3 +68,11 @@ def test_agent_delivery_mode_can_be_self_service_inside_managed_company():
     )
     assert is_self_service_employee(company, self_service) is True
     assert is_self_service_employee(company, managed) is False
+
+
+def test_explicit_managed_employee_stays_managed_inside_self_service_company():
+    company = SimpleNamespace(onboarding_source="self_service")
+    managed = SimpleNamespace(
+        settings={"employee_builder": {"delivery_mode": "managed"}}
+    )
+    assert is_self_service_employee(company, managed) is False
