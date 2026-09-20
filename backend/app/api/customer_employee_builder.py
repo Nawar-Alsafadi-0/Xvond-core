@@ -905,6 +905,8 @@ def _compiler_connection_context(db, *, company_id: int) -> list[dict]:
                         "endpoint": str(value.get("endpoint") or "")[:500],
                         "input_mode": str(value.get("input_mode") or "")[:20],
                         "path_params": list(value.get("path_params") or [])[:20],
+                        "header_params": list(value.get("header_params") or [])[:50],
+                        "required_header_params": list(value.get("required_header_params") or [])[:50],
                         "query_params": list(value.get("query_params") or [])[:50],
                         "required_query_params": list(value.get("required_query_params") or [])[:50],
                         "required_json_fields": list(value.get("required_json_fields") or [])[:50],
@@ -2946,6 +2948,29 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
         path_params = list(dict.fromkeys(
             re.findall(r"{([A-Za-z_][A-Za-z0-9_]{0,63})}", endpoint)
         ))
+        blocked_headers = {
+            "authorization", "proxy-authorization", "cookie", "set-cookie",
+            "host", "content-length", "transfer-encoding", "connection",
+            "upgrade", "expect", "content-type", "idempotency-key",
+            "x-xvond-idempotency-key",
+        }
+        def bounded_header_names(raw_values) -> list[str]:
+            raw_values = raw_values if isinstance(raw_values, list) else []
+            result_headers: list[str] = []
+            for item in raw_values[:50]:
+                value = str(item or "").strip()
+                if (
+                    re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", value)
+                    and value.lower() not in blocked_headers
+                    and value.lower() not in {x.lower() for x in result_headers}
+                ):
+                    result_headers.append(value)
+            return result_headers
+        header_params = bounded_header_names(raw.get("header_params"))
+        required_header_params = bounded_header_names(raw.get("required_header_params"))
+        for value in required_header_params:
+            if value.lower() not in {x.lower() for x in header_params}:
+                header_params.append(value)
         raw_query_params = raw.get("query_params")
         raw_query_params = raw_query_params if isinstance(raw_query_params, list) else []
         query_params = [
@@ -3120,6 +3145,8 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
             "input_mode": input_mode,
             "timeout": max(1, min(timeout, 30)),
             "path_params": path_params,
+            "header_params": header_params,
+            "required_header_params": required_header_params,
             "query_params": list(dict.fromkeys(query_params)),
             "required_query_params": list(dict.fromkeys(required_query_params)),
             "required_json_fields": list(dict.fromkeys(required_json_fields)),
