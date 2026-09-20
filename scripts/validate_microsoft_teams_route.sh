@@ -36,8 +36,11 @@ if (!gatewayRoute) fail(`Microsoft Teams validation failed: missing Xvond channe
 const appId = String(route.microsoft_app_id || '').trim();
 const appPassword = String(route.microsoft_app_password || '');
 const providerSecret = String(route.provider_secret || '');
+const tenantId = String(route.microsoft_tenant_id || 'botframework.com').trim();
+const tenantGuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const serviceUrl = String(route.service_url || '').trim().replace(/\/$/,'');
 if (!/^[0-9a-fA-F-]{36}$/.test(appId)) fail('Microsoft Teams validation failed: microsoft_app_id format is invalid');
+if (tenantId !== 'botframework.com' && !tenantGuid.test(tenantId)) fail('Microsoft Teams validation failed: microsoft_tenant_id must be a tenant GUID when set');
 if (appPassword.length < 16 || providerSecret.length < 32) fail('Microsoft Teams validation failed: credentials are missing or too short');
 let parsed;
 try { parsed = new URL(serviceUrl); } catch (_error) { fail('Microsoft Teams validation failed: service_url is invalid'); }
@@ -56,7 +59,8 @@ form.set('grant_type','client_credentials');
 form.set('client_id',appId);
 form.set('client_secret',appPassword);
 form.set('scope','https://api.botframework.com/.default');
-fetch('https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token',{
+const tokenUrl = 'https://login.microsoftonline.com/' + encodeURIComponent(tenantId) + '/oauth2/v2.0/token';
+fetch(tokenUrl,{
   method:'POST',
   headers:{'Content-Type':'application/x-www-form-urlencoded'},
   body:form.toString(),
@@ -70,6 +74,7 @@ fetch('https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token',{
     channel_id:Number(route.channel_id || 0),
     connection_key:connectionKey,
     service_url:serviceUrl,
+    oauth_tenant_mode:tenantId === 'botframework.com' ? 'multi_tenant' : 'single_tenant',
     inbound_path:'/webhook/xvond-microsoft-teams-inbound',
     provider_path:'/webhook/xvond-microsoft-teams-provider'
   }, null, 2));
