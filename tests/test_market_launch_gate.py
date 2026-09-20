@@ -158,10 +158,10 @@ def test_market_gate_rejects_non_packaged_channel_as_launch_requirement(
             AgentChannel(
                 company_id=1,
                 agent_id=1,
-                channel_type="email",
+                channel_type="teams",
                 enabled=True,
                 config={
-                    "connection_key": "email-custom",
+                    "connection_key": "teams-custom",
                     "provisioning_state": "connected",
                 },
             )
@@ -172,12 +172,12 @@ def test_market_gate_rejects_non_packaged_channel_as_launch_requirement(
         company_id=1,
         agent_id=1,
         launch_mode="self_service",
-        required_channels=["email"],
+        required_channels=["teams"],
         require_online_billing=False,
         require_payment_evidence=False,
     )
 
-    item = report["channels"]["channels"]["email"]
+    item = report["channels"]["channels"]["teams"]
     assert report["launchable"] is False
     assert item["packaged_provider"] is False
     assert item["reason"] == "provider_not_packaged"
