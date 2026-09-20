@@ -17,6 +17,10 @@ from backend.app.modules.channels.whatsapp_models import WhatsAppSession
 from backend.app.modules.integrations.catalog import integration_validation_ready
 from backend.app.modules.integrations.capability_discovery import oauth_client_credentials_token
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.integrations.json_contract import (
+    sanitize_json_contract,
+    shape_json_value,
+)
 from backend.app.modules.files.models import EmployeeFileAsset
 from backend.app.modules.integrations.http_api_auth import apply_http_api_auth
 from backend.app.modules.integrations.oauth_authorization import (
@@ -54,6 +58,23 @@ CONFIRM_WORDS = {
     "تأكيد", "ثبت", "اوكي", "أوكي",
 }
 NEGATIVE_PREFIXES = ("لا", "no", "not", "don't", "dont", "مو", "مش")
+
+
+def _json_field_contract(field: dict) -> dict:
+    nested = sanitize_json_contract(field.get("schema"))
+    if nested:
+        return nested
+    value_type = str(field.get("type") or "").strip().lower()
+    if value_type not in {"object", "array", "string", "integer", "number", "boolean"}:
+        return {}
+    contract = {"type": value_type}
+    fmt = str(field.get("format") or "").strip().lower()[:40]
+    if fmt:
+        contract["format"] = fmt
+    enum = field.get("enum")
+    if isinstance(enum, list):
+        contract["enum"] = enum[:20]
+    return sanitize_json_contract(contract)
 
 
 def _field_specs(action: dict) -> list[dict]:
@@ -850,6 +871,24 @@ def _integration_call(
                 ),
                 data={"missing_fields": missing_json_fields},
             )
+        for field in raw_json_fields:
+            if not isinstance(field, dict):
+                continue
+            key = str(field.get("key") or "").strip()
+            if not key or key not in source:
+                continue
+            contract = _json_field_contract(field)
+            if not contract:
+                continue
+            try:
+                source[key] = shape_json_value(
+                    source[key],
+                    contract,
+                    path=f"$.{key}",
+                )
+            except ValueError as exc:
+                return ToolResult(success=False, error=str(exc))
+        request_payload = source
 
     if input_mode == "json_array":
         source = request_payload if isinstance(request_payload, dict) else {}
@@ -925,6 +964,23 @@ def _integration_call(
                         ),
                         data={"item_index": index, "missing_fields": missing},
                     )
+                for field in raw_item_fields:
+                    if not isinstance(field, dict):
+                        continue
+                    field_key = str(field.get("key") or "").strip()
+                    if not field_key or field_key not in shaped:
+                        continue
+                    contract = _json_field_contract(field)
+                    if not contract:
+                        continue
+                    try:
+                        shaped[field_key] = shape_json_value(
+                            shaped[field_key],
+                            contract,
+                            path=f"$[{index}].{field_key}",
+                        )
+                    except ValueError as exc:
+                        return ToolResult(success=False, error=str(exc))
                 normalized_items.append(shaped)
                 continue
 
