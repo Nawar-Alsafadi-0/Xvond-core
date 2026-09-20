@@ -867,3 +867,74 @@ def test_openapi_root_scalar_array_is_supported_but_nested_arrays_are_not():
         }
     )
     assert set(nested["operations"]) == {"health"}
+
+def test_openapi_nested_json_request_retains_recursive_schema():
+    contract = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "paths": {
+                "/orders": {
+                    "post": {
+                        "operationId": "createOrder",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "required": ["customer", "items"],
+                                        "properties": {
+                                            "customer": {
+                                                "type": "object",
+                                                "required": ["name"],
+                                                "properties": {
+                                                    "name": {"type": "string"},
+                                                    "phone": {"type": "string"},
+                                                },
+                                            },
+                                            "items": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "required": ["sku"],
+                                                    "properties": {
+                                                        "sku": {"type": "string"},
+                                                        "quantity": {"type": "integer"},
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    fields = {
+        item["key"]: item
+        for item in contract["operations"]["create_order"]["json_fields"]
+    }
+    assert fields["customer"]["schema"] == {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "phone": {"type": "string"},
+        },
+        "required": ["name"],
+    }
+    assert fields["items"]["schema"] == {
+        "type": "array",
+        "max_items": 100,
+        "items": {
+            "type": "object",
+            "properties": {
+                "sku": {"type": "string"},
+                "quantity": {"type": "integer"},
+            },
+            "required": ["sku"],
+        },
+    }
