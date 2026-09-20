@@ -4708,3 +4708,26 @@ def test_external_root_json_array_action_exposes_items_json_field():
             "type": "json",
         }
     ]
+
+def test_external_action_exposes_declared_header_parameters_as_fields():
+    action = build_managed_action_config(
+        requirement={
+            "key": "vendor_records",
+            "kind": "integration",
+            "purpose": "Create vendor records",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 96,
+            "integration_operations": {"execute": {
+                "method": "POST", "endpoint": "/records", "input_mode": "json",
+                "header_params": ["X-Workspace-ID", "X-Region"],
+                "required_header_params": ["X-Workspace-ID"],
+                "required_json_fields": ["name"],
+                "json_fields": [{"key": "name", "required": True, "type": "string"}],
+            }},
+        },
+        spec={"permissions": []},
+    )
+    fields = {item["key"]: item for item in action["fields"]}
+    assert fields["X-Workspace-ID"]["required"] is True
+    assert fields["X-Region"]["required"] is False
+    assert fields["name"]["required"] is True
