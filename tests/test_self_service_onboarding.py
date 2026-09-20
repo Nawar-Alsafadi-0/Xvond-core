@@ -46,14 +46,17 @@ def test_public_builder_is_open_ended_and_creates_directly_without_preview():
     assert "preview-btn" not in html
     assert "review-card" not in html
     assert "/customer/employee-builder/create" in html
-    assert "/customer-ui#employee-builder" in html
+    assert "/customer/employee-builder/employees" in html
+    assert "Agent جديد" in html
+    assert "selectedAgentId" in html
     assert "/auth/login" in html
     assert "/auth/signup" in html
     assert "sessionStorage" in html
     assert "ابنِ موظفي" in html
     assert "شو بدك موظفك يعمل؟" in html
     assert "/customer/employee-builder/${agentId}/compile" in html
-    assert "عم نبني موظفك" in html
+    assert "مثل Replit بس للموظفين والـAgents" in html
+    assert "Build status" in html
     assert 'id="employee-name"' not in html
     assert 'name="channel"' not in html
     assert 'name="capability"' not in html
