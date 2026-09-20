@@ -1993,7 +1993,11 @@
     async function loadEmployeeBuilder() {
         renderLoading();
         try {
-            let result = await api("/customer/employee-builder/current");
+            const requestedId = Number(new URLSearchParams(window.location.search).get("employee_id") || 0);
+            const currentUrl = requestedId
+                ? `/customer/employee-builder/current?agent_id=${encodeURIComponent(requestedId)}`
+                : "/customer/employee-builder/current";
+            let result = await api(currentUrl);
             if (result.employee && hasResolvableConnectionRequirement(result.employee)) {
                 try {
                     const resolved = await api(
@@ -2001,7 +2005,7 @@
                         {method: "POST", body: "{}"}
                     );
                     if ((resolved.bound_requirements || []).length) {
-                        result = await api("/customer/employee-builder/current");
+                        result = await api(currentUrl);
                     }
                 } catch (resolveError) {
                     // Automatic reuse is a convenience. Keep the normal manual
