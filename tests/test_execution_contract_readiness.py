@@ -149,3 +149,45 @@ def test_readiness_accepts_ready_execution_graph_trigger():
 
     assert state["ready"] is True
     assert state["blockers"] == []
+
+def test_execution_graph_contract_accepts_bounded_repeat_and_rejects_unbounded_repeat():
+    valid = {
+        "version": 1,
+        "nodes": [{
+            "id": "pages",
+            "type": "repeat",
+            "params": {
+                "max_iterations": 5,
+                "initial": {"next": 0},
+                "until": {"path": "graph_last.next", "operator": "eq", "value": None},
+                "graph": {
+                    "version": 1,
+                    "nodes": [{
+                        "id": "fetch",
+                        "type": "action",
+                        "params": {
+                            "agent_id": 1,
+                            "action_type": "list_records",
+                            "arguments": {"cursor": "$previous.next"},
+                        },
+                    }],
+                },
+            },
+        }],
+    }
+    assert graph_contract_errors(valid, graph_agent_id=1) == []
+
+    invalid = {
+        "version": 1,
+        "nodes": [{
+            "id": "pages",
+            "type": "repeat",
+            "params": {
+                "max_iterations": 21,
+                "until": {"path": "graph_last.next", "operator": "eq", "value": None},
+                "graph": valid["nodes"][0]["params"]["graph"],
+            },
+        }],
+    }
+    errors = graph_contract_errors(invalid, graph_agent_id=1)
+    assert "pages: repeat max_iterations must be between 1 and 20" in errors
