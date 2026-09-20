@@ -132,7 +132,7 @@
     },
     {
       "parameters": {
-        "jsCode": "async function xvondManagedRoute(companyId, connectionKey) {\n  const base = String($env.XVOND_WORKFLOW_REGISTRY_URL || '').replace(/\\/$/, '');\n  const secret = String($env.XVOND_WORKFLOW_REGISTRY_SECRET || '');\n  if (!base || !secret || !companyId || !connectionKey) return null;\n  try {\n    const response = await fetch(\n      base + '/v1/routes/' + encodeURIComponent(String(companyId)) + '/' + encodeURIComponent(String(connectionKey)),\n      {headers:{'X-Xvond-Registry-Secret':secret}}\n    );\n    if (!response.ok) return null;\n    const payload = await response.json().catch(() => null);\n    const row = payload?.route;\n    if (!row) return null;\n    return {\n      ...(row.provider_config || {}),\n      provider_secret:String(row.provider_secret || ''),\n      provider_type:String(row.provider_type || ''),\n      provider_url:String(row.provider_url || ''),\n      company_id:Number(row.company_id || 0),\n      agent_id:Number(row.agent_id || 0),\n      channel_id:Number(row.channel_id || 0),\n      channel_type:String(row.channel_type || ''),\n      connection_key:String(row.connection_key || connectionKey)\n    };\n  } catch (_error) {\n    return null;\n  }\n}\nconst item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst supplied = String(headers['x-xvond-channel-secret'] || headers['X-Xvond-Channel-Secret'] || '');\nconst requestId = String(body.request_id || headers['x-xvond-request-id'] || '').trim();\nconst action = String(body.action || '').trim();\nconst data = body.data && typeof body.data === 'object' ? body.data : {};\nconst companyId = Number(body.company_id || 0);\nconst connectionKey = String(data.connection_key || '').trim();\nconst routeKey = `${companyId}:${connectionKey}`;\nconst route = await xvondManagedRoute(companyId, connectionKey);\nif (!route || !route.bot_token || !route.provider_secret) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Telegram route is not configured',error_code:'provider_not_configured',data:null}}];\nif (!supplied || supplied !== String(route.provider_secret)) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unauthorized Telegram provider request',error_code:'unauthorized',data:null}}];\nif (action !== 'channel.send') return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unsupported Telegram provider action',error_code:'unsupported_action',data:null}}];\nconst chatId = String(data.external_contact_id || '').trim();\nconst message = String(data.message || '').trim();\nif (!requestId || !chatId || !message) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Invalid Telegram send contract',error_code:'invalid_contract',data:null}}];\nreturn [{json:{\n  success:true,\n  _dispatch:'telegram_send',\n  request_id:requestId,\n  action,\n  route_key:routeKey,\n  bot_token:String(route.bot_token),\n  chat_id:chatId,\n  message,\n  idempotency_key:String(data.idempotency_key || '').trim()\n}}];"
+        "jsCode": "async function xvondManagedRoute(companyId, connectionKey) {\n  const base = String($env.XVOND_WORKFLOW_REGISTRY_URL || '').replace(/\\/$/, '');\n  const secret = String($env.XVOND_WORKFLOW_REGISTRY_SECRET || '');\n  if (!base || !secret || !companyId || !connectionKey) return null;\n  try {\n    const response = await fetch(\n      base + '/v1/routes/' + encodeURIComponent(String(companyId)) + '/' + encodeURIComponent(String(connectionKey)),\n      {headers:{'X-Xvond-Registry-Secret':secret}}\n    );\n    if (!response.ok) return null;\n    const payload = await response.json().catch(() => null);\n    const row = payload?.route;\n    if (!row) return null;\n    return {\n      ...(row.provider_config || {}),\n      provider_secret:String(row.provider_secret || ''),\n      provider_type:String(row.provider_type || ''),\n      provider_url:String(row.provider_url || ''),\n      company_id:Number(row.company_id || 0),\n      agent_id:Number(row.agent_id || 0),\n      channel_id:Number(row.channel_id || 0),\n      channel_type:String(row.channel_type || ''),\n      connection_key:String(row.connection_key || connectionKey)\n    };\n  } catch (_error) {\n    return null;\n  }\n}\nconst item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst supplied = String(headers['x-xvond-channel-secret'] || headers['X-Xvond-Channel-Secret'] || '');\nconst requestId = String(body.request_id || headers['x-xvond-request-id'] || '').trim();\nconst action = String(body.action || '').trim();\nconst data = body.data && typeof body.data === 'object' ? body.data : {};\nconst companyId = Number(body.company_id || 0);\nconst connectionKey = String(data.connection_key || '').trim();\nconst routeKey = `${companyId}:${connectionKey}`;\nconst route = await xvondManagedRoute(companyId, connectionKey);\nif (!route || !route.bot_token || !route.provider_secret) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Telegram route is not configured',error_code:'provider_not_configured',data:null}}];\nif (!supplied || supplied !== String(route.provider_secret)) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unauthorized Telegram provider request',error_code:'unauthorized',data:null}}];\nif (action !== 'channel.send') return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unsupported Telegram provider action',error_code:'unsupported_action',data:null}}];\nconst chatId = String(data.external_contact_id || '').trim();\nconst message = String(data.message || '').trim();\nif (!requestId || !chatId || !message) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Invalid Telegram send contract',error_code:'invalid_contract',data:null}}];\nreturn [{json:{\n  success:true,\n  _dispatch:'telegram_send',\n  request_id:requestId,\n  action,\n  route_key:routeKey,\n  company_id:companyId,\n  connection_key:connectionKey,\n  chat_id:chatId,\n  message,\n  idempotency_key:String(data.idempotency_key || '').trim()\n}}];"
       },
       "id": "validate-telegram-send",
       "name": "Validate Telegram Send",
@@ -178,29 +178,12 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "=https://api.telegram.org/bot{{ $json.bot_token }}/sendMessage",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "contentType": "raw",
-        "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ chat_id: $json.chat_id, text: $json.message }) }}",
-        "options": {
-          "timeout": 15000
-        }
+        "jsCode": "const request = $input.first().json || {};\nconst base = String($env.XVOND_WORKFLOW_REGISTRY_URL || '').replace(/\\/$/, '');\nconst secret = String($env.XVOND_WORKFLOW_REGISTRY_SECRET || '');\ntry {\n  const registryResponse = await fetch(\n    base + '/v1/routes/' + encodeURIComponent(String(request.company_id || '')) + '/' + encodeURIComponent(String(request.connection_key || '')),\n    {headers:{'X-Xvond-Registry-Secret':secret}}\n  );\n  const registryPayload = await registryResponse.json().catch(() => null);\n  const row = registryPayload?.route;\n  const botToken = String(row?.provider_config?.bot_token || '');\n  if (!registryResponse.ok || !botToken) return [{json:{ok:false}}];\n  const response = await fetch('https://api.telegram.org/bot' + botToken + '/sendMessage', {\n    method:'POST',\n    headers:{'Content-Type':'application/json'},\n    body:JSON.stringify({chat_id:request.chat_id,text:request.message})\n  });\n  const payload = await response.json().catch(() => null);\n  return [{json:payload || {ok:false}}];\n} catch (_error) {\n  return [{json:{ok:false}}];\n}"
       },
       "id": "send-telegram-message",
       "name": "Telegram sendMessage",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         940,
         460
