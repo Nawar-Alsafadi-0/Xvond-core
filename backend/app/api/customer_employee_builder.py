@@ -7411,7 +7411,19 @@ async def upload_employee_file_asset(
 
         filename = _safe_asset_filename(file.filename)
         content_type = str(file.content_type or "application/octet-stream").strip().lower()
+        if (
+            len(content_type) > 120
+            or not re.fullmatch(
+                r"[a-z0-9!#        content_type = str(file.content_type or "application/octet-stream").strip().lower()
         if not content_type or len(content_type) > 120:
+            content_type = "application/octet-stream"
+^_.+-]+/[a-z0-9!#        content_type = str(file.content_type or "application/octet-stream").strip().lower()
+        if not content_type or len(content_type) > 120:
+            content_type = "application/octet-stream"
+^_.+-]+",
+                content_type,
+            )
+        ):
             content_type = "application/octet-stream"
         digest = hashlib.sha256(raw).hexdigest()
 
