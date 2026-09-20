@@ -54,6 +54,22 @@ CONFIRM_WORDS = {
     "تأكيد", "ثبت", "اوكي", "أوكي",
 }
 NEGATIVE_PREFIXES = ("لا", "no", "not", "don't", "dont", "مو", "مش")
+SAFE_DYNAMIC_HEADER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
+BLOCKED_DYNAMIC_HEADERS = {
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "upgrade",
+    "expect",
+    "content-type",
+    "idempotency-key",
+    "x-xvond-idempotency-key",
+}
 
 
 def _field_specs(action: dict) -> list[dict]:
@@ -806,6 +822,64 @@ def _integration_call(
                 "a real execution adapter"
             ),
         )
+
+    raw_header_params = (op_config or {}).get("header_params")
+    raw_header_params = raw_header_params if isinstance(raw_header_params, list) else []
+    raw_required_header_params = (op_config or {}).get("required_header_params")
+    raw_required_header_params = (
+        raw_required_header_params
+        if isinstance(raw_required_header_params, list)
+        else []
+    )
+    declared_header_params: list[str] = []
+    required_header_params: list[str] = []
+    for raw_name in [*raw_header_params, *raw_required_header_params]:
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        if (
+            not SAFE_DYNAMIC_HEADER_RE.fullmatch(name)
+            or name.lower() in BLOCKED_DYNAMIC_HEADERS
+        ):
+            return ToolResult(
+                success=False,
+                error=f"API operation '{operation}' contains an unsafe header parameter",
+            )
+        if name.lower() not in {item.lower() for item in declared_header_params}:
+            declared_header_params.append(name)
+    for raw_name in raw_required_header_params:
+        name = str(raw_name or "").strip()
+        if (
+            name
+            and name.lower() not in {item.lower() for item in required_header_params}
+        ):
+            required_header_params.append(name)
+
+    header_source = request_payload if isinstance(request_payload, dict) else {}
+    missing_header_params = [
+        name
+        for name in required_header_params
+        if name not in header_source or header_source.get(name) in (None, "")
+    ]
+    if missing_header_params:
+        return ToolResult(
+            success=False,
+            error=(
+                f"API operation '{operation}' requires header parameter(s): "
+                + ", ".join(missing_header_params)
+            ),
+            data={"missing_fields": missing_header_params},
+        )
+    for name in declared_header_params:
+        if name not in header_source or header_source.get(name) is None:
+            continue
+        value = header_source.get(name)
+        if not isinstance(value, (str, int, float, bool)):
+            return ToolResult(
+                success=False,
+                error=f"Header parameter '{name}' must be a scalar value",
+            )
+        headers[name] = str(value)
 
     input_mode = str(
         (op_config or {}).get("input_mode") or ("query" if method == "GET" else "json")
