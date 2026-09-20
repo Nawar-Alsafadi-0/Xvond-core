@@ -15,6 +15,7 @@ from backend.app.modules.ai_agent.models import AIMessage
 from backend.app.modules.channels.handoff import activate_human_handoff
 from backend.app.modules.channels.whatsapp_models import WhatsAppSession
 from backend.app.modules.integrations.catalog import integration_validation_ready
+from backend.app.modules.integrations.capability_discovery import oauth_client_credentials_token
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.integrations.http_api_auth import apply_http_api_auth
 from backend.app.modules.integrations.oauth_authorization import (
@@ -543,10 +544,12 @@ def _ensure_fresh_oauth_access_token(
     config: dict,
 ) -> tuple[dict, str | None]:
     oauth_config = config.get("_xvond_oauth")
-    if (
-        not isinstance(oauth_config, dict)
-        or str(oauth_config.get("flow") or "") != "authorization_code"
-    ):
+    flow = (
+        str(oauth_config.get("flow") or "")
+        if isinstance(oauth_config, dict)
+        else ""
+    )
+    if flow not in {"authorization_code", "client_credentials"}:
         return config, None
 
     try:
@@ -555,7 +558,10 @@ def _ensure_fresh_oauth_access_token(
     except ValueError as exc:
         return config, str(exc)
 
-    if not str(oauth_config.get("refresh_token") or "").strip():
+    if (
+        flow == "authorization_code"
+        and not str(oauth_config.get("refresh_token") or "").strip()
+    ):
         return config, "OAuth access token has expired; reconnect this account"
 
     claim_key = f"oauth_refresh:{integration.company_id}:{integration.id}"
@@ -576,13 +582,25 @@ def _ensure_fresh_oauth_access_token(
 
     try:
         try:
-            token = refresh_oauth_access_token(oauth_config)
+            if flow == "authorization_code":
+                token = refresh_oauth_access_token(oauth_config)
+            else:
+                token = oauth_client_credentials_token(
+                    {
+                        "flow": "client_credentials",
+                        "token_url": oauth_config.get("token_url"),
+                        "scopes": oauth_config.get("scopes") or [],
+                    },
+                    client_id=str(oauth_config.get("client_id") or ""),
+                    client_secret=str(oauth_config.get("client_secret") or ""),
+                )
         except ValueError as exc:
             return config, f"OAuth token refresh failed: {exc}"
 
         updated = dict(config)
         updated_oauth = dict(oauth_config)
-        updated_oauth["refresh_token"] = token["refresh_token"]
+        if flow == "authorization_code":
+            updated_oauth["refresh_token"] = token["refresh_token"]
         updated_oauth["expires_in"] = token.get("expires_in")
         if token.get("scope") is not None:
             updated_oauth["scope"] = token.get("scope")
@@ -596,7 +614,6 @@ def _ensure_fresh_oauth_access_token(
         return reveal_config(integration.config) or {}, None
     finally:
         execution_claims.release(claim_key)
-
 
 def _integration_call(
     db,
