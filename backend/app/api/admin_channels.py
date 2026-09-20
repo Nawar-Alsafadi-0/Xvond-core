@@ -28,6 +28,7 @@ from backend.app.modules.channels.catalog import (
     get_channel_definition,
     validate_channel_config,
 )
+from backend.app.modules.channels.delivery import deactivate_managed_channel_route
 from backend.app.modules.channels.models import AgentChannel
 from backend.app.modules.channels.whatsapp_connection import whatsapp_connection_state
 from backend.app.modules.knowledge.models import AgentKnowledge, KnowledgeDocument
@@ -613,6 +614,7 @@ def connect_managed_channel(
             "connection_key": connection_key,
             "provisioning_state": "connected",
             "provisioning_error": None,
+            "registry_cleanup_state": "active",
             "connection_method": "xvond_managed_gateway",
             "provisioning_verified_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         }
@@ -835,7 +837,24 @@ def delete_channel(
         ).first()
         if channel is None:
             raise HTTPException(404, "Channel not found")
-        _audit_channel(db, current_admin, channel, "channel.deleted")
+
+        cleanup = deactivate_managed_channel_route(channel)
+        if cleanup.get("required") is True and cleanup.get("complete") is not True:
+            raise HTTPException(
+                502,
+                "Managed channel route cleanup could not be confirmed; channel was not deleted",
+            )
+
+        _audit_channel(
+            db,
+            current_admin,
+            channel,
+            "channel.deleted",
+            details={
+                "managed_route_cleanup": cleanup.get("reason"),
+                "managed_route_deactivated": cleanup.get("deactivated"),
+            },
+        )
         db.delete(channel)
         db.commit()
         return {"status": "deleted", "channel_id": channel_id}
