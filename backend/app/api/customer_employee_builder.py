@@ -7414,13 +7414,7 @@ async def upload_employee_file_asset(
         if (
             len(content_type) > 120
             or not re.fullmatch(
-                r"[a-z0-9!#        content_type = str(file.content_type or "application/octet-stream").strip().lower()
-        if not content_type or len(content_type) > 120:
-            content_type = "application/octet-stream"
-^_.+-]+/[a-z0-9!#        content_type = str(file.content_type or "application/octet-stream").strip().lower()
-        if not content_type or len(content_type) > 120:
-            content_type = "application/octet-stream"
-^_.+-]+",
+                r"[a-z0-9!#&^_.+-]+/[a-z0-9!#&^_.+-]+",
                 content_type,
             )
         ):
