@@ -242,6 +242,73 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
 
     fields = []
     availability = {"mode": "none"}
+
+    execute_operation = (
+        operations.get("execute")
+        if isinstance(operations.get("execute"), dict)
+        else {}
+    )
+    if execute_operation and key != "booking":
+        seen_fields: set[str] = set()
+
+        def add_field(
+            raw_key,
+            *,
+            required: bool = True,
+            raw_type: str = "string",
+            raw_format: str = "",
+        ) -> None:
+            field_key = str(raw_key or "").strip()
+            if (
+                not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}", field_key)
+                or field_key in seen_fields
+            ):
+                return
+            field_type = "text"
+            value_type = str(raw_type or "").strip().lower()
+            value_format = str(raw_format or "").strip().lower()
+            if value_format == "email":
+                field_type = "email"
+            elif value_format in {"date"}:
+                field_type = "date"
+            elif value_format in {"time"}:
+                field_type = "time"
+            elif value_format in {"phone", "tel"}:
+                field_type = "phone"
+            elif value_type in {"integer", "number"}:
+                field_type = "number"
+            elif value_type == "boolean":
+                field_type = "boolean"
+            fields.append({
+                "key": field_key,
+                "label": re.sub(r"[_.-]+", " ", field_key).strip().title(),
+                "required": required,
+                "type": field_type,
+            })
+            seen_fields.add(field_key)
+
+        for raw_key in execute_operation.get("path_params") or []:
+            add_field(raw_key, required=True)
+        for raw_key in execute_operation.get("required_query_params") or []:
+            add_field(raw_key, required=True)
+        json_field_keys: set[str] = set()
+        for raw_field in execute_operation.get("json_fields") or []:
+            if not isinstance(raw_field, dict):
+                continue
+            raw_key = str(raw_field.get("key") or "").strip()
+            if not raw_key:
+                continue
+            json_field_keys.add(raw_key)
+            add_field(
+                raw_key,
+                required=bool(raw_field.get("required")),
+                raw_type=str(raw_field.get("type") or "string"),
+                raw_format=str(raw_field.get("format") or ""),
+            )
+        for raw_key in execute_operation.get("required_json_fields") or []:
+            if str(raw_key or "").strip() not in json_field_keys:
+                add_field(raw_key, required=True)
+
     if key == "booking":
         fields = [
             {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},

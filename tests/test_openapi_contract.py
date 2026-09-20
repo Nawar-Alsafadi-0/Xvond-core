@@ -296,3 +296,97 @@ def test_openapi_drops_unsafe_oauth_urls():
         "paths": {"/orders": {"get": {"operationId": "listOrders"}}},
     }
     assert normalize_openapi_document(document)["auth_schemes"] == []
+
+def test_openapi_extracts_required_json_body_fields_through_refs_and_allof():
+    document = {
+        "openapi": "3.0.3",
+        "components": {
+            "schemas": {
+                "Customer": {
+                    "type": "object",
+                    "required": ["customer_name"],
+                    "properties": {
+                        "customer_name": {
+                            "type": "string",
+                            "description": "Customer full name",
+                        }
+                    },
+                },
+                "BookingRequest": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/Customer"},
+                        {
+                            "type": "object",
+                            "required": ["service_id", "date"],
+                            "properties": {
+                                "service_id": {"type": "integer"},
+                                "date": {"type": "string", "format": "date"},
+                                "notes": {"type": "string"},
+                            },
+                        },
+                    ]
+                },
+            }
+        },
+        "paths": {
+            "/appointments": {
+                "post": {
+                    "operationId": "createAppointment",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/BookingRequest"}
+                            }
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+    operation = normalize_openapi_document(document)["operations"]["create_appointment"]
+
+    assert operation["required_json_fields"] == [
+        "customer_name",
+        "service_id",
+        "date",
+    ]
+    fields = {item["key"]: item for item in operation["json_fields"]}
+    assert fields["customer_name"]["required"] is True
+    assert fields["customer_name"]["description"] == "Customer full name"
+    assert fields["service_id"]["type"] == "integer"
+    assert fields["date"]["format"] == "date"
+    assert fields["notes"]["required"] is False
+
+
+def test_swagger_body_parameter_exposes_required_json_fields():
+    document = {
+        "swagger": "2.0",
+        "paths": {
+            "/orders": {
+                "post": {
+                    "operationId": "createOrder",
+                    "parameters": [
+                        {
+                            "name": "body",
+                            "in": "body",
+                            "required": True,
+                            "schema": {
+                                "type": "object",
+                                "required": ["sku", "quantity"],
+                                "properties": {
+                                    "sku": {"type": "string"},
+                                    "quantity": {"type": "integer"},
+                                },
+                            },
+                        }
+                    ],
+                }
+            }
+        },
+    }
+
+    operation = normalize_openapi_document(document)["operations"]["create_order"]
+    assert operation["input_mode"] == "json"
+    assert operation["required_json_fields"] == ["sku", "quantity"]

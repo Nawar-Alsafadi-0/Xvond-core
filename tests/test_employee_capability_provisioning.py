@@ -4133,3 +4133,50 @@ def test_bound_api_operation_resolution_reaches_nested_foreach_graph():
     assert unresolved == []
     nested = resolved["execution_graph"]["nodes"][0]["params"]["graph"]
     assert nested["nodes"][0]["params"]["operation"] == "create_order"
+
+def test_external_execute_contract_generates_customer_fields_from_api_schema():
+    action = build_managed_action_config(
+        requirement={
+            "key": "create_specialist_record",
+            "kind": "integration",
+            "purpose": "Create a specialist record",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 91,
+            "validation_required": True,
+            "integration_operations": {
+                "execute": {
+                    "method": "POST",
+                    "endpoint": "/records/{account_id}",
+                    "input_mode": "json",
+                    "path_params": ["account_id"],
+                    "required_json_fields": ["customer_name", "service_id"],
+                    "json_fields": [
+                        {
+                            "key": "customer_name",
+                            "required": True,
+                            "type": "string",
+                        },
+                        {
+                            "key": "service_id",
+                            "required": True,
+                            "type": "integer",
+                        },
+                        {
+                            "key": "visit_date",
+                            "required": False,
+                            "type": "string",
+                            "format": "date",
+                        },
+                    ],
+                }
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    fields = {item["key"]: item for item in action["fields"]}
+    assert fields["account_id"]["required"] is True
+    assert fields["customer_name"]["required"] is True
+    assert fields["service_id"]["type"] == "number"
+    assert fields["visit_date"]["required"] is False
+    assert fields["visit_date"]["type"] == "date"

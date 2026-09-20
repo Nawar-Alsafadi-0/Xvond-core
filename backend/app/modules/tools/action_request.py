@@ -782,6 +782,28 @@ def _integration_call(
     ).strip().lower()
     if input_mode not in {"json", "query", "none"}:
         return ToolResult(success=False, error="Integration operation input mode is invalid")
+    if input_mode == "json":
+        source = request_payload if isinstance(request_payload, dict) else {}
+        required_json_fields = [
+            str(item).strip()
+            for item in ((op_config or {}).get("required_json_fields") or [])
+            if str(item or "").strip()
+        ]
+        missing_json_fields = [
+            key
+            for key in required_json_fields
+            if key not in source or source.get(key) in (None, "")
+        ]
+        if missing_json_fields:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"API operation '{operation}' requires JSON field(s): "
+                    + ", ".join(missing_json_fields)
+                ),
+                data={"missing_fields": missing_json_fields},
+            )
+
     if input_mode == "query":
         query_items = []
         source = request_payload if isinstance(request_payload, dict) else {}

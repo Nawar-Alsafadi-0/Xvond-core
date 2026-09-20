@@ -893,6 +893,14 @@ def _compiler_connection_context(db, *, company_id: int) -> list[dict]:
                         "method": str(value.get("method") or "").upper(),
                         "endpoint": str(value.get("endpoint") or "")[:500],
                         "input_mode": str(value.get("input_mode") or "")[:20],
+                        "path_params": list(value.get("path_params") or [])[:20],
+                        "required_query_params": list(value.get("required_query_params") or [])[:50],
+                        "required_json_fields": list(value.get("required_json_fields") or [])[:50],
+                        "json_fields": [
+                            dict(field)
+                            for field in (value.get("json_fields") or [])[:50]
+                            if isinstance(field, dict)
+                        ],
                         "description": str(value.get("description") or "")[:300],
                     }
                     for key, value in list(operations.items())[:30]
@@ -2905,6 +2913,48 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
                 str(item or "").strip(),
             )
         ][:50]
+        required_json_fields = [
+            str(item).strip()
+            for item in (raw.get("required_json_fields") or [])
+            if re.fullmatch(
+                r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}",
+                str(item or "").strip(),
+            )
+        ][:50]
+        json_fields: list[dict] = []
+        raw_json_fields = raw.get("json_fields")
+        raw_json_fields = raw_json_fields if isinstance(raw_json_fields, list) else []
+        for item in raw_json_fields[:50]:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}", key):
+                continue
+            field = {
+                "key": key,
+                "required": bool(item.get("required")) or key in required_json_fields,
+                "type": str(item.get("type") or "string").strip().lower()[:20],
+            }
+            fmt = str(item.get("format") or "").strip().lower()[:40]
+            if fmt:
+                field["format"] = fmt
+            description = str(item.get("description") or "").strip()[:300]
+            if description:
+                field["description"] = description
+            enum = item.get("enum")
+            if isinstance(enum, list):
+                bounded_enum = [
+                    value for value in enum[:20]
+                    if isinstance(value, (str, int, float, bool)) or value is None
+                ]
+                if bounded_enum:
+                    field["enum"] = bounded_enum
+            json_fields.append(field)
+        for field in json_fields:
+            if field["required"] and field["key"] not in required_json_fields:
+                required_json_fields.append(field["key"])
+                if len(required_json_fields) >= 50:
+                    break
         result[name] = {
             "method": method,
             "endpoint": endpoint,
@@ -2912,6 +2962,8 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
             "timeout": max(1, min(timeout, 30)),
             "path_params": path_params,
             "required_query_params": list(dict.fromkeys(required_query_params)),
+            "required_json_fields": list(dict.fromkeys(required_json_fields)),
+            "json_fields": json_fields,
             "description": str(raw.get("description") or "").strip()[:500],
         }
         if len(result) >= 50:
