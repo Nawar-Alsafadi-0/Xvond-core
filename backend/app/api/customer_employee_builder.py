@@ -1,8 +1,9 @@
 from copy import deepcopy
+import hashlib
 import re
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -79,6 +80,7 @@ from backend.app.modules.providers.models import AIModelRecord, AIProviderRecord
 from backend.app.modules.tools.models import AgentToolAssignment
 from backend.app.modules.tools.business_models import ActionRequest
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.files.models import EmployeeFileAsset
 from backend.app.modules.integrations.catalog import (
     compatible_integration_types,
     get_integration_definition,
@@ -107,6 +109,15 @@ router = APIRouter(
 )
 
 SELF_SERVICE_FREE_TEST_MESSAGES = 0
+MAX_EMPLOYEE_FILE_BYTES = 15 * 1024 * 1024
+
+
+def _safe_asset_filename(value: str | None) -> str:
+    filename = re.split(r"[\\/]", str(value or "file").strip())[-1].strip()
+    filename = re.sub(r"[\x00-\x1f\x7f]+", "_", filename)
+    return (filename or "file")[:255]
+
+
 
 
 class EmployeeBuilderCreateRequest(BaseModel):
@@ -7319,5 +7330,171 @@ def customer_employee_reject_automation(
             "run_id": run.id if run is not None else None,
             "status": "rejected",
         }
+    finally:
+        db.close()
+
+@router.get("/{agent_id}/files")
+def list_employee_file_assets(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Employee file assets are available through the Self-Service builder")
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+        rows = (
+            db.query(EmployeeFileAsset)
+            .filter(
+                EmployeeFileAsset.company_id == company.id,
+                EmployeeFileAsset.agent_id == agent.id,
+                EmployeeFileAsset.enabled.is_(True),
+            )
+            .order_by(EmployeeFileAsset.id.desc())
+            .all()
+        )
+        return {
+            "agent_id": agent.id,
+            "files": [
+                {
+                    "id": item.id,
+                    "filename": item.filename,
+                    "content_type": item.content_type,
+                    "size_bytes": item.size_bytes,
+                    "sha256": item.sha256,
+                    "created_at": item.created_at,
+                }
+                for item in rows
+            ],
+        }
+    finally:
+        db.close()
+
+
+@router.post("/{agent_id}/files")
+async def upload_employee_file_asset(
+    agent_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Employee file assets are available through the Self-Service builder")
+        agent = (
+            db.query(AIAgent)
+            .filter(
+                AIAgent.id == int(agent_id),
+                AIAgent.company_id == company.id,
+            )
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(404, "AI employee not found")
+
+        raw = await file.read(MAX_EMPLOYEE_FILE_BYTES + 1)
+        if not raw:
+            raise HTTPException(400, "File is empty")
+        if len(raw) > MAX_EMPLOYEE_FILE_BYTES:
+            raise HTTPException(413, "File is larger than 15 MB")
+
+        filename = _safe_asset_filename(file.filename)
+        content_type = str(file.content_type or "application/octet-stream").strip().lower()
+        if not content_type or len(content_type) > 120:
+            content_type = "application/octet-stream"
+        digest = hashlib.sha256(raw).hexdigest()
+
+        existing = (
+            db.query(EmployeeFileAsset)
+            .filter(
+                EmployeeFileAsset.company_id == company.id,
+                EmployeeFileAsset.agent_id == agent.id,
+                EmployeeFileAsset.sha256 == digest,
+                EmployeeFileAsset.enabled.is_(True),
+            )
+            .first()
+        )
+        if existing is not None:
+            return {
+                "status": "existing",
+                "id": existing.id,
+                "filename": existing.filename,
+                "content_type": existing.content_type,
+                "size_bytes": existing.size_bytes,
+                "sha256": existing.sha256,
+            }
+
+        asset = EmployeeFileAsset(
+            company_id=company.id,
+            agent_id=agent.id,
+            filename=filename,
+            content_type=content_type,
+            size_bytes=len(raw),
+            sha256=digest,
+            content=raw,
+            enabled=True,
+        )
+        db.add(asset)
+        db.commit()
+        db.refresh(asset)
+        return {
+            "status": "uploaded",
+            "id": asset.id,
+            "filename": asset.filename,
+            "content_type": asset.content_type,
+            "size_bytes": asset.size_bytes,
+            "sha256": asset.sha256,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        await file.close()
+        db.close()
+
+
+@router.delete("/{agent_id}/files/{asset_id}")
+def delete_employee_file_asset(
+    agent_id: int,
+    asset_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            raise HTTPException(409, "Employee file assets are available through the Self-Service builder")
+        asset = (
+            db.query(EmployeeFileAsset)
+            .filter(
+                EmployeeFileAsset.id == int(asset_id),
+                EmployeeFileAsset.company_id == company.id,
+                EmployeeFileAsset.agent_id == int(agent_id),
+                EmployeeFileAsset.enabled.is_(True),
+            )
+            .first()
+        )
+        if asset is None:
+            raise HTTPException(404, "Employee file asset not found")
+        asset.enabled = False
+        db.commit()
+        return {"status": "deleted", "id": asset.id}
+    except HTTPException:
+        db.rollback()
+        raise
     finally:
         db.close()
