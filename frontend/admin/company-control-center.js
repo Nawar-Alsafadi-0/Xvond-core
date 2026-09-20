@@ -106,7 +106,7 @@ window.openManagedChannelSetup=async function(channelId){
     const connected=String(cfg.provisioning_state||'').toLowerCase()==='connected';
     openModal(
       `Connect ${f(channel.channel_name||channel.channel_type)}`,
-      `<div class="modal-intro"><strong>${connected?'Provider route connected':'Connect the real provider account'}</strong><p>Xvond sends these credentials once to the encrypted workflow registry. They are not stored in Core or shown again.</p></div>
+      `<div class="modal-intro"><strong>${connected?'Provider route connected':'Connect the real provider account'}</strong><p>Provider credentials stay in the encrypted Xvond workflow registry. They are sent once, never stored in Core, and are not shown again.</p></div>
         <div class="form-group"><label>Connected Account Label</label><input id="managed-channel-label" value="${f(cfg.provider_account_label||'')}" placeholder="e.g. Brand Instagram / Support Telegram"></div>
         ${fields}
         <div class="form-group"><label>Channel-only Instructions</label><textarea id="managed-channel-instructions" placeholder="Optional transport/channel rules only">${f(cfg.channel_instructions||'')}</textarea></div>
