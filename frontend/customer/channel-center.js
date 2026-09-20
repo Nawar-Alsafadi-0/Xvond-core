@@ -46,6 +46,8 @@ function xvondChannelCenterCard(agent, channel) {
             ${account ? `<div class="muted">Connected account: <strong>${safe(account)}</strong></div>` : ""}
             <div style="display:flex;gap:8px;flex-wrap:wrap">
                 ${xvondChannelCenterAction(agent, channel)}
+                ${["whatsapp","instagram","messenger"].includes(type) && (String(channel?.provisioning_state||"").toLowerCase()==="connected" || channel?.enabled || type==="whatsapp") ? `<button type="button" onclick="xvondTestChannelConnection(${Number(agent.id)},'${type}')">Test connection</button>` : ""}
+                ${["whatsapp","instagram","messenger"].includes(type) && (String(channel?.provisioning_state||"").toLowerCase()==="connected" || channel?.enabled || (type==="whatsapp" && channel?.config?.phone_number_id)) ? `<button type="button" onclick="xvondDisconnectCustomerChannel(${Number(agent.id)},'${type}')">Disconnect</button>` : ""}
                 <button type="button" onclick="xvondRefreshChannelCenter()">Refresh status</button>
             </div>
         </div>
@@ -90,4 +92,63 @@ window.renderXvondChannelCenter = async function () {
 
 window.xvondRefreshChannelCenter = async function () {
     await renderXvondChannelCenter();
+};
+
+
+window.xvondTestChannelConnection = async function(agentId, channelType) {
+    const type = String(channelType || "").toLowerCase();
+    try {
+        if (type === "whatsapp") {
+            const result = await api(`/customer/meta/whatsapp/embedded-signup/config?agent_id=${Number(agentId)}`);
+            if (result.connected) {
+                alert(result.runtime_ready
+                    ? "WhatsApp connection is healthy and ready."
+                    : `WhatsApp is connected. Remaining launch checks:\n${(result.blockers || []).join("\n") || "Xvond launch verification"}`);
+            } else {
+                alert(`WhatsApp connection needs attention.\n${result.connection_issue || "Reconnect the account."}`);
+            }
+            return;
+        }
+        if (type === "instagram" || type === "messenger") {
+            const result = await api("/customer/meta/channels/health", {
+                method: "POST",
+                body: JSON.stringify({agent_id: Number(agentId), channel_type: type}),
+            });
+            if (result.healthy) {
+                alert(`${xvondCustomerChannelLabel(type)} connection is healthy.`);
+            } else {
+                alert(`${xvondCustomerChannelLabel(type)} needs attention.\n${result.issue || "Reconnect the account."}`);
+            }
+            return;
+        }
+        alert("Connection testing for this channel is managed by Xvond.");
+    } catch (error) {
+        alert(error.message || "Could not verify the channel connection.");
+    }
+};
+
+window.xvondDisconnectCustomerChannel = async function(agentId, channelType) {
+    const type = String(channelType || "").toLowerCase();
+    const name = xvondCustomerChannelLabel(type);
+    if (!confirm(`Disconnect ${name} from this AI Employee?\n\nThe AI Employee and its conversation history stay in Xvond. You can reconnect the channel later.`)) return;
+    try {
+        if (type === "whatsapp") {
+            await api("/customer/meta/whatsapp/disconnect", {
+                method: "POST",
+                body: JSON.stringify({agent_id: Number(agentId)}),
+            });
+        } else if (type === "instagram" || type === "messenger") {
+            await api("/customer/meta/channels/disconnect", {
+                method: "POST",
+                body: JSON.stringify({agent_id: Number(agentId), channel_type: type}),
+            });
+        } else {
+            alert("This channel is managed by Xvond and cannot be disconnected here.");
+            return;
+        }
+        portalOverview = await api("/customer/overview");
+        await renderXvondChannelCenter();
+    } catch (error) {
+        alert(error.message || "Could not disconnect the channel.");
+    }
 };
