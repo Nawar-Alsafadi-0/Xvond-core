@@ -104,6 +104,8 @@ def exchange_authorization_code(
     client_secret: str,
     code_verifier: str,
 ) -> dict:
+    if not str(code_verifier or "").strip():
+        raise ValueError("OAuth PKCE verifier is missing")
     result = safe_http_request(
         url=str(state_payload.get("token_url") or ""),
         method="POST",
