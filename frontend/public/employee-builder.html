@@ -27,17 +27,7 @@
       <label for="description">شو بدك منه؟</label>
       <textarea id="description" placeholder="مثال: بدي موظف شخصي يقرأ إيميلاتي كل صباح، يلخصلي المهم، وإذا كان الإيميل من عميل محتمل يجهز رد مناسب وما يرسله إلا بعد موافقتي."></textarea>
 
-      <label for="employee-name" style="display:block;margin-top:18px">اسم الموظف <span class="muted">(اختياري)</span></label>
-      <input id="employee-name" value="My AI Employee" maxlength="200">
-
-      <div style="margin-top:20px">
-        <h3>قنوات المحادثة <span class="muted" style="font-size:14px;font-weight:400">(اختياري)</span></h3>
-        <p class="muted">إذا الموظف رح يحكي مع عملاء أو أشخاص، اختار القناة. إذا هو شخصي، محتوى، مراقبة أو شغل خلفي، فيك تترك القنوات كلها فاضية.</p>
-        <p class="muted">Gmail، قراءة البريد، Instagram Publishing وباقي الأنظمة تنربط كـ Integrations حسب الوظيفة وما بتنحسب قناة محادثة. عدد القنوات المتاحة لاحقًا حسب الباقة.</p>
-        <div id="channels" class="chips"></div>
-      </div>
-
-      <div class="note muted">اكتب المطلوب فقط. Xvond رح يفهم الوظيفة ويبدأ يبني الموظف بالـAI، وبعدها يطلب منك فقط المعلومات أو الاتصالات الضرورية لإكماله. الاشتراك غير مطلوب خلال التجربة الحالية.</div>
+      <div class="note muted">اكتب المطلوب فقط. Xvond رح يفهم الوظيفة ويحدد لحاله القدرات والقنوات والـIntegrations اللازمة، وبعدها يطلب منك فقط الشي الضروري اللي ما بيقدر يعرفه أو يربطه بدونك. الاشتراك غير مطلوب خلال التجربة الحالية.</div>
       <div class="row" style="margin-top:22px;align-items:center">
         <button id="create-btn">ابنِ موظفي</button>
       </div>
@@ -87,54 +77,8 @@
 
 <script>
 (() => {
-  let channelOptions = [
-    {type:"xvond", name:"Xvond Workspace", setup_label:"Built in"},
-    {type:"website", name:"Website Chat", setup_label:"Connect yourself"},
-    {type:"whatsapp", name:"WhatsApp", setup_label:"Connect yourself"}
-  ];
-
-  const $ = id => document.getElementById(id);
-  const show = (id, yes=true) => $(id).classList.toggle("hidden", !yes);
-  const checked = name => Array.from(document.querySelectorAll(`input[name="${name}"]:checked`)).map(x => x.value);
-  const detail = async response => {
-    try { const data = await response.json(); return typeof data.detail === "string" ? data.detail : (data.detail?.message || "حدث خطأ"); }
-    catch { return "حدث خطأ"; }
-  };
-
-  function renderChannels(selectedValues=[]) {
-    const selected = new Set(selectedValues || []);
-    $("channels").innerHTML = channelOptions.map(item => `
-      <label class="chip">
-        <input type="checkbox" name="channel" value="${item.type}" ${selected.has(item.type) ? "checked" : ""}>
-        <span class="chip-copy">
-          <strong>${item.name}</strong>
-          <span class="chip-meta">${item.setup_label || ""}</span>
-        </span>
-      </label>
-    `).join("");
-  }
-
-  async function loadChannelOptions(selectedValues=[]) {
-    try {
-      const response = await fetch("/public/employee-builder/channels", {
-        headers:{"Accept":"application/json"}
-      });
-      if (response.ok) {
-        const data = await response.json();
-        if (Array.isArray(data.channels) && data.channels.length) {
-          channelOptions = data.channels;
-        }
-      }
-    } catch (_) {
-      // Keep the built-in safe fallback if the public registry cannot load.
-    }
-    renderChannels(selectedValues);
-  }
-
   const saveDraft = () => sessionStorage.setItem("xvond_employee_draft", JSON.stringify({
-    description: $("description").value.trim(),
-    name: $("employee-name").value.trim() || "My AI Employee",
-    channels: checked("channel")
+    description: $("description").value.trim()
   }));
   const loadDraft = () => { try { return JSON.parse(sessionStorage.getItem("xvond_employee_draft") || "null"); } catch { return null; } };
 
@@ -261,9 +205,7 @@
   const saved = loadDraft();
   if (saved?.description) {
     $("description").value = saved.description;
-    $("employee-name").value = saved.name || "My AI Employee";
   }
-  loadChannelOptions(saved?.channels || []);
 
   $("create-btn").addEventListener("click", () => createEmployee(true));
   $("login-btn").addEventListener("click", login);
