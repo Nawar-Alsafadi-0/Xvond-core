@@ -26,19 +26,20 @@ def test_self_service_has_its_own_launch_flow_and_cannot_launch_managed_employee
 
 
 def test_self_service_allows_zero_channels_when_job_does_not_need_conversation():
-    assert "This job can run with 0 communication channels." in PORTAL
     assert "channels_required" in POLICY
     assert "interaction_mode" in POLICY
+    assert 'name="channel"' not in PUBLIC_BUILDER
+    assert "قنوات المحادثة" not in PUBLIC_BUILDER
 
 
-def test_self_service_ui_separates_channels_from_integrations():
-    assert "قنوات المحادثة" in PUBLIC_BUILDER
-    assert "Gmail" in PUBLIC_BUILDER
-    assert "Integrations" in PUBLIC_BUILDER
+def test_self_service_ui_lets_xvond_infer_channels_and_integrations():
+    assert "القدرات والقنوات والـIntegrations اللازمة" in PUBLIC_BUILDER
+    assert 'name="channel"' not in PUBLIC_BUILDER
+    assert 'id="employee-name"' not in PUBLIC_BUILDER
     assert 'instagram: "إنستغرام"' not in PUBLIC_BUILDER
     assert 'email: "الإيميل"' not in PUBLIC_BUILDER
-    assert "Instagram publishing" in PORTAL
-    assert "integrations, not channel slots" in PORTAL
+    assert "Channel slots" not in PORTAL
+    assert "Subscription required" not in PORTAL
 
 
 def test_self_service_background_runtime_is_subscription_gated():
