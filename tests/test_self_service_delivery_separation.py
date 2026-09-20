@@ -1,4 +1,7 @@
 from pathlib import Path
+from types import SimpleNamespace
+
+from backend.app.modules.ai_agent.self_service_policy import is_self_service_employee
 
 
 MANAGED = Path("backend/app/api/admin_delivery_readiness.py").read_text(encoding="utf-8")
@@ -21,8 +24,8 @@ def test_self_service_has_its_own_launch_flow_and_cannot_launch_managed_employee
     assert '@router.post("/{agent_id}/launch")' in SELF_SERVICE
     assert "launch_self_service_employee" in SELF_SERVICE
     assert "self_service_readiness" in SELF_SERVICE
-    assert "Xvond Managed employees must use the managed delivery flow" in SELF_SERVICE
-    assert '"delivery_mode": (' in SELF_SERVICE
+    assert "_self_service_employee_or_404" in SELF_SERVICE
+    assert '"delivery_mode": "self_service"' in SELF_SERVICE
 
 
 def test_self_service_allows_zero_channels_when_job_does_not_need_conversation():
@@ -53,3 +56,15 @@ def test_self_service_connection_ui_does_not_fake_missing_adapters():
     assert "Xvond connection adapter required" in POLICY
     assert "Xvond connection adapter required" in PORTAL
     assert "self_service_spec_view" in SELF_SERVICE
+
+
+def test_agent_delivery_mode_can_be_self_service_inside_managed_company():
+    company = SimpleNamespace(onboarding_source="managed")
+    self_service = SimpleNamespace(
+        settings={"employee_builder": {"delivery_mode": "self_service"}}
+    )
+    managed = SimpleNamespace(
+        settings={"employee_builder": {"delivery_mode": "managed"}}
+    )
+    assert is_self_service_employee(company, self_service) is True
+    assert is_self_service_employee(company, managed) is False

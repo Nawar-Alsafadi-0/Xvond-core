@@ -47,6 +47,7 @@ from backend.app.modules.ai_agent.profile_models import AIAgentProfile
 from backend.app.modules.ai_agent.self_service_policy import (
     communication_channels,
     is_self_service_company,
+    is_self_service_employee,
     self_service_channel_activation_blockers,
     self_service_channel_slots,
     self_service_connection_status,
@@ -627,6 +628,62 @@ def _employee_for_workspace(
     )
 
 
+def _self_service_employee_or_404(
+    db,
+    *,
+    company: Company,
+    agent_id: int,
+) -> tuple[AIAgent, AgentConfig]:
+    agent = (
+        db.query(AIAgent)
+        .filter(
+            AIAgent.id == int(agent_id),
+            AIAgent.company_id == company.id,
+        )
+        .first()
+    )
+    if agent is None:
+        raise HTTPException(404, "AI employee not found")
+    config = _employee_config_or_404(db, agent)
+    if not is_self_service_employee(company, config):
+        raise HTTPException(
+            409,
+            "Managed employees must use the Xvond Managed delivery flow",
+        )
+    return agent, config
+
+
+def _agent_id_is_self_service(
+    db,
+    company: Company,
+    agent_id: int,
+) -> bool:
+    agent = (
+        db.query(AIAgent)
+        .filter(
+            AIAgent.id == int(agent_id),
+            AIAgent.company_id == company.id,
+        )
+        .first()
+    )
+    if agent is None:
+        return False
+    config = (
+        db.query(AgentConfig)
+        .filter(
+            AgentConfig.agent_id == agent.id,
+            AgentConfig.agent_type == "employee",
+        )
+        .first()
+    )
+    # Legacy Self-Service records created before employee_builder delivery_mode
+    # existed inherit the company source. New mixed-delivery accounts always
+    # carry an explicit per-agent delivery_mode.
+    if config is None:
+        return is_self_service_company(company)
+    return is_self_service_employee(company, config)
+
+
 def _employee_config_or_404(db, agent: AIAgent) -> AgentConfig:
     config = db.query(AgentConfig).filter(AgentConfig.agent_id == agent.id).first()
     if config is None or config.agent_type != "employee":
@@ -1172,7 +1229,7 @@ def _store_provisioned_spec(
     settings["employee_builder"] = builder
     config.settings = settings
     company = db.query(Company).filter(Company.id == company_id).first()
-    if is_self_service_company(company):
+    if is_self_service_employee(company, config):
         reconcile_managed_channel_requests(
             db,
             company_id=company_id,
@@ -1307,7 +1364,7 @@ def _compile_employee_spec(db, *, company_id: int, agent: AIAgent, config: Agent
         raise HTTPException(400, "Employee job brief is missing")
     requested_channels = list(builder.get("requested_channels") or [])
     company = db.query(Company).filter(Company.id == company_id).first()
-    if is_self_service_company(company):
+    if is_self_service_employee(company, config):
         requested_channels = communication_channels(requested_channels)
     connection_context = _compiler_connection_context(db, company_id=company_id)
 
@@ -2165,6 +2222,8 @@ def list_self_service_employees(
         )
         employees = []
         for agent, config in rows:
+            if not is_self_service_employee(company, config):
+                continue
             builder = (config.settings or {}).get("employee_builder") or {}
             spec = builder.get("compiled_spec") if isinstance(builder, dict) else None
             employees.append({
@@ -2202,7 +2261,8 @@ def current_employee(
         company = _company_or_404(db, current_user.company_id)
         self_service_state = None
         builder_journey = None
-        if is_self_service_company(company):
+        self_service_agent = is_self_service_employee(company, config)
+        if self_service_agent:
             compiled_spec = self_service_spec_view(compiled_spec)
             self_service_state = self_service_readiness(
                 db,
@@ -2218,7 +2278,7 @@ def current_employee(
                 builder=builder if isinstance(builder, dict) else {},
             )
         display_channels = list(builder.get("requested_channels", []))
-        if is_self_service_company(company):
+        if self_service_agent:
             display_channels = communication_channels(display_channels)
 
         pending_view = None
@@ -2230,7 +2290,7 @@ def current_employee(
         )
         if pending is not None:
             pending_spec = pending.get("compiled_spec")
-            if is_self_service_company(company) and isinstance(pending_spec, dict):
+            if self_service_agent and isinstance(pending_spec, dict):
                 pending_spec = self_service_spec_view(pending_spec)
             pending_compiled_at = str(pending.get("compiled_at") or "").strip()
             pending_tested = bool(
@@ -2266,12 +2326,8 @@ def current_employee(
                 "missing_information": builder.get("missing_information", []),
                 "compiled": isinstance(compiled_spec, dict),
                 "compiled_spec": compiled_spec if isinstance(compiled_spec, dict) else None,
-                "can_compile": bool(has_entitlement or is_self_service_company(company)),
-                "delivery_mode": (
-                    "self_service"
-                    if is_self_service_company(company)
-                    else "managed"
-                ),
+                "can_compile": bool(has_entitlement or self_service_agent),
+                "delivery_mode": "self_service" if self_service_agent else "managed",
                 "self_service_readiness": self_service_state,
                 "builder_journey": builder_journey,
                 "last_tested_at": builder.get("last_tested_at"),
@@ -2303,19 +2359,9 @@ def create_employee(
     try:
         company = _company_or_404(db, current_user.company_id)
         has_entitlement = _has_ai_agents_entitlement(db, company.id)
-        is_self_service = str(company.onboarding_source or "managed") == "self_service"
-        if not has_entitlement and not is_self_service:
-            service_limits.entitlement(db, company.id, "ai_agents")
-
-        existing = _existing_employee(db, company.id)
-        if existing is not None and not is_self_service:
-            raise HTTPException(
-                409,
-                detail={
-                    "message": "This managed workspace already has an AI employee",
-                    "agent_id": existing.id,
-                },
-            )
+        # This customer-facing Builder always creates a Self-Service project.
+        # Managed delivery is created and maintained through the admin flow.
+        is_self_service = True
 
         try:
             blueprint = _build_final_blueprint(data)
@@ -2342,12 +2388,8 @@ def create_employee(
                 "missing_information": list(blueprint.missing_information),
                 "setup_answers": {},
                 "owner_permissions": {},
-                "onboarding_source": company.onboarding_source,
-                "delivery_mode": (
-                    "self_service"
-                    if is_self_service
-                    else "managed"
-                ),
+                "onboarding_source": "self_service",
+                "delivery_mode": "self_service",
                 "compiled_spec": None,
             },
             "dialect": "auto",
@@ -2445,26 +2487,14 @@ def revise_self_service_job_brief(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
-            raise HTTPException(
-                409,
-                "Xvond Managed employees must use the managed delivery flow",
-            )
-
-        agent = (
-            db.query(AIAgent)
-            .filter(
-                AIAgent.id == agent_id,
-                AIAgent.company_id == company.id,
-            )
-            .first()
+        agent, config = _self_service_employee_or_404(
+            db,
+            company=company,
+            agent_id=agent_id,
         )
-        if agent is None:
-            raise HTTPException(404, "AI employee not found")
 
         # Keep the same lock order as compilation: config first, then agent.
         # This serializes revision with launch/build without creating a lock cycle.
-        config = _employee_config_or_404(db, agent)
         db.refresh(config, with_for_update=True)
         db.refresh(agent, with_for_update=True)
         if agent.enabled:
@@ -2602,19 +2632,11 @@ def refine_self_service_employee(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
-            raise HTTPException(409, "Natural-language refinement is available only for Self-Service employees")
-        agent = (
-            db.query(AIAgent)
-            .filter(
-                AIAgent.id == agent_id,
-                AIAgent.company_id == company.id,
-            )
-            .first()
+        agent, config = _self_service_employee_or_404(
+            db,
+            company=company,
+            agent_id=agent_id,
         )
-        if agent is None:
-            raise HTTPException(404, "AI employee not found")
-        config = _employee_config_or_404(db, agent)
         db.refresh(config, with_for_update=True)
         db.refresh(agent, with_for_update=True)
         builder = dict((config.settings or {}).get("employee_builder") or {})
@@ -2765,15 +2787,11 @@ def self_service_employee_versions(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
-            raise HTTPException(409, "Version history is available only for Self-Service employees")
-        agent = db.query(AIAgent).filter(
-            AIAgent.id == agent_id,
-            AIAgent.company_id == company.id,
-        ).first()
-        if agent is None:
-            raise HTTPException(404, "AI employee not found")
-        config = _employee_config_or_404(db, agent)
+        agent, config = _self_service_employee_or_404(
+            db,
+            company=company,
+            agent_id=agent_id,
+        )
         builder = dict((config.settings or {}).get("employee_builder") or {})
         return {
             "agent_id": agent.id,
@@ -2792,15 +2810,11 @@ def rollback_self_service_employee(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
-            raise HTTPException(409, "Rollback is available only for Self-Service employees")
-        agent = db.query(AIAgent).filter(
-            AIAgent.id == agent_id,
-            AIAgent.company_id == company.id,
-        ).first()
-        if agent is None:
-            raise HTTPException(404, "AI employee not found")
-        config = _employee_config_or_404(db, agent)
+        agent, config = _self_service_employee_or_404(
+            db,
+            company=company,
+            agent_id=agent_id,
+        )
         db.refresh(config, with_for_update=True)
         db.refresh(agent, with_for_update=True)
 
@@ -3438,7 +3452,7 @@ def discover_self_service_capability(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Capability discovery is available only for Self-Service employees")
 
         agent = (
@@ -3696,7 +3710,7 @@ def start_discovered_oauth_authorization(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "OAuth setup is available only for Self-Service employees")
         agent = (
             db.query(AIAgent)
@@ -4095,7 +4109,7 @@ def provide_discovered_capability_access(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Capability access setup is available only for Self-Service employees")
 
         agent = (
@@ -4409,7 +4423,7 @@ def auto_resolve_self_service_integrations(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Automatic connection resolution is available only for Self-Service employees",
@@ -4537,7 +4551,7 @@ def bind_self_service_integration(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Connected-system binding is available only for Self-Service employees")
 
         agent = db.query(AIAgent).filter(
@@ -4825,7 +4839,7 @@ def save_self_service_setup_answer(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Setup answers are available only for Self-Service employees")
 
         agent = (
@@ -5042,7 +5056,7 @@ def set_self_service_permission(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Owner permissions are available only for Self-Service employees",
@@ -5200,10 +5214,6 @@ def compile_employee(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
-            service_limits.entitlement(db, current_user.company_id, "ai_agents")
-            limits_service.check_token_limit(db, current_user.company_id)
-
         agent = db.query(AIAgent).filter(
             AIAgent.id == agent_id,
             AIAgent.company_id == current_user.company_id,
@@ -5211,6 +5221,9 @@ def compile_employee(
         if agent is None:
             raise HTTPException(404, "AI employee not found")
         config = _employee_config_or_404(db, agent)
+        if not is_self_service_employee(company, config):
+            service_limits.entitlement(db, current_user.company_id, "ai_agents")
+            limits_service.check_token_limit(db, current_user.company_id)
 
         compiled_spec = _compile_employee_spec(
             db,
@@ -5269,7 +5282,7 @@ def launch_self_service_employee(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Xvond Managed employees must use the managed delivery flow",
@@ -5420,7 +5433,7 @@ def deactivate_self_service_employee(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Xvond Managed employees must use the managed delivery flow",
@@ -5491,7 +5504,7 @@ def preview_employee_routine(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Routine preview is available only for Self-Service employees",
@@ -5959,7 +5972,7 @@ def build_pending_live_revision(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Live revisions are available only for Self-Service employees")
         if not _has_ai_agents_entitlement(db, company.id):
             raise HTTPException(
@@ -6040,7 +6053,7 @@ def discard_pending_live_revision(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Live revisions are available only for Self-Service employees",
@@ -6086,7 +6099,7 @@ def apply_pending_live_revision(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Live revisions are available only for Self-Service employees",
@@ -6681,7 +6694,7 @@ def customer_employee_routines(
         if company_id is None:
             raise HTTPException(403, "Customer company required")
         company = _company_or_404(db, company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Routine controls are available only for Self-Service employees")
 
         agent = (
@@ -6769,7 +6782,7 @@ def customer_employee_set_routine_state(
         if company_id is None:
             raise HTTPException(403, "Customer company required")
         company = _company_or_404(db, company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Routine controls are available only for Self-Service employees")
 
         agent = (
@@ -6854,7 +6867,7 @@ def customer_employee_retry_routine(
         if company_id is None:
             raise HTTPException(403, "Customer company required")
         company = _company_or_404(db, company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Routine retry is available only for Self-Service employees")
 
         agent = (
@@ -6983,7 +6996,7 @@ def customer_employee_webhook(
         if company_id is None:
             raise HTTPException(403, "Customer company required")
         company = _company_or_404(db, company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Webhook setup is available for Self-Service employees")
 
         agent = (
@@ -7092,7 +7105,7 @@ def customer_employee_automation_runs(
         if company_id is None:
             raise HTTPException(403, "Customer company required")
         company = _company_or_404(db, company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Automation runs are available for Self-Service employees")
 
         agent = (
@@ -7182,7 +7195,7 @@ def customer_employee_run_graph(
         if company_id is None:
             raise HTTPException(403, "Customer company required")
         company = _company_or_404(db, company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Manual graph execution is available for Self-Service employees")
 
         agent = (
@@ -7514,7 +7527,7 @@ def list_employee_file_assets(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Employee file assets are available through the Self-Service builder")
         agent = (
             db.query(AIAgent)
@@ -7563,7 +7576,7 @@ async def upload_employee_file_asset(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Employee file assets are available through the Self-Service builder")
         agent = (
             db.query(AIAgent)
@@ -7655,7 +7668,7 @@ def delete_employee_file_asset(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Employee file assets are available through the Self-Service builder")
         asset = (
             db.query(EmployeeFileAsset)
