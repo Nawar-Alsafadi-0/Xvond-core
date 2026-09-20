@@ -55,6 +55,7 @@ class Settings:
     GOOGLE_CALENDAR_OAUTH_CLIENT_ID = os.getenv("GOOGLE_CALENDAR_OAUTH_CLIENT_ID", "").strip()
     GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET", "").strip()
     GOOGLE_CALENDAR_OAUTH_REDIRECT_URI = os.getenv("GOOGLE_CALENDAR_OAUTH_REDIRECT_URI", "").strip()
+    GENERIC_OAUTH_STATE_SECRET = os.getenv("GENERIC_OAUTH_STATE_SECRET", JWT_SECRET).strip()
     XAI_API_KEY = os.getenv("XAI_API_KEY", "")
     META_GRAPH_API_VERSION = os.getenv("META_GRAPH_API_VERSION", "v26.0").strip() or "v26.0"
     N8N_ENABLED = os.getenv("N8N_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
