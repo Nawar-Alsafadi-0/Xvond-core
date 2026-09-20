@@ -53,7 +53,8 @@ from backend.app.api.customer_action_requests import router as customer_action_r
 from backend.app.api.customer_agents import router as customer_agents_router
 from backend.app.api.customer_business import router as customer_business_router
 from backend.app.api.customer_inbox import router as customer_inbox_router
-from backend.app.api.customer_meta_whatsapp import router as customer_meta_whatsapp_router\nfrom backend.app.api.customer_meta_channels import router as customer_meta_channels_router
+from backend.app.api.customer_meta_whatsapp import router as customer_meta_whatsapp_router
+from backend.app.api.customer_meta_channels import router as customer_meta_channels_router
 from backend.app.api.customer_operations import router as customer_operations_router
 from backend.app.api.customer_portal import router as customer_portal_router
 from backend.app.api.customer_subscription import router as customer_subscription_router
