@@ -17,6 +17,11 @@ from backend.app.modules.channels.whatsapp_models import WhatsAppSession
 from backend.app.modules.integrations.catalog import integration_validation_ready
 from backend.app.modules.integrations.models import CompanyIntegration
 from backend.app.modules.integrations.http_api_auth import apply_http_api_auth
+from backend.app.modules.integrations.oauth_authorization import (
+    oauth_access_token_needs_refresh,
+    oauth_token_timing,
+    refresh_oauth_access_token,
+)
 from backend.app.modules.integrations.email_smtp import (
     EmailConnectorError,
     send_smtp_email,
@@ -532,6 +537,67 @@ def _email_read_call(
     return ToolResult(success=True, data=result)
 
 
+def _ensure_fresh_oauth_access_token(
+    db,
+    integration: CompanyIntegration,
+    config: dict,
+) -> tuple[dict, str | None]:
+    oauth_config = config.get("_xvond_oauth")
+    if (
+        not isinstance(oauth_config, dict)
+        or str(oauth_config.get("flow") or "") != "authorization_code"
+    ):
+        return config, None
+
+    try:
+        if not oauth_access_token_needs_refresh(oauth_config):
+            return config, None
+    except ValueError as exc:
+        return config, str(exc)
+
+    if not str(oauth_config.get("refresh_token") or "").strip():
+        return config, "OAuth access token has expired; reconnect this account"
+
+    claim_key = f"oauth_refresh:{integration.company_id}:{integration.id}"
+    if not execution_claims.claim(claim_key, ttl_seconds=300):
+        try:
+            db.expire(integration, ["config"])
+            db.refresh(integration)
+            latest = reveal_config(integration.config) or {}
+            latest_oauth = latest.get("_xvond_oauth")
+            if (
+                isinstance(latest_oauth, dict)
+                and not oauth_access_token_needs_refresh(latest_oauth)
+            ):
+                return latest, None
+        except Exception:
+            pass
+        return config, "OAuth token refresh is already in progress; retry the request"
+
+    try:
+        try:
+            token = refresh_oauth_access_token(oauth_config)
+        except ValueError as exc:
+            return config, f"OAuth token refresh failed: {exc}"
+
+        updated = dict(config)
+        updated_oauth = dict(oauth_config)
+        updated_oauth["refresh_token"] = token["refresh_token"]
+        updated_oauth["expires_in"] = token.get("expires_in")
+        if token.get("scope") is not None:
+            updated_oauth["scope"] = token.get("scope")
+        updated_oauth.pop("expires_at", None)
+        updated_oauth.update(oauth_token_timing(token.get("expires_in")))
+        updated["api_key"] = token["access_token"]
+        updated["_xvond_oauth"] = updated_oauth
+        integration.config = updated
+        db.commit()
+        db.refresh(integration)
+        return reveal_config(integration.config) or {}, None
+    finally:
+        execution_claims.release(claim_key)
+
+
 def _integration_call(
     db,
     context: dict,
@@ -564,6 +630,9 @@ def _integration_call(
             error="Configured integration is unavailable",
         )
     config = reveal_config(integration.config) or {}
+    config, oauth_error = _ensure_fresh_oauth_access_token(db, integration, config)
+    if oauth_error:
+        return ToolResult(success=False, error=oauth_error)
     if (
         destination.get("validation_required") is True
         and not integration_validation_ready(config)
