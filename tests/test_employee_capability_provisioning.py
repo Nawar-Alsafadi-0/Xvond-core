@@ -3404,7 +3404,15 @@ def test_graph_action_forwards_named_operation_to_connected_api(database, monkey
                 arguments=arguments,
                 idempotency_key=idempotency_key,
             )
-            return SimpleNamespace(success=True, data={"ok": True}, error=None)
+            return SimpleNamespace(
+                success=True,
+                data={
+                    "ok": True,
+                    "status_code": 200,
+                    "response": {"id": "vendor-123", "state": "ready"},
+                },
+                error=None,
+            )
 
         monkeypatch.setattr(
             "backend.app.modules.automation.runtime._integration_call",
@@ -3441,7 +3449,11 @@ def test_graph_action_forwards_named_operation_to_connected_api(database, monkey
     assert captured["arguments"]["details"]["query"] == "abc"
     assert captured["idempotency_key"].startswith("named-op-test:")
     assert ":graph:" in captured["idempotency_key"]
-    assert result["graph_outputs"]["lookup_vendor"]["scheduled_action_result"]["result"] == {"ok": True}
+    action_result = result["graph_outputs"]["lookup_vendor"]["scheduled_action_result"]
+    assert action_result["operation"] == "lookup"
+    assert action_result["status_code"] == 200
+    assert action_result["response"] == {"id": "vendor-123", "state": "ready"}
+    assert action_result["result"]["ok"] is True
 
 
 def test_generic_api_lookup_uses_query_contract_and_fails_closed_for_unknown_operation(database, monkeypatch):
