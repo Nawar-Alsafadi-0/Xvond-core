@@ -270,6 +270,95 @@ def _json_field_metadata(document: dict, schema: dict) -> tuple[list[str], list[
     return required[:50], fields
 
 
+def _success_response_schema(document: dict, operation: dict) -> tuple[str | None, dict]:
+    """Return the first schema-bearing declared 2xx response, bounded and local-ref only."""
+    responses = operation.get("responses")
+    if not isinstance(responses, dict):
+        return None, {}
+
+    candidates: list[tuple[int, str, dict]] = []
+    for raw_status, raw_response in responses.items():
+        status = str(raw_status or "").strip()
+        if not re.fullmatch(r"2[0-9][0-9]", status):
+            continue
+        if not isinstance(raw_response, dict):
+            continue
+        candidates.append((int(status), status, raw_response))
+    candidates.sort(key=lambda item: item[0])
+    if not candidates:
+        return None, {}
+
+    fallback_status = candidates[0][1]
+    for _, status, raw_response in candidates:
+        response = _local_schema_ref(document, raw_response) or raw_response
+
+        content = response.get("content")
+        if isinstance(content, dict):
+            media_candidates: list[dict] = []
+            if isinstance(content.get("application/json"), dict):
+                media_candidates.append(content["application/json"])
+            media_candidates.extend(
+                value
+                for media_type, value in content.items()
+                if str(media_type or "").lower().endswith("+json")
+                and isinstance(value, dict)
+            )
+            for media in media_candidates[:5]:
+                schema = media.get("schema")
+                if isinstance(schema, dict):
+                    return status, schema
+
+        # Swagger 2.0 success responses expose the schema directly.
+        schema = response.get("schema")
+        if isinstance(schema, dict):
+            return status, schema
+
+    return fallback_status, {}
+
+
+def _schema_kind(document: dict, schema: dict) -> str:
+    resolved = _local_schema_ref(document, schema) or schema
+    if not isinstance(resolved, dict) or not resolved:
+        return "none"
+    raw_type = str(resolved.get("type") or "").strip().lower()
+    if raw_type in {"object", "array", "string", "integer", "number", "boolean"}:
+        return raw_type
+    if isinstance(resolved.get("properties"), dict) or isinstance(resolved.get("allOf"), list):
+        return "object"
+    return "unknown"
+
+
+def _response_metadata(document: dict, operation: dict) -> dict:
+    status, schema = _success_response_schema(document, operation)
+    if not status:
+        return {}
+
+    kind = _schema_kind(document, schema)
+    result: dict[str, Any] = {
+        "response_status": status,
+        "response_kind": kind,
+    }
+    if kind == "object":
+        _, fields = _json_field_metadata(document, schema)
+        if fields:
+            result["response_fields"] = fields[:25]
+        return result
+
+    if kind == "array":
+        resolved = _local_schema_ref(document, schema) or schema
+        items = resolved.get("items") if isinstance(resolved, dict) else None
+        items = items if isinstance(items, dict) else {}
+        item_kind = _schema_kind(document, items)
+        result["response_item_kind"] = item_kind
+        if item_kind == "object":
+            _, fields = _json_field_metadata(document, items)
+            if fields:
+                result["response_item_fields"] = fields[:25]
+        return result
+
+    return result
+
+
 def normalize_openapi_document(document: dict) -> dict:
     if not isinstance(document, dict):
         raise ValueError("OpenAPI document must be an object")
@@ -339,6 +428,7 @@ def normalize_openapi_document(document: dict) -> dict:
                 document,
                 request_schema,
             )
+            response_metadata = _response_metadata(document, operation)
 
             if method == "GET":
                 input_mode = "query"
@@ -365,6 +455,7 @@ def normalize_openapi_document(document: dict) -> dict:
                 "required_query_params": list(dict.fromkeys(required_query_params)),
                 "required_json_fields": required_json_fields if input_mode == "json" else [],
                 "json_fields": json_fields if input_mode == "json" else [],
+                **response_metadata,
                 "description": str(
                     operation.get("summary")
                     or operation.get("description")
