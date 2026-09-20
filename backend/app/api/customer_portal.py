@@ -264,44 +264,12 @@ def overview(current_user: User = Depends(require_customer_user)):
             item["service_code"] for item in services if item["status"] == "active"
         ]
 
-        is_self_service_workspace = company.onboarding_source == "self_service"
-        has_self_service_employee = bool(
-            is_self_service_workspace
-            and db.query(AIAgent.id).filter(AIAgent.company_id == company_id).first()
-        )
         portal_service_codes = list(active_service_codes)
-        if has_self_service_employee and "ai_agents" not in portal_service_codes:
-            # A self-service draft may be managed in the portal before purchase.
-            # This is display-only and does not create a paid entitlement or
-            # enable runtime/channels.
-            portal_service_codes.append("ai_agents")
 
         navigation = build_customer_portal_navigation(
             portal_service_codes,
             enabled_modules,
         )
-        if is_self_service_workspace:
-            navigation.insert(
-                1,
-                {
-                    "id": "employee-builder",
-                    "label": "Build your employee",
-                    "loader": "employee-builder",
-                    "group": "AI Workforce",
-                    "service_code": "ai_agents",
-                },
-            )
-            if not any(item.get("id") == "integrations" for item in navigation):
-                navigation.insert(
-                    max(len(navigation) - 2, 2),
-                    {
-                        "id": "integrations",
-                        "label": "Connected Systems",
-                        "loader": "integrations",
-                        "group": "Connected Systems",
-                        "service_code": "ai_agents",
-                    },
-                )
         navigation.insert(
             max(len(navigation) - 1, 1),
             {
