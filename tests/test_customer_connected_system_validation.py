@@ -1471,3 +1471,104 @@ def test_generic_api_nested_json_is_validated_and_shaped(
 
     assert invalid.success is False
     assert "$.customer is missing required field(s): name" in invalid.error
+
+def test_generic_api_declared_header_is_required_and_sent_without_entering_json(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    operation = {
+        "method": "POST",
+        "endpoint": "/records",
+        "input_mode": "json",
+        "header_params": ["X-Workspace-ID", "X-Region"],
+        "required_header_params": ["X-Workspace-ID"],
+        "required_json_fields": ["name"],
+        "json_fields": [{"key": "name", "required": True, "type": "string"}],
+    }
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {"execute": operation},
+            "auth_type": "none",
+            "_xvond_validation": {"validated": True, "validated_at": "2026-09-20T00:00:00Z"},
+        }
+        db.commit()
+
+    monkeypatch.setattr(action_runtime, "validate_public_http_url", lambda url: url)
+    captured = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 201, "response": '{"id":"r-1"}', "truncated": False}
+
+    monkeypatch.setattr(action_runtime, "safe_http_request", fake_request)
+
+    destination = {
+        "destination": {
+            "type": "integration",
+            "integration_id": 11,
+            "operations": {"execute": operation},
+        }
+    }
+    with factory() as db:
+        missing = action_runtime._integration_call(
+            db, {"company_id": 7, "agent_id": 21}, "vendor_records",
+            destination, {"details": {"name": "Test"}}, "execute",
+            idempotency_key="headers-1",
+        )
+    assert missing.success is False
+    assert missing.data["missing_fields"] == ["X-Workspace-ID"]
+    assert captured == {}
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db, {"company_id": 7, "agent_id": 21}, "vendor_records",
+            destination,
+            {"details": {"X-Workspace-ID": "workspace-7", "X-Region": "me", "name": "Test"}},
+            "execute", idempotency_key="headers-2",
+        )
+    assert result.success is True
+    assert captured["headers"]["X-Workspace-ID"] == "workspace-7"
+    assert captured["headers"]["X-Region"] == "me"
+    assert captured["json_data"] == {"name": "Test"}
+
+
+def test_generic_api_tampered_unsafe_header_contract_fails_before_http(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    operation = {
+        "method": "POST",
+        "endpoint": "/records",
+        "input_mode": "json",
+        "header_params": ["Authorization"],
+        "required_header_params": ["Authorization"],
+    }
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {"execute": operation},
+            "auth_type": "none",
+            "_xvond_validation": {"validated": True, "validated_at": "2026-09-20T00:00:00Z"},
+        }
+        db.commit()
+
+    monkeypatch.setattr(
+        action_runtime, "safe_http_request",
+        lambda **kwargs: pytest.fail("Unsafe dynamic header must fail before HTTP"),
+    )
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db, {"company_id": 7, "agent_id": 21}, "vendor_records",
+            {"destination": {"type": "integration", "integration_id": 11, "operations": {"execute": operation}}},
+            {"details": {"Authorization": "blocked"}}, "execute",
+            idempotency_key="headers-unsafe-1",
+        )
+    assert result.success is False
+    assert "unsafe header parameter" in str(result.error)
