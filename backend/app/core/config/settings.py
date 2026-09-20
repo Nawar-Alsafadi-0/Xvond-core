@@ -58,6 +58,9 @@ class Settings:
     GENERIC_OAUTH_STATE_SECRET = os.getenv("GENERIC_OAUTH_STATE_SECRET", JWT_SECRET).strip()
     XAI_API_KEY = os.getenv("XAI_API_KEY", "")
     META_GRAPH_API_VERSION = os.getenv("META_GRAPH_API_VERSION", "v26.0").strip() or "v26.0"
+    META_INSTAGRAM_APP_ID = os.getenv("META_INSTAGRAM_APP_ID", "").strip()
+    META_INSTAGRAM_APP_SECRET = os.getenv("META_INSTAGRAM_APP_SECRET", "").strip()
+    META_INSTAGRAM_REDIRECT_URI = os.getenv("META_INSTAGRAM_REDIRECT_URI", "").strip()
     N8N_ENABLED = os.getenv("N8N_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "").strip()
     WORKFLOW_PUBLIC_URL = os.getenv("WORKFLOW_PUBLIC_URL", "").strip().rstrip("/")
