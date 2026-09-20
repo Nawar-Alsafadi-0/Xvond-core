@@ -92,6 +92,14 @@ class AgentFactory:
         final_settings = dict(template.default_config or {})
         if settings:
             final_settings.update(settings)
+        builder = dict(final_settings.get("employee_builder") or {})
+        builder.update(
+            {
+                "onboarding_source": "managed",
+                "delivery_mode": "managed",
+            }
+        )
+        final_settings["employee_builder"] = builder
 
         agent = AIAgent(
             company_id=company_id,

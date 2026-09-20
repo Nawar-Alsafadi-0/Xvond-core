@@ -17,6 +17,7 @@ from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.ai_agent.profile_models import AIAgentProfile
 from backend.app.modules.ai_agent.self_service_policy import (
     is_self_service_company,
+    is_self_service_employee,
     self_service_readiness,
 )
 from backend.app.modules.billing.service_models import ServicePlan, ServiceSubscription
@@ -233,27 +234,26 @@ def company_readiness(db, company_id: int):
     agent_results = []
     for agent in agents:
         self_service_state = None
-        agent_config = None
-        if self_service_company:
-            agent_config = (
-                db.query(AgentConfig)
-                .filter(AgentConfig.agent_id == agent.id)
-                .first()
-            )
-            if agent_config is not None:
-                try:
-                    self_service_state = self_service_readiness(
-                        db,
-                        company=company,
-                        agent=agent,
-                        config=agent_config,
-                    )
-                except Exception as exc:
-                    self_service_state = {
-                        "ready": False,
-                        "channels_required": False,
-                        "blockers": [safe_error_label(exc)],
-                    }
+        agent_config = (
+            db.query(AgentConfig)
+            .filter(AgentConfig.agent_id == agent.id)
+            .first()
+        )
+        self_service_agent = is_self_service_employee(company, agent_config)
+        if self_service_agent and agent_config is not None:
+            try:
+                self_service_state = self_service_readiness(
+                    db,
+                    company=company,
+                    agent=agent,
+                    config=agent_config,
+                )
+            except Exception as exc:
+                self_service_state = {
+                    "ready": False,
+                    "channels_required": False,
+                    "blockers": [safe_error_label(exc)],
+                }
 
         profile = (
             db.query(AIAgentProfile)
@@ -387,7 +387,9 @@ def company_readiness(db, company_id: int):
             issues.append("System prompt is empty")
         if not employee_profile_ready:
             issues.append("AI employee profile is missing")
-        if not self_service_company:
+        if not self_service_agent:
+            if not company_profile_ready:
+                issues.append("Company profile is incomplete for managed delivery")
             if knowledge_count == 0:
                 issues.append("No enabled knowledge connected")
             if not channels:
@@ -413,7 +415,7 @@ def company_readiness(db, company_id: int):
         elif (
             not live_channels
             and (
-                not self_service_company
+                not self_service_agent
                 or bool((self_service_state or {}).get("channels_required"))
             )
         ):
@@ -448,7 +450,7 @@ def company_readiness(db, company_id: int):
                 "WhatsApp Coexistence transport and AI round-trip are live but human takeover acceptance is pending"
             )
 
-        if self_service_company:
+        if self_service_agent:
             setup_ready = bool(
                 self_service_state
                 and self_service_state.get("ready")
@@ -474,7 +476,8 @@ def company_readiness(db, company_id: int):
                 )
         else:
             setup_ready = bool(
-                provider_ready
+                company_profile_ready
+                and provider_ready
                 and prompt_ready
                 and employee_profile_ready
                 and knowledge_count > 0
@@ -527,7 +530,7 @@ def company_readiness(db, company_id: int):
                 "issues": issues,
                 "warnings": warnings,
                 "delivery_mode": (
-                    "self_service" if self_service_company else "managed"
+                    "self_service" if self_service_agent else "managed"
                 ),
                 "self_service_readiness": self_service_state,
             }

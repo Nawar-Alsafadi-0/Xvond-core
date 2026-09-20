@@ -30,7 +30,8 @@ def test_email_is_a_packaged_managed_channel():
 
 def test_mailgun_inbound_verifies_hmac_and_normalizes_email():
     code = _node("Verify and Normalize Mailgun Email")["parameters"]["jsCode"]
-    assert "XVOND_MAILGUN_EMAIL_ROUTES_JSON" in code
+    assert "XVOND_WORKFLOW_REGISTRY_URL" in code
+    assert "XVOND_MAILGUN_EMAIL_ROUTES_JSON" not in code
     assert "createHmac('sha256'" in code
     assert "timestamp + token" in code
     assert "timingSafeEqual" in code

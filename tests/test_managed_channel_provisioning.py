@@ -231,11 +231,15 @@ def test_managed_connect_rejects_native_or_non_gateway_channels(
 
 def test_admin_ui_can_complete_managed_requests_without_exposing_provider_credentials():
     assert "Complete Setup" in ADMIN_UI
-    assert "Verify & Complete Setup" in ADMIN_UI
+    assert "Securely Configure Provider" in ADMIN_UI
     assert "/managed-connect" in ADMIN_UI
     assert "connection_key" in ADMIN_UI
     assert "xvondSupportMode()" in ADMIN_UI
-    assert "provider credentials stay" in ADMIN_UI.lower()
+    assert "encrypted workflow registry" in ADMIN_UI.lower()
+    assert "Provider configured" in ADMIN_UI
+    assert "Active · Awaiting round-trip" in ADMIN_UI
+    assert "Live · Round-trip verified" in ADMIN_UI
+    assert "Ready for launch" not in ADMIN_UI
     assert "access_token" not in ADMIN_UI[ADMIN_UI.index("window.openManagedChannelSetup"):ADMIN_UI.index("window.activateManagedChannel")]
 
 

@@ -68,3 +68,9 @@ def test_managed_employee_profile_ensures_safe_human_handoff_default():
     assert 'tool_name="human_handoff"' in source
     assert "enabled=True" in source
     assert source.count("_ensure_human_handoff(db, agent.id)") >= 2
+
+
+def test_admin_profile_employee_is_explicitly_managed_delivery():
+    source = PROFILE_API.read_text(encoding="utf-8-sig")
+    assert '"onboarding_source": "managed"' in source
+    assert '"delivery_mode": "managed"' in source
