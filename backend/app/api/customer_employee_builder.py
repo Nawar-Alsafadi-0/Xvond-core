@@ -2,7 +2,8 @@ from copy import deepcopy
 import re
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from backend.app.core.ai.engine import ProviderExecutionError, ai_engine
@@ -92,6 +93,11 @@ from backend.app.modules.integrations.capability_discovery import (
     discover_openapi_contract,
     oauth_client_credentials_token,
     public_api_probe,
+)
+from backend.app.modules.integrations.oauth_authorization import (
+    consume_oauth_state,
+    create_oauth_authorization,
+    exchange_authorization_code,
 )
 
 router = APIRouter(
