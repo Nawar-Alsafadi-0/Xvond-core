@@ -372,6 +372,8 @@ Xvond has a live compiler acceptance gate at `scripts/generalization_acceptance.
 
 The gate fails closed when a compiler result returns unsupported work, has no executable graph/routine, violates the execution-graph contract, or references an action without a matching requirement contract. This is a release-level check for the core product promise: Xvond composes novel digital work from generic primitives rather than predefined employee templates.
 
+Unknown communication providers are not added as one-off channel types. The compiler receives the live channel registry; only registered Xvond communication surfaces remain `kind=channel`. A new provider name is normalized to a generic connected integration with messaging/workflow/webhook primitives and API discovery, so a future platform can be composed from its API/webhook contract without adding a provider-specific employee type. If no usable external contract can be found or connected, launch remains blocked truthfully instead of fabricating a working channel.
+
 Production deploy can run it after cutover with `GENERALIZATION_ACCEPTANCE=true` plus `ACCEPTANCE_COMPANY_ID` and `ACCEPTANCE_AGENT_ID`. It does not replace real provider/channel acceptance.
 
 ## Market launch gate

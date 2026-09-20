@@ -6,6 +6,7 @@ from backend.app.modules.ai_agent.employee_capability_builder import (
     build_managed_action_config,
 )
 from backend.app.modules.ai_agent.employee_compiler import (
+    COMPILER_VERSION,
     build_compiled_employee_system_prompt,
     build_compiler_user_message,
     is_sensitive_requirement_key,
@@ -927,7 +928,7 @@ def test_compiler_preserves_generic_durable_wait_node():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 14
+    assert spec["version"] == COMPILER_VERSION
     assert [node["type"] for node in nodes] == ["transform", "wait", "ai"]
     assert nodes[1]["params"]["duration"] == 2
     assert nodes[1]["params"]["unit"] == "days"
@@ -980,7 +981,7 @@ def test_compiler_preserves_generic_correlated_event_wait():
     spec = parse_compiler_response(response, job_brief=job_brief)
     nodes = spec["execution_graph"]["nodes"]
 
-    assert spec["version"] == 14
+    assert spec["version"] == COMPILER_VERSION
     assert [node["type"] for node in nodes] == [
         "transform",
         "await_event",
@@ -1148,7 +1149,7 @@ def test_compiler_normalizes_multiple_independent_execution_routines():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 14
+    assert spec["version"] == COMPILER_VERSION
     assert [item["id"] for item in spec["execution_routines"]] == [
         "morning_summary",
         "lead_review",
@@ -1187,7 +1188,7 @@ def test_compiler_maps_legacy_execution_graph_to_primary_routine():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 14
+    assert spec["version"] == COMPILER_VERSION
     assert len(spec["execution_routines"]) == 1
     assert spec["execution_routines"][0]["id"] == "primary"
     assert spec["execution_routines"][0]["graph"] == spec["execution_graph"]
@@ -1476,7 +1477,7 @@ def test_compiler_scopes_each_routine_to_only_its_requirements():
 
     spec = parse_compiler_response(response, job_brief=job_brief)
 
-    assert spec["version"] == 14
+    assert spec["version"] == COMPILER_VERSION
     assert spec["execution_routines"][0]["requirement_keys"] == [
         "source_a",
         "source_b",
@@ -1934,3 +1935,72 @@ def test_compiler_preserves_safe_connected_api_header_metadata():
     operation = spec["requirements"][0]["integration_operations"]["execute"]
     assert operation["header_params"] == ["X-Workspace-ID", "X-Region"]
     assert operation["required_header_params"] == ["X-Workspace-ID"]
+
+
+def test_unknown_communication_platform_composes_as_generic_integration():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Community responder",
+            "scope": "business",
+            "requirements": [
+                {
+                    "key": "VendorChat",
+                    "kind": "channel",
+                    "purpose": "Receive customer messages and send replies on VendorChat",
+                    "requires_connection": False,
+                    "primitives": ["messaging"],
+                }
+            ],
+        },
+        job_brief="رد على رسائل العملاء على VendorChat وابعت الردود من نفس المنصة",
+    )
+    requirement = spec["requirements"][0]
+
+    assert requirement["key"] == "vendorchat"
+    assert requirement["kind"] == "integration"
+    assert requirement["known_to_xvond"] is False
+    assert requirement["requires_connection"] is True
+    assert requirement["fulfillment_mode"] == "external_connection"
+    assert requirement["status"] == "connection_required"
+    assert requirement["delivery_mode"] == "connect_and_compose"
+    assert {"workflow_engine", "messaging", "webhook"}.issubset(requirement["primitives"])
+    assert requirement["discovery"]["needed"] is True
+    assert requirement["discovery"]["service_hint"] == "VendorChat"
+    assert "VendorChat API documentation OpenAPI webhook" in requirement["discovery"]["search_queries"]
+
+
+def test_registered_communication_surface_remains_a_real_channel():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Teams responder",
+            "scope": "business",
+            "requirements": [
+                {
+                    "key": "Microsoft Teams",
+                    "kind": "channel",
+                    "purpose": "Reply in Teams",
+                    "requires_connection": True,
+                }
+            ],
+        },
+        job_brief="رد على Microsoft Teams",
+    )
+    requirement = spec["requirements"][0]
+
+    assert requirement["key"] == "teams"
+    assert requirement["kind"] == "channel"
+    assert requirement["known_to_xvond"] is True
+    assert requirement["status"] == "connection_required"
+
+
+def test_compiler_message_exposes_registry_channels_without_making_them_a_whitelist_for_work():
+    message = build_compiler_user_message(
+        job_brief="Use a communication platform I may name later.",
+        requested_channels=[],
+        available_connections=[],
+    )
+
+    assert "REGISTERED XVOND COMMUNICATION SURFACES" in message
+    assert '"type":"teams"' in message
+    assert '"type":"custom"' in message
+    assert "AVAILABLE VALIDATED CONNECTED SYSTEMS" in message
