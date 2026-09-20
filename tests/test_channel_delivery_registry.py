@@ -8,6 +8,7 @@ from backend.app.modules.ai_agent.employee_builder import (
     blueprint_readiness,
     build_employee_blueprint,
 )
+from backend.app.modules.ai_agent.employee_compiler import normalize_compiled_spec
 from backend.app.modules.ai_agent.self_service_policy import (
     configured_channel_types,
     self_service_spec_view,
@@ -243,3 +244,26 @@ def test_customer_inbox_only_counts_channels_with_real_runtime():
     assert "instagram" in LIVE_INBOX_CHANNELS
     assert "telegram" in LIVE_INBOX_CHANNELS
     assert "email" in LIVE_INBOX_CHANNELS
+
+
+def test_unknown_communication_platform_uses_generic_connection_not_fake_channel_adapter():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Unknown platform responder",
+            "scope": "business",
+            "requirements": [
+                {
+                    "key": "FutureMessenger",
+                    "kind": "channel",
+                    "purpose": "Receive and reply to customer messages",
+                }
+            ],
+        },
+        job_brief="بدي الموظف يرد على FutureMessenger",
+    )
+    rendered = self_service_spec_view(spec)
+    requirement = rendered["requirements"][0]
+
+    assert requirement["kind"] == "integration"
+    assert requirement["self_service_connection_status"] == "self_service_integration_available"
+    assert "channel_delivery" not in requirement
