@@ -86,7 +86,9 @@ def test_dynamic_setup_data_reprovisions_instead_of_only_being_saved():
 
 def test_self_service_workspace_supports_multiple_independent_agent_projects():
     assert '@router.get("/employees")' in BUILDER
-    assert "if existing is not None and not is_self_service" in BUILDER
+    assert "This customer-facing Builder always creates a Self-Service project." in BUILDER
+    assert '"onboarding_source": "self_service"' in BUILDER
+    assert "if not is_self_service_employee(company, config)" in BUILDER
     assert "enforce_capacity=(has_entitlement if not is_self_service else False)" in BUILDER
     assert "/customer/employee-builder/employees" in (ROOT / "frontend" / "public" / "employee-builder.html").read_text(encoding="utf-8")
     workspace = (ROOT / "frontend" / "public" / "employee-builder.html").read_text(encoding="utf-8")
