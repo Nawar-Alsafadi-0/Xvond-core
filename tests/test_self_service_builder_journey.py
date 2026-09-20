@@ -7,23 +7,23 @@ def stage(journey, stage_id):
     return next(item for item in journey["stages"] if item["id"] == stage_id)
 
 
-def test_builder_journey_starts_with_plan_before_paid_build():
+def test_builder_journey_starts_build_without_plan_during_trial():
     journey = _self_service_builder_journey(
         agent=SimpleNamespace(enabled=False),
         has_entitlement=False,
         compiled_spec=None,
         state={
-            "subscription": {"active": False, "status": None},
+            "subscription": {"required": False, "active": True, "status": None},
             "ready": False,
         },
     )
 
     assert stage(journey, "brief")["status"] == "complete"
-    assert stage(journey, "plan")["status"] == "action_required"
-    assert stage(journey, "build")["status"] == "blocked"
+    assert not any(item["id"] == "plan" for item in journey["stages"])
+    assert stage(journey, "build")["status"] == "action_required"
     assert stage(journey, "setup")["status"] == "blocked"
     assert stage(journey, "launch")["status"] == "blocked"
-    assert [item["type"] for item in journey["next_actions"]] == ["choose_plan"]
+    assert [item["type"] for item in journey["next_actions"]] == ["build_employee"]
 
 
 def test_builder_journey_surfaces_only_required_customer_setup_actions():
@@ -60,7 +60,6 @@ def test_builder_journey_surfaces_only_required_customer_setup_actions():
         },
     )
 
-    assert stage(journey, "plan")["status"] == "complete"
     assert stage(journey, "build")["status"] == "complete"
     setup = stage(journey, "setup")
     assert setup["status"] == "action_required"
