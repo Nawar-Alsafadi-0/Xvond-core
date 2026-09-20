@@ -98,6 +98,7 @@ from backend.app.modules.integrations.oauth_authorization import (
     consume_oauth_state,
     create_oauth_authorization,
     exchange_authorization_code,
+    oauth_token_timing,
 )
 
 router = APIRouter(
@@ -3576,6 +3577,7 @@ def finish_discovered_oauth_authorization(
                 "Xvond could not safely validate the authorized account with a read-only operation",
             )
 
+        token_timing = oauth_token_timing(token.get("expires_in"))
         integration.config = {
             "base_url": base_url,
             "validation_endpoint": str(evidence.get("endpoint") or ""),
@@ -3593,6 +3595,7 @@ def finish_discovered_oauth_authorization(
                 "refresh_token": token.get("refresh_token"),
                 "expires_in": token.get("expires_in"),
                 "scope": token.get("scope"),
+                **token_timing,
             },
         }
         integration.enabled = True
@@ -3885,6 +3888,8 @@ def provide_discovered_capability_access(
                     "scopes": client_flow.get("scopes") or [],
                     "client_id": client_id,
                     "client_secret": client_secret,
+                    "expires_in": token.get("expires_in"),
+                    **oauth_token_timing(token.get("expires_in")),
                 },
             }
 
