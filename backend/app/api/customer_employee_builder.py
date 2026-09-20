@@ -5100,12 +5100,17 @@ def compile_employee(
     agent_id: int,
     current_user: User = Depends(require_customer_manager),
 ):
-    """Turn an open-ended paid Job Brief into a structured employee specification."""
+    """Turn an open-ended Job Brief into a structured employee specification.
+
+    Self-Service preview builds intentionally do not require a commercial
+    subscription. Runtime/go-live entitlement remains enforced separately.
+    """
     db = SessionLocal()
     try:
-        _company_or_404(db, current_user.company_id)
-        service_limits.entitlement(db, current_user.company_id, "ai_agents")
-        limits_service.check_token_limit(db, current_user.company_id)
+        company = _company_or_404(db, current_user.company_id)
+        if not is_self_service_company(company):
+            service_limits.entitlement(db, current_user.company_id, "ai_agents")
+            limits_service.check_token_limit(db, current_user.company_id)
 
         agent = db.query(AIAgent).filter(
             AIAgent.id == agent_id,
