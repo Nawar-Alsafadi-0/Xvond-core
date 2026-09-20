@@ -390,3 +390,26 @@ def test_swagger_body_parameter_exposes_required_json_fields():
     operation = normalize_openapi_document(document)["operations"]["create_order"]
     assert operation["input_mode"] == "json"
     assert operation["required_json_fields"] == ["sku", "quantity"]
+
+def test_openapi_tracks_all_declared_query_parameters_for_request_shaping():
+    contract = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "paths": {
+                "/search": {
+                    "get": {
+                        "operationId": "searchItems",
+                        "parameters": [
+                            {"name": "status", "in": "query", "required": True},
+                            {"name": "limit", "in": "query", "required": False},
+                            {"name": "ignored body", "in": "query", "required": False},
+                        ],
+                    }
+                }
+            },
+        }
+    )
+
+    operation = contract["operations"]["search_items"]
+    assert operation["query_params"] == ["status", "limit"]
+    assert operation["required_query_params"] == ["status"]

@@ -894,6 +894,7 @@ def _compiler_connection_context(db, *, company_id: int) -> list[dict]:
                         "endpoint": str(value.get("endpoint") or "")[:500],
                         "input_mode": str(value.get("input_mode") or "")[:20],
                         "path_params": list(value.get("path_params") or [])[:20],
+                        "query_params": list(value.get("query_params") or [])[:50],
                         "required_query_params": list(value.get("required_query_params") or [])[:50],
                         "required_json_fields": list(value.get("required_json_fields") or [])[:50],
                         "json_fields": [
@@ -2905,6 +2906,16 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
         path_params = list(dict.fromkeys(
             re.findall(r"{([A-Za-z_][A-Za-z0-9_]{0,63})}", endpoint)
         ))
+        raw_query_params = raw.get("query_params")
+        raw_query_params = raw_query_params if isinstance(raw_query_params, list) else []
+        query_params = [
+            str(item).strip()
+            for item in raw_query_params
+            if re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_.-]{0,63}",
+                str(item or "").strip(),
+            )
+        ][:50]
         required_query_params = [
             str(item).strip()
             for item in (raw.get("required_query_params") or [])
@@ -2961,6 +2972,7 @@ def _bounded_connection_operations(value: dict | None) -> dict[str, dict]:
             "input_mode": input_mode,
             "timeout": max(1, min(timeout, 30)),
             "path_params": path_params,
+            "query_params": list(dict.fromkeys(query_params)),
             "required_query_params": list(dict.fromkeys(required_query_params)),
             "required_json_fields": list(dict.fromkeys(required_json_fields)),
             "json_fields": json_fields,

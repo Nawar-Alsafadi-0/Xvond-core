@@ -1686,3 +1686,33 @@ def test_compiler_preserves_connected_system_request_contract_metadata():
     assert operation["required_query_params"] == ["locale"]
     assert operation["required_json_fields"] == ["customer_name"]
     assert operation["json_fields"][0]["key"] == "customer_name"
+
+def test_compiler_preserves_declared_connected_api_query_parameters():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Search employee",
+            "requirements": [
+                {
+                    "key": "vendor_search",
+                    "kind": "integration",
+                    "purpose": "Search connected vendor records",
+                    "requires_connection": True,
+                    "fulfillment_mode": "external_connection",
+                    "integration_operations": {
+                        "lookup": {
+                            "method": "GET",
+                            "endpoint": "/records",
+                            "input_mode": "query",
+                            "query_params": ["status", "limit"],
+                            "required_query_params": ["status"],
+                        }
+                    },
+                }
+            ],
+        },
+        job_brief="Search records in my connected vendor system.",
+    )
+
+    operation = spec["requirements"][0]["integration_operations"]["lookup"]
+    assert operation["query_params"] == ["status", "limit"]
+    assert operation["required_query_params"] == ["status"]

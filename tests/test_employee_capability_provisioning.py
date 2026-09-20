@@ -4303,3 +4303,29 @@ def test_external_ambiguous_operations_do_not_gain_an_unsafe_direct_default():
 
     assert "default_operation" not in action["destination"]
     assert action["fields"] == []
+
+def test_external_action_exposes_required_and_optional_declared_query_fields():
+    action = build_managed_action_config(
+        requirement={
+            "key": "vendor_search",
+            "kind": "integration",
+            "purpose": "Search vendor records",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 95,
+            "validation_required": True,
+            "integration_operations": {
+                "execute": {
+                    "method": "GET",
+                    "endpoint": "/records",
+                    "input_mode": "query",
+                    "query_params": ["status", "limit"],
+                    "required_query_params": ["status"],
+                }
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    fields = {item["key"]: item for item in action["fields"]}
+    assert fields["status"]["required"] is True
+    assert fields["limit"]["required"] is False

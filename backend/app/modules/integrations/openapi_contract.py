@@ -316,6 +316,14 @@ def normalize_openapi_document(document: dict) -> dict:
                 and str(item.get("in") or "").strip().lower() == "query"
             ]
             has_query_parameters = bool(query_parameters)
+            query_params = [
+                str(item.get("name") or "").strip()
+                for item in query_parameters
+                if re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_.-]{0,63}",
+                    str(item.get("name") or "").strip(),
+                )
+            ]
             required_query_params = [
                 str(item.get("name") or "").strip()
                 for item in query_parameters
@@ -353,6 +361,7 @@ def normalize_openapi_document(document: dict) -> dict:
                 "input_mode": input_mode,
                 "timeout": 15,
                 "path_params": list(dict.fromkeys(placeholders)),
+                "query_params": list(dict.fromkeys(query_params)),
                 "required_query_params": list(dict.fromkeys(required_query_params)),
                 "required_json_fields": required_json_fields if input_mode == "json" else [],
                 "json_fields": json_fields if input_mode == "json" else [],

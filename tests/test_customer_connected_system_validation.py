@@ -846,3 +846,142 @@ def test_direct_execute_uses_bound_default_api_operation(
     assert captured["method"] == "POST"
     assert captured["url"] == "https://api.example.com/records"
     assert captured["json_data"] == {"customer_name": "Test Customer"}
+
+def test_generic_api_json_request_sends_only_declared_contract_fields(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    operation = {
+        "method": "POST",
+        "endpoint": "/accounts/{account_id}/appointments",
+        "input_mode": "json",
+        "path_params": ["account_id"],
+        "required_json_fields": ["customer_name"],
+        "json_fields": [
+            {"key": "customer_name", "required": True, "type": "string"},
+            {"key": "notes", "required": False, "type": "string"},
+        ],
+    }
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {"execute": operation},
+            "auth_type": "none",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+        }
+        db.commit()
+
+    monkeypatch.setattr(action_runtime, "validate_public_http_url", lambda url: url)
+    captured = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 201, "response": '{"id":"appt-2"}'}
+
+    monkeypatch.setattr(action_runtime, "safe_http_request", fake_request)
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "booking",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "validation_required": True,
+                    "operations": {"execute": operation},
+                }
+            },
+            {
+                "details": {
+                    "account_id": "acct-7",
+                    "customer_name": "Test Customer",
+                    "notes": "Window seat",
+                    "ai_response": "internal model output",
+                    "secret_context": {"must": "not leave xvond"},
+                }
+            },
+            "execute",
+            idempotency_key="shape-json-1",
+        )
+
+    assert result.success is True
+    assert captured["url"] == "https://api.example.com/accounts/acct-7/appointments"
+    assert captured["json_data"] == {
+        "customer_name": "Test Customer",
+        "notes": "Window seat",
+    }
+
+
+def test_generic_api_query_request_sends_only_declared_contract_parameters(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    operation = {
+        "method": "GET",
+        "endpoint": "/records",
+        "input_mode": "query",
+        "query_params": ["status", "limit"],
+        "required_query_params": ["status"],
+    }
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {"lookup": operation},
+            "auth_type": "none",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+        }
+        db.commit()
+
+    monkeypatch.setattr(action_runtime, "validate_public_http_url", lambda url: url)
+    captured = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 200, "response": '{"items":[]}'}
+
+    monkeypatch.setattr(action_runtime, "safe_http_request", fake_request)
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "vendor_search",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "validation_required": True,
+                    "operations": {"lookup": operation},
+                }
+            },
+            {
+                "details": {
+                    "status": "open",
+                    "limit": 20,
+                    "ai_response": "internal model output",
+                    "secret_context": "internal-only",
+                }
+            },
+            "lookup",
+            idempotency_key="shape-query-1",
+        )
+
+    assert result.success is True
+    assert captured["url"] == "https://api.example.com/records?status=open&limit=20"
+    assert "ai_response" not in captured["url"]
+    assert "secret_context" not in captured["url"]
+    assert captured["json_data"] is None
