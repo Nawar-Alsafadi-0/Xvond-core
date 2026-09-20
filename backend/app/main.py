@@ -56,6 +56,7 @@ from backend.app.api.customer_employee_builder import router as customer_employe
 from backend.app.api.customer_business import router as customer_business_router
 from backend.app.api.customer_inbox import router as customer_inbox_router
 from backend.app.api.customer_meta_whatsapp import router as customer_meta_whatsapp_router
+from backend.app.api.customer_meta_channels import router as customer_meta_channels_router
 from backend.app.api.customer_operations import router as customer_operations_router
 from backend.app.api.customer_portal import router as customer_portal_router
 from backend.app.api.customer_subscription import router as customer_subscription_router
@@ -251,6 +252,7 @@ for r in [
     customer_business_router,
     customer_inbox_router,
     customer_meta_whatsapp_router,
+    customer_meta_channels_router,
     customer_operations_router,
     customer_portal_router,
     customer_subscription_router,
