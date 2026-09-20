@@ -1761,3 +1761,48 @@ def test_compiler_preserves_connected_api_response_contract_metadata():
     assert operation["response_kind"] == "object"
     assert [item["key"] for item in operation["response_fields"]] == ["id", "state"]
     assert operation["response_fields"][0]["required"] is True
+
+def test_compiler_preserves_connected_api_form_request_contract():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Session employee",
+            "requirements": [
+                {
+                    "key": "vendor_session",
+                    "kind": "integration",
+                    "purpose": "Create a vendor session",
+                    "requires_connection": True,
+                    "fulfillment_mode": "external_connection",
+                    "integration_operations": {
+                        "create_session": {
+                            "method": "POST",
+                            "endpoint": "/session",
+                            "input_mode": "form",
+                            "required_form_fields": ["username"],
+                            "form_fields": [
+                                {
+                                    "key": "username",
+                                    "required": True,
+                                    "type": "string",
+                                },
+                                {
+                                    "key": "remember",
+                                    "required": False,
+                                    "type": "boolean",
+                                },
+                            ],
+                        }
+                    },
+                }
+            ],
+        },
+        job_brief="Create a session in my connected vendor system.",
+    )
+
+    operation = spec["requirements"][0]["integration_operations"]["create_session"]
+    assert operation["input_mode"] == "form"
+    assert operation["required_form_fields"] == ["username"]
+    assert [item["key"] for item in operation["form_fields"]] == [
+        "username",
+        "remember",
+    ]
