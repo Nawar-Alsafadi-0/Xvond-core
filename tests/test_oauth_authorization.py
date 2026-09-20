@@ -121,6 +121,11 @@ def test_oauth_token_timing_and_refresh_window():
         now_epoch=1_000,
         skew_seconds=60,
     ) is False
+    assert oauth.oauth_access_token_needs_refresh(
+        {"flow": "client_credentials", "expires_at": 1_050},
+        now_epoch=1_000,
+        skew_seconds=60,
+    ) is True
 
 
 def test_refresh_oauth_access_token_rotates_refresh_token(monkeypatch):
