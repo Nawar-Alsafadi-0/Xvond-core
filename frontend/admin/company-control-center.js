@@ -202,9 +202,75 @@ function renderCapabilitiesTab(){const map=wsModuleMap();return `<div class="wor
 
 function renderAgentsTab(){const d=xvondWorkspace.data;return `<div class="workspace-panel"><div class="workspace-panel-head"><div><h3>AI Employees</h3><p>Information → Knowledge → Actions → Channels → Conversations.</p></div><button class="primary-button" onclick="openAddAIEmployee(${d.view.company.id})">+ AI Employee</button></div>${d.agentMeta.length?`<div class="employee-grid">${d.agentMeta.map(row=>{const a=row.agent,channels=d.channels.filter(x=>+x.agent_id===+a.id),live=channels.some(x=>x.enabled),readyActions=row.actions.filter(x=>x.enabled===true&&!(x.readiness_issues||[]).length).length;return `<div class="employee-card"><div class="employee-card-top"><div class="employee-avatar">${f((a.name||'A').slice(0,1).toUpperCase())}</div><div><h4>${f(a.name)}</h4><div class="meta">${a.enabled?'Active AI Employee':'Paused AI Employee'}</div></div>${wsPill(a.enabled?'Active':'Paused',a.enabled?'good':'neutral')}</div><div class="employee-stats"><div><strong>${row.knowledge.filter(x=>x.enabled).length}</strong><span>Knowledge</span></div><div><strong>${readyActions}</strong><span>Ready Actions</span></div><div><strong>${channels.length}</strong><span>Channels</span></div></div><div class="employee-flow-label">Information → Knowledge → Actions → Channels → Conversations</div><div class="employee-actions employee-primary-actions"><button onclick="openEditAIEmployee(${d.view.company.id},${a.id})">Information</button><button onclick="openKnowledgeManager(${d.view.company.id},${a.id})">Knowledge</button><button onclick="openAgentActions(${d.view.company.id},${a.id})">Actions</button><button onclick="switchWorkspaceTab('channels')">Channels</button><button onclick="openHumanTakeover(${d.view.company.id},${a.id})">Conversations</button></div><div class="employee-actions employee-secondary-actions"><button class="table-button" onclick="openAgentTestChat(${d.view.company.id},${a.id})">Test Employee</button><button class="danger" onclick="deleteWorkspaceEmployee(${a.id},${live})">Delete</button></div></div>`}).join('')}</div>`:wsEmpty('No AI employees yet','Create the employee core first. Company facts live in Company; channels and actions are connected separately.')}</div>`}
 function renderKnowledgeTab(){const d=xvondWorkspace.data;return `<div class="workspace-panel"><div class="workspace-panel-head"><div><h3>Knowledge</h3><p>Business Information is synchronized automatically. Add only extra sources here.</p></div></div>${d.agentMeta.length?`<div class="knowledge-agent-list">${d.agentMeta.map(row=>{const enabled=row.knowledge.filter(x=>x.enabled);return `<div class="knowledge-agent-row"><div><strong>${f(row.agent.name)}</strong><div class="meta">${enabled.length} active source${enabled.length===1?'':'s'} · ${enabled.reduce((n,x)=>n+Number(x.characters||0),0)} characters</div><div class="knowledge-chips">${enabled.slice(0,6).map(x=>`<span>${f(x.title)}</span>`).join('')}${enabled.length>6?`<span>+${enabled.length-6}</span>`:''}</div></div><button class="primary-button" onclick="openKnowledgeManager(${d.view.company.id},${row.agent.id})">Manage Knowledge</button></div>`}).join('')}</div>`:wsEmpty('Create an AI employee first')}</div>`}
+window.openAddWorkspaceChannel=async function(){
+  if(xvondSupportMode()){alert('Support access is read-only.');return}
+  const agents=xvondWorkspace.data?.agentMeta||[];
+  if(!agents.length){alert('Create an AI employee first.');return}
+  try{
+    const result=await api('/admin/channels/catalog');
+    const channels=(result.channels||[]).filter(item=>item.runtime_state==='live');
+    const existing=new Set((xvondWorkspace.data?.channels||[]).map(item=>`${item.agent_id}:${item.channel_type}`));
+    const agentOptions=agents.map(row=>`<option value="${Number(row.agent.id)}">${f(row.agent.name)}</option>`).join('');
+    const channelOptions=channels.map(item=>`<option value="${f(item.type)}" data-setup="${f(item.setup_mode||'')}">${f(item.name)} · ${f(item.setup_mode==='managed'?'Xvond managed':'Direct setup')}</option>`).join('');
+    openModal('Add Customer Channel',`
+      <div class="modal-intro"><strong>Connect this employee to a customer channel</strong><p>Choose the employee and channel. Xvond keeps the same identity, knowledge and allowed actions across every channel.</p></div>
+      <div class="form-grid two">
+        <div class="form-group"><label>AI Employee</label><select id="workspace-channel-agent">${agentOptions}</select></div>
+        <div class="form-group"><label>Channel</label><select id="workspace-channel-type">${channelOptions}</select></div>
+      </div>
+      <div id="workspace-channel-note" class="source-of-truth-box"><strong>Setup</strong><div>Managed channels are provisioned by Xvond and stay inactive until the provider route is verified.</div></div>
+      <button class="modal-submit" onclick="createWorkspaceChannel()">Create Channel</button>`);
+    const refresh=()=>{
+      const agentId=Number(document.getElementById('workspace-channel-agent')?.value||0);
+      const select=document.getElementById('workspace-channel-type');
+      if(!select)return;
+      [...select.options].forEach(option=>{
+        option.disabled=existing.has(`${agentId}:${option.value}`);
+      });
+      if(select.selectedOptions[0]?.disabled){
+        const first=[...select.options].find(option=>!option.disabled);
+        if(first)select.value=first.value;
+      }
+    };
+    document.getElementById('workspace-channel-agent')?.addEventListener('change',refresh);
+    refresh();
+  }catch(error){alert(error.message)}
+};
+
+window.createWorkspaceChannel=async function(){
+  if(xvondSupportMode()){alert('Support access is read-only.');return}
+  const companyId=Number(xvondWorkspace.companyId);
+  const agentId=Number(document.getElementById('workspace-channel-agent')?.value||0);
+  const channelType=String(document.getElementById('workspace-channel-type')?.value||'').trim();
+  if(!agentId||!channelType){alert('Employee and channel are required.');return}
+  try{
+    let config={};
+    if(channelType==='voice'){
+      config={provider:'vapi',language:'auto',tone:'professional_friendly',response_length:'concise',allow_interruption:true};
+    }else if(!['website','whatsapp'].includes(channelType)){
+      config={provisioning_state:'requested',request_source:'admin_managed_delivery'};
+    }
+    const created=await api(`/admin/channels/agents/${agentId}`,{
+      method:'POST',
+      body:JSON.stringify({channel_type:channelType,config})
+    });
+    closeModal();
+    await loadCompanyControlCenter(companyId,'channels');
+    if(channelType==='website'&&typeof openWebsiteChannel==='function'){
+      openWebsiteChannel(companyId,agentId);
+    }else if(channelType==='whatsapp'&&typeof openWhatsAppSetup==='function'){
+      openWhatsAppSetup(agentId,created.id);
+    }else if(channelType==='voice'&&typeof openVoiceSettings==='function'){
+      openVoiceSettings(agentId,created.id);
+    }else if(typeof openManagedChannelSetup==='function'){
+      openManagedChannelSetup(created.id);
+    }
+  }catch(error){alert(error.message)}
+};
+
 function renderChannelsTab(){
   const d=xvondWorkspace.data;
-  return `<div class="workspace-panel"><div class="workspace-panel-head"><div><h3>Channels</h3><p>Configuration, local activation and provider connection are reported separately.</p></div></div>${d.agentMeta.length?d.agentMeta.map(row=>{
+  return `<div class="workspace-panel"><div class="workspace-panel-head"><div><h3>Channels</h3><p>Configuration, local activation and provider connection are reported separately.</p></div><button class="primary-button" onclick="openAddWorkspaceChannel()">+ Channel</button></div>${d.agentMeta.length?d.agentMeta.map(row=>{
     const a=row.agent,web=wsChannel(a.id,'website'),wa=wsChannel(a.id,'whatsapp');
     const webState=wsChannelPresentation(web),waState=wsChannelPresentation(wa);
     return `<div class="channel-employee"><div class="channel-employee-head"><strong>${f(a.name)}</strong><span class="meta">Shared brain, knowledge and actions</span></div><div class="channel-grid"><div class="channel-card"><div><span class="channel-name">Website Chat</span>${wsPill(webState.label,webState.kind)}</div><p>${f(wsChannelDetail(web))}</p><button class="table-button" onclick="openWebsiteChannel(${d.view.company.id},${a.id})">${web?'Website Settings':'Connect Website'}</button></div><div class="channel-card"><div><span class="channel-name">WhatsApp</span>${wsPill(waState.label,waState.kind)}</div><p>${f(wsChannelDetail(wa))}</p><div class="meta">Credentials: ${wa?.configured?'Configured':'Incomplete'} · Local state: ${wa?.enabled?'Active':'Inactive'}</div><div class="agent-actions">${wa?`<button class="table-button" onclick="openWhatsAppSetup(${a.id},${wa.id})">Settings</button>${wa.connected===true?'':`<button class="primary-button" onclick="openMetaWhatsAppConnect(${a.id})">Connect with Meta</button>`}${wa.configured?`<button class="table-button" onclick="setWorkspaceChannelStatus(${wa.id},${!wa.enabled})">${wa.enabled?'Deactivate':'Activate'}</button>`:''}`:`<button class="table-button" onclick="createWhatsAppChannelForEmployee(${d.view.company.id},${a.id})">Connect WhatsApp</button>`}</div></div></div>${renderManagedChannelRequests(a.id)}</div>`;

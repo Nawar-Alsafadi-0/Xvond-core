@@ -124,13 +124,17 @@ class AgentFactory:
             )
         )
 
+        # Templates may seed safe interaction tools, but real business side
+        # effects are configured only through canonical Operations Setup
+        # (action_request). Never create a draft that Delivery Readiness blocks
+        # immediately because deprecated booking/order/lead tools were enabled.
         template_tools = {
             "customer_service": ["human_handoff"],
-            "sales": ["lead", "order", "human_handoff"],
-            "booking": ["booking", "lead", "human_handoff"],
-            "website": ["lead", "booking", "order", "human_handoff"],
-            "whatsapp": ["lead", "booking", "order", "human_handoff"],
-            "voice": ["lead", "booking", "human_handoff"],
+            "sales": ["human_handoff"],
+            "booking": ["human_handoff"],
+            "website": ["human_handoff"],
+            "whatsapp": ["human_handoff"],
+            "voice": ["human_handoff"],
             "knowledge_assistant": ["human_handoff"],
             "custom": [],
         }

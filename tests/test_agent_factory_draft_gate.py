@@ -19,3 +19,13 @@ def test_template_channels_start_disabled():
     source = inspect.getsource(AgentFactory.create_from_template)
     assert "AgentChannel(" in source
     assert "enabled=False" in source
+
+
+def test_managed_templates_do_not_seed_legacy_business_tools():
+    source = inspect.getsource(AgentFactory.create_from_template)
+    assert '"sales": ["human_handoff"]' in source
+    assert '"booking": ["human_handoff"]' in source
+    assert '"website": ["human_handoff"]' in source
+    assert '"whatsapp": ["human_handoff"]' in source
+    assert '"voice": ["human_handoff"]' in source
+    assert "canonical Operations Setup" in source
