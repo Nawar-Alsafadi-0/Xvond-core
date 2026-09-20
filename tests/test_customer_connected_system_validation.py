@@ -562,3 +562,91 @@ def test_failed_generic_oauth_refresh_blocks_business_side_effect(
 
     assert result.success is False
     assert "OAuth token refresh failed" in str(result.error)
+
+
+def test_expired_client_credentials_oauth_reacquires_token_before_action(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {
+                "execute": {"method": "POST", "endpoint": "/bookings"}
+            },
+            "auth_type": "bearer",
+            "api_key": "expired-client-token",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+            "_xvond_oauth": {
+                "flow": "client_credentials",
+                "token_url": "https://accounts.example.com/oauth/token",
+                "scopes": ["orders.write"],
+                "client_id": "client-1",
+                "client_secret": "secret-1",
+                "expires_at": 1,
+            },
+        }
+        db.commit()
+
+    token_call = {}
+
+    def fake_client_credentials(flow, *, client_id, client_secret):
+        token_call.update({
+            "flow": flow,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        })
+        return {
+            "access_token": "fresh-client-token",
+            "token_type": "Bearer",
+            "expires_in": 1800,
+            "scope": "orders.write",
+        }
+
+    monkeypatch.setattr(
+        action_runtime,
+        "oauth_client_credentials_token",
+        fake_client_credentials,
+    )
+    captured = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 200, "response": '{"id":"booking-2"}'}
+
+    monkeypatch.setattr(action_runtime, "safe_http_request", fake_request)
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "booking",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "validation_required": True,
+                    "operations": {
+                        "execute": {"method": "POST", "endpoint": "/bookings"}
+                    },
+                }
+            },
+            {"details": {"customer_name": "Test"}},
+            "execute",
+            idempotency_key="booking-client-refresh-1",
+        )
+        assert result.success is True
+        assert captured["headers"]["Authorization"] == "Bearer fresh-client-token"
+        refreshed = action_runtime.reveal_config(db.get(CompanyIntegration, 11).config)
+        assert refreshed["api_key"] == "fresh-client-token"
+        assert refreshed["_xvond_oauth"]["expires_at"] > refreshed["_xvond_oauth"]["obtained_at"]
+
+    assert token_call["client_id"] == "client-1"
+    assert token_call["client_secret"] == "secret-1"
+    assert token_call["flow"]["scopes"] == ["orders.write"]
