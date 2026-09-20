@@ -26,6 +26,7 @@ from backend.app.modules.channels.catalog import (
     canonical_channel_type,
     get_channel_capability,
     get_channel_definition,
+    list_channel_definitions,
     validate_channel_config,
 )
 from backend.app.modules.channels.delivery import deactivate_managed_channel_route
@@ -382,6 +383,27 @@ def _activation_blockers(db, channel: AgentChannel) -> list[str]:
     if not any(_useful_business_knowledge(doc) for doc in docs):
         blockers.append("Add real business knowledge before activating this channel")
     return blockers
+
+
+@router.get("/catalog")
+def admin_channel_catalog(
+    current_admin: User = Depends(require_xvond_admin),
+):
+    """Expose the canonical customer-channel catalog to Xvond operators."""
+    return {
+        "channels": [
+            {
+                "type": item["type"],
+                "name": item["name"],
+                "description": item.get("description"),
+                "setup_mode": item.get("setup_mode"),
+                "runtime_state": item.get("runtime_state"),
+                "runtime_adapter": item.get("runtime_adapter"),
+                "packaged_provider": bool(item.get("packaged_provider")),
+            }
+            for item in list_channel_definitions()
+        ]
+    }
 
 
 @router.post("/agents/{agent_id}")
