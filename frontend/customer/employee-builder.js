@@ -105,6 +105,40 @@
         }).join("")}</div>`;
     }
 
+    function employeeNeedsFileAssets(employee) {
+        const requirements = Array.isArray(employee?.compiled_spec?.requirements)
+            ? employee.compiled_spec.requirements
+            : [];
+        return requirements.some(requirement => {
+            const operations = requirement?.integration_operations;
+            if (!operations || typeof operations !== "object") return false;
+            return Object.values(operations).some(operation => (
+                Array.isArray(operation?.form_fields)
+                && operation.form_fields.some(field =>
+                    String(field?.format || "").toLowerCase() === "binary"
+                )
+            ));
+        });
+    }
+
+    function employeeFileAssetsMarkup(employee) {
+        if (!employeeNeedsFileAssets(employee)) return "";
+        return `
+            <div class="panel" id="employee-file-assets-panel">
+                <div class="employee-builder-kicker">EMPLOYEE FILES</div>
+                <h2>Files this employee can send</h2>
+                <p class="muted">Upload files that this employee may pass to connected APIs. Xvond stores them under this company and employee only.</p>
+                <div class="employee-builder-actions">
+                    <input id="employee-file-upload-input" type="file">
+                    <button type="button" id="employee-file-upload-button">Upload file</button>
+                    <button type="button" id="employee-files-refresh">Refresh</button>
+                </div>
+                <p class="muted">Maximum file size: 15 MB. The employee uses the asset ID internally; local paths and arbitrary file URLs are never used.</p>
+                <div id="employee-file-upload-error" class="error"></div>
+                <div id="employee-file-assets-list"><p class="muted">Loading files...</p></div>
+            </div>
+        `;
+    }
     function journeyStatusLabel(status) {
         const labels = {
             complete: "Ready",
@@ -766,6 +800,7 @@
 
                 ${journeyMarkup(employee)}
                 ${compiledMarkup(employee.compiled_spec)}
+                ${employeeFileAssetsMarkup(employee)}
                 ${pendingRevisionMarkup(employee)}
                 ${selfServiceMarkup(employee)}
 
@@ -785,6 +820,99 @@
             </div>
         `;
 
+        async function loadEmployeeFileAssets() {
+            if (!employeeNeedsFileAssets(employee)) return;
+            const list = document.getElementById("employee-file-assets-list");
+            const error = document.getElementById("employee-file-upload-error");
+            if (!list) return;
+            if (error) error.textContent = "";
+            list.innerHTML = '<p class="muted">Loading files...</p>';
+            try {
+                const result = await api(
+                    `/customer/employee-builder/${Number(employee.agent_id)}/files`
+                );
+                const files = Array.isArray(result.files) ? result.files : [];
+                if (!files.length) {
+                    list.innerHTML = '<p class="muted">No files uploaded for this employee yet.</p>';
+                    return;
+                }
+                list.innerHTML = files.map(item => `
+                    <div class="note" data-employee-file-row="${Number(item.id)}">
+                        <div class="employee-builder-current-head">
+                            <div>
+                                <strong>${escapeHtml(item.filename || "file")}</strong>
+                                <div class="muted">
+                                    Asset ID ${Number(item.id)}
+                                    · ${escapeHtml(item.content_type || "application/octet-stream")}
+                                    · ${Math.max(1, Math.round(Number(item.size_bytes || 0) / 1024))} KB
+                                </div>
+                            </div>
+                            <button type="button" data-delete-employee-file="${Number(item.id)}">Remove</button>
+                        </div>
+                    </div>
+                `).join("");
+
+                list.querySelectorAll("[data-delete-employee-file]").forEach(button => {
+                    button.addEventListener("click", async () => {
+                        const assetId = Number(button.dataset.deleteEmployeeFile || 0);
+                        if (!assetId || button.disabled) return;
+                        button.disabled = true;
+                        try {
+                            await api(
+                                `/customer/employee-builder/${Number(employee.agent_id)}/files/${assetId}`,
+                                {method: "DELETE"}
+                            );
+                            await loadEmployeeFileAssets();
+                        } catch (err) {
+                            if (error) error.textContent = err?.message || "Could not remove this file.";
+                            button.disabled = false;
+                        }
+                    });
+                });
+            } catch (err) {
+                list.innerHTML = "";
+                if (error) error.textContent = err?.message || "Could not load employee files.";
+            }
+        }
+
+        if (employeeNeedsFileAssets(employee)) {
+            const uploadInput = document.getElementById("employee-file-upload-input");
+            const uploadButton = document.getElementById("employee-file-upload-button");
+            const uploadError = document.getElementById("employee-file-upload-error");
+            document.getElementById("employee-files-refresh")
+                ?.addEventListener("click", loadEmployeeFileAssets);
+
+            uploadButton?.addEventListener("click", async () => {
+                const file = uploadInput?.files?.[0];
+                if (uploadError) uploadError.textContent = "";
+                if (!file) {
+                    if (uploadError) uploadError.textContent = "Choose a file to upload.";
+                    return;
+                }
+                if (file.size > 15 * 1024 * 1024) {
+                    if (uploadError) uploadError.textContent = "File is larger than 15 MB.";
+                    return;
+                }
+
+                uploadButton.disabled = true;
+                const formData = new FormData();
+                formData.append("file", file, file.name);
+                try {
+                    await api(
+                        `/customer/employee-builder/${Number(employee.agent_id)}/files`,
+                        {method: "POST", body: formData}
+                    );
+                    uploadInput.value = "";
+                    await loadEmployeeFileAssets();
+                } catch (err) {
+                    if (uploadError) uploadError.textContent = err?.message || "Could not upload this file.";
+                } finally {
+                    if (document.body.contains(uploadButton)) uploadButton.disabled = false;
+                }
+            });
+
+            loadEmployeeFileAssets();
+        }
         async function openJourneyPage(pageId) {
             const navButton = [...document.querySelectorAll("#portal-nav .nav-item")]
                 .find(item => item.dataset.page === pageId);
