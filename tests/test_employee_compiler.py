@@ -1912,3 +1912,25 @@ def test_compiler_preserves_nested_json_request_schema():
         },
         "required": ["name"],
     }
+
+def test_compiler_preserves_safe_connected_api_header_metadata():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Vendor employee",
+            "requirements": [{
+                "key": "vendor_records", "kind": "integration", "purpose": "Create records",
+                "requires_connection": True, "fulfillment_mode": "external_connection",
+                "integration_operations": {"execute": {
+                    "method": "POST", "endpoint": "/records", "input_mode": "json",
+                    "header_params": ["X-Workspace-ID", "X-Region"],
+                    "required_header_params": ["X-Workspace-ID"],
+                    "required_json_fields": ["name"],
+                    "json_fields": [{"key": "name", "required": True, "type": "string"}],
+                }},
+            }],
+        },
+        job_brief="Create records in my connected vendor system.",
+    )
+    operation = spec["requirements"][0]["integration_operations"]["execute"]
+    assert operation["header_params"] == ["X-Workspace-ID", "X-Region"]
+    assert operation["required_header_params"] == ["X-Workspace-ID"]
