@@ -31,6 +31,7 @@ def create_oauth_authorization(
     company_id: int,
     agent_id: int,
     requirement_key: str,
+    integration_id: int | None = None,
 ) -> dict:
     if not state_secret:
         raise ValueError("OAuth state signing secret is not configured")
@@ -52,6 +53,7 @@ def create_oauth_authorization(
         "company_id": int(company_id),
         "agent_id": int(agent_id),
         "requirement_key": str(requirement_key),
+        "integration_id": int(integration_id) if integration_id is not None else None,
         "nonce": nonce,
         "exp": int(time.time()) + STATE_TTL_SECONDS,
         "code_verifier": verifier,
