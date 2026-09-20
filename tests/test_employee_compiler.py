@@ -1716,3 +1716,48 @@ def test_compiler_preserves_declared_connected_api_query_parameters():
     operation = spec["requirements"][0]["integration_operations"]["lookup"]
     assert operation["query_params"] == ["status", "limit"]
     assert operation["required_query_params"] == ["status"]
+
+def test_compiler_preserves_connected_api_response_contract_metadata():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Order employee",
+            "requirements": [
+                {
+                    "key": "vendor_orders",
+                    "kind": "integration",
+                    "purpose": "Create vendor orders",
+                    "requires_connection": True,
+                    "fulfillment_mode": "external_connection",
+                    "integration_operations": {
+                        "create_order": {
+                            "method": "POST",
+                            "endpoint": "/orders",
+                            "input_mode": "json",
+                            "response_status": "201",
+                            "response_kind": "object",
+                            "response_fields": [
+                                {
+                                    "key": "id",
+                                    "required": True,
+                                    "type": "string",
+                                    "description": "Created order identifier",
+                                },
+                                {
+                                    "key": "state",
+                                    "required": False,
+                                    "type": "string",
+                                },
+                            ],
+                        }
+                    },
+                }
+            ],
+        },
+        job_brief="Create orders in my connected vendor system.",
+    )
+
+    operation = spec["requirements"][0]["integration_operations"]["create_order"]
+    assert operation["response_status"] == "201"
+    assert operation["response_kind"] == "object"
+    assert [item["key"] for item in operation["response_fields"]] == ["id", "state"]
+    assert operation["response_fields"][0]["required"] is True
