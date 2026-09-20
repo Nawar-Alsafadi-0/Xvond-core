@@ -799,7 +799,10 @@ def self_service_readiness(
         company_id=company.id,
         spec=spec or {},
     )
-    billing_required = settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION
+    billing_required = (
+        settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION
+        and not settings.SELF_SERVICE_FREE_EXPERIMENT
+    )
     state = evaluate_readiness(
         subscribed=bool(billing["active"]) or not billing_required,
         channel_limit=billing["channel_limit"] if billing_required else None,
@@ -898,7 +901,11 @@ def _connected_system_setup(db, *, company_id: int, spec: dict) -> list[dict]:
 
 def assert_self_service_runtime_subscription(db, *, company_id: int) -> None:
     """Protect paid self-service execution only when billing enforcement is enabled."""
-    if settings.is_test or not settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+    if (
+        settings.is_test
+        or settings.SELF_SERVICE_FREE_EXPERIMENT
+        or not settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION
+    ):
         return
     company = db.query(Company).filter(Company.id == company_id).first()
     if not is_self_service_company(company):
