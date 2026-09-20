@@ -1692,12 +1692,12 @@ def _self_service_builder_journey(
                     scheme = auth_schemes[0] if len(auth_schemes) == 1 else {}
                     auth_type = str(scheme.get("auth_type") or "")
                     fields: list[dict] = []
+                    oauth_interactive = False
                     if auth_type == "basic":
                         fields = [
                             {"key": "username", "label": "Username", "type": "text"},
                             {"key": "password", "label": "Password", "type": "password"},
                         ]
-                    oauth_interactive = False
                     elif auth_type == "oauth":
                         flows = [
                             item for item in (scheme.get("flows") or [])
