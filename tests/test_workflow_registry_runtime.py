@@ -68,7 +68,12 @@ def test_route_identity_cannot_be_reassigned_by_upsert():
 
 def test_registry_supports_explicit_deactivation():
     assert '@app.delete("/v1/routes/{company_id}/{connection_key}")' in SERVICE
-    assert "SET active=FALSE" in SERVICE
+    delete_block = SERVICE.split(
+        '@app.delete("/v1/routes/{company_id}/{connection_key}")',
+        1,
+    )[1]
+    assert "DELETE FROM xvond_managed_channel_routes" in delete_block
+    assert "SET active=FALSE" not in delete_block
 
 
 def test_registry_crypto_roundtrip_is_bound_to_route_identity(monkeypatch):
