@@ -449,3 +449,31 @@ def test_admin_delete_removes_channel_after_route_cleanup(
     assert seen == [101]
     with managed_channel_db() as db:
         assert db.get(AgentChannel, 101) is None
+
+
+def test_admin_channel_catalog_exposes_all_live_customer_channels():
+    result = api.admin_channel_catalog(SimpleNamespace(id=99, role="xvond_admin"))
+    by_type = {item["type"]: item for item in result["channels"]}
+    for channel_type in (
+        "website",
+        "whatsapp",
+        "voice",
+        "telegram",
+        "instagram",
+        "messenger",
+        "email",
+        "sms",
+        "slack",
+        "teams",
+        "custom",
+    ):
+        assert channel_type in by_type
+        assert by_type[channel_type]["runtime_state"] == "live"
+
+
+def test_admin_workspace_can_create_managed_channel_requests_directly():
+    assert "/admin/channels/catalog" in ADMIN_UI
+    assert "Add Customer Channel" in ADMIN_UI
+    assert "admin_managed_delivery" in ADMIN_UI
+    assert "createWorkspaceChannel" in ADMIN_UI
+    assert "openManagedChannelSetup(created.id)" in ADMIN_UI
