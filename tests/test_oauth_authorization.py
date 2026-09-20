@@ -25,7 +25,8 @@ def test_authorization_uses_signed_state_and_pkce(monkeypatch):
     assert payload["company_id"] == 7
     assert payload["agent_id"] == 9
     assert payload["requirement_key"] == "orders_api"
-    assert payload["code_verifier"]
+    assert "code_verifier" not in payload
+    assert result["code_verifier"]
 
 
 def test_tampered_oauth_state_is_rejected(monkeypatch):
@@ -65,6 +66,7 @@ def test_exchange_sends_pkce_verifier(monkeypatch):
         },
         code="code-1",
         client_secret="secret-1",
+        code_verifier="verifier",
     )
     assert token["access_token"] == "token"
     assert token["refresh_token"] == "refresh"
