@@ -383,6 +383,24 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
             if str(raw_key or "").strip() not in json_field_keys:
                 add_field(raw_key, required=True)
 
+        form_field_keys: set[str] = set()
+        for raw_field in execute_operation.get("form_fields") or []:
+            if not isinstance(raw_field, dict):
+                continue
+            raw_key = str(raw_field.get("key") or "").strip()
+            if not raw_key:
+                continue
+            form_field_keys.add(raw_key)
+            add_field(
+                raw_key,
+                required=bool(raw_field.get("required")),
+                raw_type=str(raw_field.get("type") or "string"),
+                raw_format=str(raw_field.get("format") or ""),
+            )
+        for raw_key in execute_operation.get("required_form_fields") or []:
+            if str(raw_key or "").strip() not in form_field_keys:
+                add_field(raw_key, required=True)
+
     if key == "booking":
         fields = [
             {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
