@@ -165,6 +165,7 @@ def safe_http_request(
     headers: dict | None = None,
     json_data=None,
     form_data: dict | None = None,
+    multipart_data: dict | None = None,
     timeout: float = 15.0,
     max_response_bytes: int = 1_000_000,
 ) -> dict:
@@ -206,6 +207,17 @@ def safe_http_request(
         ).items()
     }
 
+    if form_data is not None and multipart_data is not None:
+        raise ValueError("Form and multipart payloads are mutually exclusive")
+
+    multipart_files = None
+    if multipart_data is not None:
+        multipart_files = {
+            str(key): (None, str(value))
+            for key, value in multipart_data.items()
+            if value is not None
+        }
+
     # Do not automatically follow redirects.
     # Prevents public URL -> private URL SSRF.
     with httpx.Client(
@@ -217,8 +229,13 @@ def safe_http_request(
             method,
             url,
             headers=request_headers,
-            json=json_data if form_data is None else None,
+            json=(
+                json_data
+                if form_data is None and multipart_data is None
+                else None
+            ),
             data=form_data,
+            files=multipart_files,
         ) as response:
 
             body = bytearray()
