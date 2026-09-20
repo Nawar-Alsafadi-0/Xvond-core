@@ -903,7 +903,11 @@ def _integration_call(
                 continue
             if input_mode == "multipart" and key in binary_fields:
                 try:
+                    if isinstance(value, bool):
+                        raise ValueError
                     asset_id = int(value)
+                    if asset_id <= 0:
+                        raise ValueError
                 except (TypeError, ValueError):
                     return ToolResult(
                         success=False,
