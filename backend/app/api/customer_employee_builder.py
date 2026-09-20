@@ -653,6 +653,27 @@ def _self_service_employee_or_404(
     return agent, config
 
 
+def _agent_id_is_self_service(
+    db,
+    company: Company,
+    agent_id: int,
+) -> bool:
+    row = (
+        db.query(AIAgent, AgentConfig)
+        .join(AgentConfig, AgentConfig.agent_id == AIAgent.id)
+        .filter(
+            AIAgent.id == int(agent_id),
+            AIAgent.company_id == company.id,
+            AgentConfig.agent_type == "employee",
+        )
+        .first()
+    )
+    if row is None:
+        return False
+    _, config = row
+    return is_self_service_employee(company, config)
+
+
 def _employee_config_or_404(db, agent: AIAgent) -> AgentConfig:
     config = db.query(AgentConfig).filter(AgentConfig.agent_id == agent.id).first()
     if config is None or config.agent_type != "employee":
@@ -3421,7 +3442,7 @@ def discover_self_service_capability(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Capability discovery is available only for Self-Service employees")
 
         agent = (
@@ -3679,7 +3700,7 @@ def start_discovered_oauth_authorization(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "OAuth setup is available only for Self-Service employees")
         agent = (
             db.query(AIAgent)
@@ -4078,7 +4099,7 @@ def provide_discovered_capability_access(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Capability access setup is available only for Self-Service employees")
 
         agent = (
@@ -4392,7 +4413,7 @@ def auto_resolve_self_service_integrations(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Automatic connection resolution is available only for Self-Service employees",
@@ -4520,7 +4541,7 @@ def bind_self_service_integration(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Connected-system binding is available only for Self-Service employees")
 
         agent = db.query(AIAgent).filter(
@@ -4808,7 +4829,7 @@ def save_self_service_setup_answer(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Setup answers are available only for Self-Service employees")
 
         agent = (
@@ -5025,7 +5046,7 @@ def set_self_service_permission(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Owner permissions are available only for Self-Service employees",
@@ -5251,7 +5272,7 @@ def launch_self_service_employee(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Xvond Managed employees must use the managed delivery flow",
@@ -5402,7 +5423,7 @@ def deactivate_self_service_employee(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Xvond Managed employees must use the managed delivery flow",
@@ -5473,7 +5494,7 @@ def preview_employee_routine(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Routine preview is available only for Self-Service employees",
@@ -5941,7 +5962,7 @@ def build_pending_live_revision(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Live revisions are available only for Self-Service employees")
         if not _has_ai_agents_entitlement(db, company.id):
             raise HTTPException(
@@ -6022,7 +6043,7 @@ def discard_pending_live_revision(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Live revisions are available only for Self-Service employees",
@@ -6068,7 +6089,7 @@ def apply_pending_live_revision(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(
                 409,
                 "Live revisions are available only for Self-Service employees",
@@ -6663,7 +6684,7 @@ def customer_employee_routines(
         if company_id is None:
             raise HTTPException(403, "Customer company required")
         company = _company_or_404(db, company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Routine controls are available only for Self-Service employees")
 
         agent = (
@@ -6751,7 +6772,7 @@ def customer_employee_set_routine_state(
         if company_id is None:
             raise HTTPException(403, "Customer company required")
         company = _company_or_404(db, company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Routine controls are available only for Self-Service employees")
 
         agent = (
@@ -6836,7 +6857,7 @@ def customer_employee_retry_routine(
         if company_id is None:
             raise HTTPException(403, "Customer company required")
         company = _company_or_404(db, company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Routine retry is available only for Self-Service employees")
 
         agent = (
@@ -6965,7 +6986,7 @@ def customer_employee_webhook(
         if company_id is None:
             raise HTTPException(403, "Customer company required")
         company = _company_or_404(db, company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Webhook setup is available for Self-Service employees")
 
         agent = (
@@ -7074,7 +7095,7 @@ def customer_employee_automation_runs(
         if company_id is None:
             raise HTTPException(403, "Customer company required")
         company = _company_or_404(db, company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Automation runs are available for Self-Service employees")
 
         agent = (
@@ -7164,7 +7185,7 @@ def customer_employee_run_graph(
         if company_id is None:
             raise HTTPException(403, "Customer company required")
         company = _company_or_404(db, company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Manual graph execution is available for Self-Service employees")
 
         agent = (
@@ -7496,7 +7517,7 @@ def list_employee_file_assets(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Employee file assets are available through the Self-Service builder")
         agent = (
             db.query(AIAgent)
@@ -7545,7 +7566,7 @@ async def upload_employee_file_asset(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Employee file assets are available through the Self-Service builder")
         agent = (
             db.query(AIAgent)
@@ -7637,7 +7658,7 @@ def delete_employee_file_asset(
     db = SessionLocal()
     try:
         company = _company_or_404(db, current_user.company_id)
-        if not is_self_service_company(company):
+        if not _agent_id_is_self_service(db, company, agent_id):
             raise HTTPException(409, "Employee file assets are available through the Self-Service builder")
         asset = (
             db.query(EmployeeFileAsset)
