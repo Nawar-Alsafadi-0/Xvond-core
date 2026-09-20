@@ -59,6 +59,8 @@ loadAgents = async function() {
     const result = await api("/ai-agents/");
     agents = result.agents || [];
     const target = document.getElementById("agents-list");
+    const selfServiceBuilderAvailable = Array.isArray(portalNavigation)
+        && portalNavigation.some(item => item.id === "employee-builder");
     if (target) {
         target.innerHTML = agents.length
             ? agents.map(agent => `
@@ -70,7 +72,7 @@ loadAgents = async function() {
                         </div>
                         <span class="status">${agent.enabled ? "Live" : "Draft / Paused"}</span>
                     </div>
-                    <button onclick="openCustomerAgentSettings(${Number(agent.id)})">Manage</button>
+                    ${selfServiceBuilderAvailable ? `<button onclick="openPage(\'employee-builder\')">Open employee</button>` : `<button onclick="openCustomerAgentSettings(${Number(agent.id)})">Manage</button>`}
                 </div>
             `).join("") + '<div id="customer-agent-settings"></div>'
             : "<p>No AI employees available.</p>";

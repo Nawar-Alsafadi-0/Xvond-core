@@ -474,47 +474,16 @@
     function selfServiceMarkup(employee) {
         if (employee.delivery_mode !== "self_service") return "";
         const state = employee.self_service_readiness || {};
-        const subscription = state.subscription || {};
-        const limit = state.channel_limit == null ? "—" : String(state.channel_limit);
-        const used = Number(state.channel_slots_used || 0);
-        const modeLabels = {
-            personal: "Personal agent",
-            background: "Background worker",
-            customer_facing: "Customer-facing employee",
-            hybrid: "Hybrid employee",
-            workspace: "Workspace employee",
-        };
+        const blockers = Array.isArray(state.blockers) ? state.blockers : [];
+        const customerBlockers = blockers.filter(item => !/subscription|plan/i.test(String(item || "")));
+        if (!employee.enabled && !customerBlockers.length) return "";
         return `
             <div class="panel">
-                <div class="employee-builder-kicker">SELF-SERVICE DELIVERY</div>
-                <div class="employee-builder-summary-grid">
-                    <div>
-                        <h3>Work mode</h3>
-                        <div class="employee-builder-missing">${badge(modeLabels[state.mode] || state.mode || "Pending")}</div>
-                        <p class="muted">${state.channels_required ? "This job needs a communication channel." : "This job can run with 0 communication channels."}</p>
-                    </div>
-                    <div>
-                        <h3>Channel slots</h3>
-                        <div class="employee-builder-missing">${badge(`${used}/${limit}`, used > 0 ? "neutral" : "ready")}</div>
-                        <p class="muted">Communication channels use plan slots. Gmail, email actions, Instagram publishing and other connected systems are integrations, not channel slots.</p>
-                    </div>
-                    <div>
-                        <h3>Subscription</h3>
-                        <div class="employee-builder-missing">${badge(subscription.active ? (subscription.plan_name || "Active") : "Subscription required", subscription.active ? "ready" : "setup")}</div>
-                    </div>
-                </div>
-                <div class="employee-builder-section">
-                    <h3>Runtime readiness</h3>
-                    <div class="employee-builder-missing">
-                        ${badge(
-                            employee.enabled ? "Live" : (state.ready ? "Ready to launch" : "Follow build progress"),
-                            employee.enabled || state.ready ? "ready" : "setup"
-                        )}
-                    </div>
-                    <p class="muted">${state.ready || employee.enabled
-                        ? "The runtime readiness gate is satisfied."
-                        : "The Build Progress above is the customer-facing source for the next required step."}</p>
-                </div>
+                <div class="employee-builder-kicker">EMPLOYEE STATUS</div>
+                <h2>${employee.enabled ? "موظفك شغال" : "باقي شغلات ضرورية قبل التشغيل"}</h2>
+                <p class="muted">${employee.enabled
+                    ? "Xvond يدير التشغيل من نفس الموظف."
+                    : "Xvond يعرض فقط الأشياء الضرورية لهذه الوظيفة. الإعدادات العامة غير المطلوبة مخفية."}</p>
             </div>
         `;
     }
@@ -712,9 +681,9 @@
                     </div>
 
                     <div class="employee-builder-section">
-                        <h3>Job brief</h3>
+                        <h3>شو طلبت من الموظف</h3>
                         <p>${escapeHtml(employee.description || "")}</p>
-                        <p class="muted">This brief is the source of truth. Xvond builds the employee around the requested job instead of limiting it to a predefined agent type.</p>
+                        <p class="muted">Xvond فهم الطلب وبنى الموظف حوله. ما منعرض إعدادات عامة ما إلها علاقة بالوظيفة.</p>
                         ${employee.delivery_mode === "self_service" && !employee.enabled ? `
                             <div class="employee-builder-actions">
                                 <button type="button" id="revise-job-brief-btn">Revise job brief</button>
@@ -732,10 +701,10 @@
                         ` : ""}
                         ${employee.delivery_mode === "self_service" ? `
                             <div class="employee-builder-section">
-                                <h3>Tell Xvond what to change</h3>
-                                <p class="muted">Refine the same employee with a short instruction. Xvond keeps the rest of the Job Brief unless your new instruction overrides it.</p>
+                                <h3>عدّل موظفك بالكلام</h3>
+                                <p class="muted">اكتب أي تعديل، وXvond يحدّث نفس الموظف بدون ما تعيد بناءه من الصفر.</p>
                                 <div class="chat-input">
-                                    <input id="employee-refine-instruction" maxlength="2000" placeholder="مثال: خليه يحكي رسمي أكثر، وخلي الحجز 30 دقيقة">
+                                    <input id="employee-refine-instruction" maxlength="2000" placeholder="مثال: انشر 3 مرات بالأسبوع وخلي المحتوى باللهجة الخليجية">
                                     <button type="button" id="employee-refine-btn">Apply change</button>
                                 </div>
                                 <div id="employee-refine-error" class="error"></div>
@@ -762,17 +731,19 @@
                         ` : ""}
                     </div>
 
+                    ${employee.delivery_mode === "self_service" ? "" : `
                     <div class="employee-builder-summary-grid">
                         <div>
                             <h3>Communication channels</h3>
                             <div class="employee-builder-missing">${channels}</div>
-                            <p class="muted">Optional unless this employee needs to talk with customers or users.</p>
                         </div>
                         <div>
                             <h3>Preparation</h3>
                             <div class="employee-builder-missing">${badge(provisioned ? "Action plan prepared" : "Preparation pending", provisioned ? "ready" : "setup")}</div>
                         </div>
                     </div>
+                    `}
+                </div>
 
                     ${employee.delivery_mode === "self_service" ? "" : (provisioned ? "" : employee.can_compile ? `
                         <div class="employee-builder-section">
@@ -799,7 +770,7 @@
                 </div>
 
                 ${journeyMarkup(employee)}
-                ${compiledMarkup(employee.compiled_spec)}
+                ${employee.delivery_mode === "self_service" ? "" : compiledMarkup(employee.compiled_spec)}
                 ${employeeFileAssetsMarkup(employee)}
                 ${pendingRevisionMarkup(employee)}
                 ${selfServiceMarkup(employee)}
@@ -807,16 +778,10 @@
                 ${employee.enabled ? `
                     <div class="panel">
                         <div class="employee-builder-kicker">LIVE</div>
-                        <h2>Your employee is launched</h2>
-                        <p class="muted">Manage conversations, usage, knowledge, tools, automations and connected channels from the workspace.</p>
+                        <h2>موظفك شغال</h2>
+                        <p class="muted">استخدم نفس الصفحة لتعديله أو متابعة شغله.</p>
                     </div>
-                ` : `
-                    <div class="panel">
-                        <div class="employee-builder-kicker">DRAFT</div>
-                        <h2>${employee.compiled ? "Your employee build plan is ready" : "Your job brief is saved"}</h2>
-                        <p class="muted">${employee.compiled ? "Xvond owns the capability build. Finish only the external account connections, permissions or data the job needs before live actions." : "No paid AI is used while saving the brief. Subscribe before AI-backed building, testing or live execution."}</p>
-                    </div>
-                `}
+                ` : ""}
             </div>
         `;
 

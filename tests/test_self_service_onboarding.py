@@ -10,8 +10,11 @@ from backend.app.modules.ai_agent.factory import AgentFactory
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_self_service_build_has_zero_free_ai_messages_before_subscription():
+def test_self_service_build_preview_is_not_blocked_by_subscription():
+    # Interactive free-test messages remain disabled; the initial compiler build itself is free.
     assert SELF_SERVICE_FREE_TEST_MESSAGES == 0
+    api = (ROOT / "backend" / "app" / "api" / "customer_employee_builder.py").read_text(encoding="utf-8")
+    assert "if not is_self_service_company(company):" in api
 
 
 def test_company_source_defaults_to_managed_for_existing_manual_flow():
@@ -47,10 +50,12 @@ def test_public_builder_is_open_ended_and_creates_directly_without_preview():
     assert "/auth/login" in html
     assert "/auth/signup" in html
     assert "sessionStorage" in html
-    assert "Xvond Workspace" in html
     assert "ابنِ موظفي" in html
     assert "شو بدك موظفك يعمل؟" in html
-    assert "Job Brief" in html
+    assert "/customer/employee-builder/${agentId}/compile" in html
+    assert "عم نبني موظفك" in html
+    assert 'id="employee-name"' not in html
+    assert 'name="channel"' not in html
     assert 'name="capability"' not in html
     assert "خدمة العملاء" not in html
     assert "المبيعات" not in html
@@ -63,9 +68,9 @@ def test_customer_portal_treats_job_brief_as_source_of_truth():
     assert 'href="/build"' in source
     assert "Build on Xvond.com" in source
     assert "Xvond Workspace" in source
-    assert "Job brief" in source
-    assert "source of truth" in source
-    assert "instead of limiting it to a predefined agent type" in source
+    assert "شو طلبت من الموظف" in source
+    assert "ما منعرض إعدادات عامة ما إلها علاقة بالوظيفة" in source
+    assert "عدّل موظفك بالكلام" in source
     assert "Xvond builds this" in source
     assert "BUILD PROGRESS" in source
     assert "data-builder-action" in source
