@@ -3374,9 +3374,14 @@ class AutomationRuntime:
                             ) from exc
 
                         results.append(nested_result)
-                        previous_result = deepcopy(nested_result)
+                        previous_result = deepcopy(
+                            nested_result.get("graph_last")
+                            if isinstance(nested_result, dict)
+                            and "graph_last" in nested_result
+                            else nested_result
+                        )
                         child_resume = None
-                        left = extract_data_path(nested_result, until_path)
+                        left = extract_data_path(previous_result, until_path)
                         try:
                             stopped = compare_values(left, until_operator, until_value)
                         except Exception as exc:
