@@ -164,7 +164,7 @@ def oauth_access_token_needs_refresh(
     skew_seconds: int = 60,
 ) -> bool:
     value = oauth_config or {}
-    if str(value.get("flow") or "") != "authorization_code":
+    if str(value.get("flow") or "") not in {"authorization_code", "client_credentials"}:
         return False
     expires_at = value.get("expires_at")
     if expires_at in (None, ""):
