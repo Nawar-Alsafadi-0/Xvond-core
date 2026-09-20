@@ -652,3 +652,131 @@ def test_expired_client_credentials_oauth_reacquires_token_before_action(
     assert token_call["client_id"] == "client-1"
     assert token_call["client_secret"] == "secret-1"
     assert token_call["flow"]["scopes"] == ["orders.write"]
+
+def test_generic_api_missing_required_json_field_fails_before_side_effect(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {
+                "execute": {
+                    "method": "POST",
+                    "endpoint": "/appointments",
+                    "input_mode": "json",
+                    "required_json_fields": ["customer_name", "service_id"],
+                }
+            },
+            "auth_type": "none",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+        }
+        db.commit()
+
+    monkeypatch.setattr(
+        action_runtime,
+        "safe_http_request",
+        lambda **kwargs: pytest.fail("Incomplete JSON body must not reach provider"),
+    )
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "booking",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "validation_required": True,
+                    "operations": {
+                        "execute": {
+                            "method": "POST",
+                            "endpoint": "/appointments",
+                            "input_mode": "json",
+                            "required_json_fields": ["customer_name", "service_id"],
+                        }
+                    },
+                }
+            },
+            {"details": {"customer_name": "Test Customer"}},
+            "execute",
+            idempotency_key="required-json-1",
+        )
+
+    assert result.success is False
+    assert result.data["missing_fields"] == ["service_id"]
+    assert "requires JSON field(s): service_id" in str(result.error)
+
+
+def test_generic_api_complete_required_json_body_executes(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {
+                "execute": {
+                    "method": "POST",
+                    "endpoint": "/appointments",
+                    "input_mode": "json",
+                    "required_json_fields": ["customer_name", "service_id"],
+                }
+            },
+            "auth_type": "none",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+        }
+        db.commit()
+
+    monkeypatch.setattr(action_runtime, "validate_public_http_url", lambda url: url)
+    captured = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {"status_code": 201, "response": '{"id":"appt-1"}'}
+
+    monkeypatch.setattr(action_runtime, "safe_http_request", fake_request)
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "booking",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "validation_required": True,
+                    "operations": {
+                        "execute": {
+                            "method": "POST",
+                            "endpoint": "/appointments",
+                            "input_mode": "json",
+                            "required_json_fields": ["customer_name", "service_id"],
+                        }
+                    },
+                }
+            },
+            {"details": {"customer_name": "Test Customer", "service_id": 42}},
+            "execute",
+            idempotency_key="required-json-2",
+        )
+
+    assert result.success is True
+    assert captured["json_data"] == {
+        "customer_name": "Test Customer",
+        "service_id": 42,
+    }
