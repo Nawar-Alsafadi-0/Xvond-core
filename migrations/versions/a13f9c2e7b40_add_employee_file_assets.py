@@ -1,7 +1,7 @@
 """add employee-owned file assets
 
 Revision ID: a13f9c2e7b40
-Revises: f91d2e6b7c30
+Revises: 2a8d4e7f1b30
 Create Date: 2026-09-20
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 revision = "a13f9c2e7b40"
-down_revision = "f91d2e6b7c30"
+down_revision = "2a8d4e7f1b30"
 branch_labels = None
 depends_on = None
 
