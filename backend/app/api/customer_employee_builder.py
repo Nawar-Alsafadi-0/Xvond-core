@@ -2178,7 +2178,7 @@ def current_employee(current_user: User = Depends(require_customer_manager)):
                 "missing_information": builder.get("missing_information", []),
                 "compiled": isinstance(compiled_spec, dict),
                 "compiled_spec": compiled_spec if isinstance(compiled_spec, dict) else None,
-                "can_compile": has_entitlement,
+                "can_compile": bool(has_entitlement or is_self_service_company(company)),
                 "delivery_mode": (
                     "self_service"
                     if is_self_service_company(company)
