@@ -61,6 +61,7 @@ class Settings:
     META_INSTAGRAM_APP_ID = os.getenv("META_INSTAGRAM_APP_ID", "").strip()
     META_INSTAGRAM_APP_SECRET = os.getenv("META_INSTAGRAM_APP_SECRET", "").strip()
     META_INSTAGRAM_REDIRECT_URI = os.getenv("META_INSTAGRAM_REDIRECT_URI", "").strip()
+    META_MESSENGER_CONFIG_ID = os.getenv("META_MESSENGER_CONFIG_ID", "").strip()
     N8N_ENABLED = os.getenv("N8N_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "").strip()
     WORKFLOW_PUBLIC_URL = os.getenv("WORKFLOW_PUBLIC_URL", "").strip().rstrip("/")
