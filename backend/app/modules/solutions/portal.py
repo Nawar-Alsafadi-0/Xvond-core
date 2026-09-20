@@ -74,6 +74,12 @@ SERVICE_PORTAL_REGISTRY = {
                 "group": "AI Workforce",
             },
             {
+                "id": "channels",
+                "label": "Channels",
+                "loader": "channels",
+                "group": "AI Workforce",
+            },
+            {
                 "id": "chat",
                 "label": "Test AI Employee",
                 "loader": "chat",
