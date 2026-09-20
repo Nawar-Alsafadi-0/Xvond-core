@@ -4180,3 +4180,126 @@ def test_external_execute_contract_generates_customer_fields_from_api_schema():
     assert fields["service_id"]["type"] == "number"
     assert fields["visit_date"]["required"] is False
     assert fields["visit_date"]["type"] == "date"
+
+def test_external_single_named_operation_becomes_direct_default_and_drives_fields():
+    action = build_managed_action_config(
+        requirement={
+            "key": "specialist_records",
+            "kind": "integration",
+            "purpose": "Create specialist records",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 92,
+            "validation_required": True,
+            "integration_operations": {
+                "create_record": {
+                    "method": "POST",
+                    "endpoint": "/records",
+                    "input_mode": "json",
+                    "required_json_fields": ["customer_name"],
+                    "json_fields": [
+                        {
+                            "key": "customer_name",
+                            "required": True,
+                            "type": "string",
+                        }
+                    ],
+                }
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    assert action["destination"]["default_operation"] == "create_record"
+    assert action["fields"] == [
+        {
+            "key": "customer_name",
+            "label": "Customer Name",
+            "required": True,
+            "type": "text",
+        }
+    ]
+
+
+def test_external_graph_selected_operation_becomes_direct_default_when_contract_has_many():
+    action = build_managed_action_config(
+        requirement={
+            "key": "specialist_records",
+            "kind": "integration",
+            "purpose": "Create specialist records",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 93,
+            "validation_required": True,
+            "integration_operations": {
+                "lookup_record": {
+                    "method": "GET",
+                    "endpoint": "/records/{record_id}",
+                    "input_mode": "query",
+                    "path_params": ["record_id"],
+                },
+                "create_record": {
+                    "method": "POST",
+                    "endpoint": "/records",
+                    "input_mode": "json",
+                    "required_json_fields": ["customer_name"],
+                    "json_fields": [
+                        {
+                            "key": "customer_name",
+                            "required": True,
+                            "type": "string",
+                        }
+                    ],
+                },
+            },
+        },
+        spec={
+            "permissions": [],
+            "execution_graph": {
+                "version": 1,
+                "trigger": {"type": "manual"},
+                "nodes": [
+                    {
+                        "id": "create",
+                        "type": "action",
+                        "depends_on": [],
+                        "params": {
+                            "action_type": "specialist_records",
+                            "operation": "create_record",
+                            "arguments": {},
+                        },
+                    }
+                ],
+            },
+        },
+    )
+
+    assert action["destination"]["default_operation"] == "create_record"
+    assert [field["key"] for field in action["fields"]] == ["customer_name"]
+
+
+def test_external_ambiguous_operations_do_not_gain_an_unsafe_direct_default():
+    action = build_managed_action_config(
+        requirement={
+            "key": "specialist_records",
+            "kind": "integration",
+            "purpose": "Work with specialist records",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 94,
+            "validation_required": True,
+            "integration_operations": {
+                "create_record": {
+                    "method": "POST",
+                    "endpoint": "/records",
+                    "input_mode": "json",
+                },
+                "delete_record": {
+                    "method": "DELETE",
+                    "endpoint": "/records/{record_id}",
+                    "input_mode": "query",
+                },
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    assert action["destination"]["default_operation"] is None
+    assert action["fields"] == []
