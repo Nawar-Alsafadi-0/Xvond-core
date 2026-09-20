@@ -3,6 +3,7 @@ uvicorn[standard]==0.52.4
 SQLAlchemy==2.0.52
 psycopg[binary]==3.3.4
 python-dotenv==1.2.3
+PyYAML==6.0.3
 httpx==0.28.1
 PyJWT==2.13.0
 pwdlib[argon2]==0.3.1
