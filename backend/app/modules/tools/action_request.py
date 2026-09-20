@@ -797,6 +797,23 @@ def _integration_call(
             for item in ((op_config or {}).get("required_json_fields") or [])
             if str(item or "").strip()
         ]
+        raw_json_fields = (op_config or {}).get("json_fields")
+        raw_json_fields = raw_json_fields if isinstance(raw_json_fields, list) else []
+        declared_json_fields = [
+            str(item.get("key") or "").strip()
+            for item in raw_json_fields
+            if isinstance(item, dict) and str(item.get("key") or "").strip()
+        ]
+        allowed_json_fields = list(
+            dict.fromkeys([*declared_json_fields, *required_json_fields])
+        )
+        if allowed_json_fields:
+            source = {
+                key: value
+                for key, value in source.items()
+                if key in allowed_json_fields
+            }
+            request_payload = source
         missing_json_fields = [
             key
             for key in required_json_fields
@@ -815,11 +832,27 @@ def _integration_call(
     if input_mode == "query":
         query_items = []
         source = request_payload if isinstance(request_payload, dict) else {}
+        raw_query_params = (op_config or {}).get("query_params")
+        raw_query_params = raw_query_params if isinstance(raw_query_params, list) else []
+        query_params = [
+            str(item).strip()
+            for item in raw_query_params
+            if str(item or "").strip()
+        ]
         required_query_params = [
             str(item).strip()
             for item in ((op_config or {}).get("required_query_params") or [])
             if str(item or "").strip()
         ]
+        allowed_query_params = list(
+            dict.fromkeys([*query_params, *required_query_params])
+        )
+        if allowed_query_params:
+            source = {
+                key: value
+                for key, value in source.items()
+                if key in allowed_query_params
+            }
         missing_query_params = [
             key
             for key in required_query_params
