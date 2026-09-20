@@ -107,9 +107,13 @@ def _customer_channel(db, current_user: User, *, agent_id: int, channel_type: st
     return agent, channel, capability
 
 
-def _meta_connect_settings() -> dict:
+def _meta_connect_settings(channel_type: str) -> dict:
     config = _meta_settings()
-    missing = [key for key in ("app_id", "app_secret") if not config.get(key)]
+    config["messenger_config_id"] = str(settings.META_MESSENGER_CONFIG_ID or "").strip()
+    required = ["app_id", "app_secret"]
+    if channel_type == "messenger":
+        required.append("messenger_config_id")
+    missing = [key for key in required if not config.get(key)]
     return {
         "ready": not missing and n8n_gateway.configured() and bool(settings.WORKFLOW_PUBLIC_URL),
         "missing": missing,
@@ -440,7 +444,7 @@ def connect_config(
             agent_id=agent_id,
             channel_type=channel_type,
         )
-        config = _meta_connect_settings()
+        config = _meta_connect_settings(channel_type)
         return {
             "ready": config["ready"],
             "agent_id": agent_id,
@@ -449,6 +453,7 @@ def connect_config(
             "app_id": config["app_id"] if config["ready"] else None,
             "graph_api_version": config["graph_api_version"],
             "scopes": META_SCOPES[channel_type],
+            "config_id": config["messenger_config_id"] if channel_type == "messenger" else None,
             "missing_settings": config["missing"],
             "connected": str((reveal_config(channel.config) or {}).get("provisioning_state") or "").lower() == "connected",
         }
