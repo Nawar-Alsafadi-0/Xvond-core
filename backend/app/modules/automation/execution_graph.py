@@ -15,6 +15,7 @@ ALLOWED_GRAPH_NODE_TYPES = {
     "condition",
     "notify",
     "foreach",
+    "repeat",
     "select",
     "filter",
     "aggregate",
@@ -42,6 +43,7 @@ BROWSER_ACTION_OPERATIONS = {
 }
 MAX_GRAPH_VALIDATION_DEPTH = 2
 MAX_BROWSER_ACTIONS = 30
+MAX_REPEAT_ITERATIONS = 20
 WAIT_DURATION_UNITS = {"seconds", "minutes", "hours", "days", "weeks"}
 MAX_WAIT_DURATION_SECONDS = 365 * 24 * 60 * 60
 
@@ -368,6 +370,43 @@ def graph_contract_errors(
                         f"{node_id}/{item}" for item in nested_errors
                     )
 
+        elif node_type == "repeat":
+            try:
+                max_iterations = int(params.get("max_iterations"))
+            except (TypeError, ValueError):
+                errors.append(f"{node_id}: repeat node requires integer max_iterations")
+                max_iterations = 0
+            if max_iterations < 1 or max_iterations > MAX_REPEAT_ITERATIONS:
+                errors.append(
+                    f"{node_id}: repeat max_iterations must be between 1 and {MAX_REPEAT_ITERATIONS}"
+                )
+            until = params.get("until")
+            if not isinstance(until, dict):
+                errors.append(f"{node_id}: repeat node requires until condition")
+            else:
+                path = str(until.get("path") or "").strip()
+                operator = str(until.get("operator") or "eq").strip().lower()
+                if not path or len(path) > 300:
+                    errors.append(f"{node_id}: repeat until path is invalid")
+                if operator not in GRAPH_COMPARE_OPERATORS:
+                    errors.append(f"{node_id}: repeat until operator is unsupported")
+                if "value" not in until:
+                    errors.append(f"{node_id}: repeat until requires value")
+            nested = params.get("graph")
+            if not isinstance(nested, dict):
+                errors.append(f"{node_id}: repeat node requires nested graph")
+            else:
+                nested_graph = normalize_execution_graph(nested)
+                if not nested_graph.get("nodes"):
+                    errors.append(f"{node_id}: repeat node requires nested graph nodes")
+                else:
+                    nested_errors = graph_contract_errors(
+                        nested_graph,
+                        graph_agent_id=graph_agent_id,
+                        _depth=_depth + 1,
+                    )
+                    errors.extend(f"{node_id}/{item}" for item in nested_errors)
+
         previous_ids.add(node_id)
         if len(errors) >= 50:
             break
@@ -391,7 +430,7 @@ def graph_has_side_effect(graph: dict) -> bool:
                 for action in actions
             ):
                 return True
-        if node_type == "foreach":
+        if node_type in {"foreach", "repeat"}:
             nested = (node.get("params") or {}).get("graph")
             if isinstance(nested, dict) and graph_has_side_effect(
                 normalize_execution_graph(nested)
@@ -422,6 +461,9 @@ def resolve_graph_value(value: Any, *, state: dict, node_outputs: dict) -> Any:
             path = path[1:]
         elif path[0] == "index":
             current = state.get("_xvond_loop_index")
+            path = path[1:]
+        elif path[0] == "previous":
+            current = state.get("_xvond_repeat_previous")
             path = path[1:]
         elif path[0] == "nodes" and len(path) >= 2:
             current = node_outputs.get(path[1])
@@ -459,7 +501,7 @@ def graph_action_types(graph: dict) -> list[str]:
                 action_type = str((node.get("params") or {}).get("action_type") or "").strip()
                 if action_type and action_type not in result:
                     result.append(action_type)
-            elif node.get("type") == "foreach":
+            elif node.get("type") in {"foreach", "repeat"}:
                 nested = (node.get("params") or {}).get("graph")
                 if isinstance(nested, dict):
                     visit(normalize_execution_graph(nested))
@@ -518,7 +560,7 @@ def graph_nested_action_types(graph: dict) -> list[str]:
                 action_type = str((node.get("params") or {}).get("action_type") or "").strip()
                 if action_type and action_type not in result:
                     result.append(action_type)
-            elif node.get("type") == "foreach":
+            elif node.get("type") in {"foreach", "repeat"}:
                 nested = (node.get("params") or {}).get("graph")
                 if isinstance(nested, dict):
                     visit(normalize_execution_graph(nested), depth + 1)
