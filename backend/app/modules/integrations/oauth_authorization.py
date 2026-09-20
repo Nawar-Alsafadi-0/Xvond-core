@@ -168,6 +168,14 @@ def oauth_access_token_needs_refresh(
         return False
     expires_at = value.get("expires_at")
     if expires_at in (None, ""):
+        # Upgrade pre-timing connections lazily on first real use. Once a token
+        # has been renewed, obtained_at distinguishes a provider that genuinely
+        # omitted expiry metadata from a legacy connection that never recorded it.
+        if value.get("obtained_at") in (None, "") and (
+            value.get("expires_in") not in (None, "")
+            or str(value.get("flow") or "") == "client_credentials"
+        ):
+            return True
         return False
     try:
         expiry = int(float(expires_at))
