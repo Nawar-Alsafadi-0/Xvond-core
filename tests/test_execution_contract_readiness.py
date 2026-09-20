@@ -159,7 +159,7 @@ def test_execution_graph_contract_accepts_bounded_repeat_and_rejects_unbounded_r
             "params": {
                 "max_iterations": 5,
                 "initial": {"next": 0},
-                "until": {"path": "graph_last.next", "operator": "eq", "value": None},
+                "until": {"path": "next", "operator": "eq", "value": None},
                 "graph": {
                     "version": 1,
                     "nodes": [{
@@ -184,7 +184,7 @@ def test_execution_graph_contract_accepts_bounded_repeat_and_rejects_unbounded_r
             "type": "repeat",
             "params": {
                 "max_iterations": 21,
-                "until": {"path": "graph_last.next", "operator": "eq", "value": None},
+                "until": {"path": "next", "operator": "eq", "value": None},
                 "graph": valid["nodes"][0]["params"]["graph"],
             },
         }],
