@@ -747,6 +747,7 @@ async function openPage(name, button) {
     const loader = item.loader || name;
     if (loader === "dashboard") renderDashboard();
     if (loader === "agents") await loadAgents();
+    if (loader === "channels" && typeof renderXvondChannelCenter === "function") await renderXvondChannelCenter();
     if (loader === "chat") await loadAgents();
     if (loader === "conversations") {
         await loadAgents();
