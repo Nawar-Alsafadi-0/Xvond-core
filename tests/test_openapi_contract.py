@@ -686,3 +686,33 @@ def test_swagger_formdata_urlencoded_request_is_supported_but_multipart_is_not()
         }
     )
     assert set(multipart["operations"]) == {"health"}
+
+def test_openapi_root_array_json_request_stays_fail_closed():
+    contract = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "paths": {
+                "/health": {
+                    "get": {"operationId": "health"}
+                },
+                "/batch": {
+                    "post": {
+                        "operationId": "batchCreate",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {"type": "object"},
+                                    }
+                                }
+                            },
+                        },
+                    }
+                },
+            },
+        }
+    )
+
+    assert set(contract["operations"]) == {"health"}
