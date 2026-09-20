@@ -74,7 +74,8 @@ window.openCustomerMetaChannelConnect = async function(agentId, channelType) {
             return;
         }
         await xvondLoadMetaChannelSdk(config.app_id, config.graph_api_version);
-        FB.login(async response => {
+        FB.login(response => {
+            void (async () => {
             const accessToken = response?.authResponse?.accessToken;
             if (!accessToken) {
                 if (response?.status !== "unknown") alert("Meta authorization was not completed.");
@@ -115,6 +116,7 @@ window.openCustomerMetaChannelConnect = async function(agentId, channelType) {
             } catch (error) {
                 alert(error.message || "Meta connection failed.");
             }
+            })();
         }, {
             scope: (config.scopes || []).join(","),
             return_scopes: true,
