@@ -4394,7 +4394,7 @@ def test_graph_runtime_repeat_passes_previous_result_and_stops(monkeypatch):
                         "max_iterations": 5,
                         "initial": {"next": 0},
                         "until": {
-                            "path": "graph_last.next",
+                            "path": "next",
                             "operator": "eq",
                             "value": None,
                         },
@@ -4423,7 +4423,7 @@ def test_graph_runtime_repeat_passes_previous_result_and_stops(monkeypatch):
     assert repeat["count"] == 3
     assert repeat["stopped"] is True
     assert repeat["limit_reached"] is False
-    assert repeat["last"]["graph_last"]["next"] is None
+    assert repeat["last"]["next"] is None
 
 
 def test_graph_runtime_repeat_reports_limit_reached(monkeypatch):
@@ -4455,7 +4455,7 @@ def test_graph_runtime_repeat_reports_limit_reached(monkeypatch):
                     "params": {
                         "max_iterations": 2,
                         "until": {
-                            "path": "graph_last.done",
+                            "path": "done",
                             "operator": "eq",
                             "value": True,
                         },
@@ -4546,7 +4546,7 @@ def test_nested_repeat_wait_resumes_without_replaying_completed_iterations(monke
                         "params": {
                             "max_iterations": 5,
                             "until": {
-                                "path": "graph_last.done",
+                                "path": "done",
                                 "operator": "eq",
                                 "value": 1,
                             },
