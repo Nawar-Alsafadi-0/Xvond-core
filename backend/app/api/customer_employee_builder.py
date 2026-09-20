@@ -3400,6 +3400,32 @@ def start_discovered_oauth_authorization(
         if len(flows) != 1:
             raise HTTPException(409, "This API does not expose one supported authorization-code flow")
 
+        # A retry for the same employee requirement supersedes the previous
+        # disabled OAuth attempt. Removing it keeps setup idempotent and prevents
+        # abandoned popups from consuming the customer's integration allowance.
+        stale_pending = (
+            db.query(CompanyIntegration)
+            .filter(
+                CompanyIntegration.company_id == company.id,
+                CompanyIntegration.integration_type == "custom_api",
+                CompanyIntegration.enabled.is_(False),
+            )
+            .all()
+        )
+        for candidate in stale_pending:
+            candidate_config = reveal_config(candidate.config or {})
+            candidate_pending = (
+                candidate_config.get("_xvond_oauth_pending")
+                if isinstance(candidate_config.get("_xvond_oauth_pending"), dict)
+                else {}
+            )
+            if (
+                int(candidate_pending.get("agent_id") or 0) == agent.id
+                and normalize_requirement_key(candidate_pending.get("requirement_key")) == key
+            ):
+                db.delete(candidate)
+        db.flush()
+
         current = (
             db.query(CompanyIntegration)
             .filter(CompanyIntegration.company_id == company.id)
