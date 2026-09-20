@@ -20,7 +20,7 @@ def test_customer_dashboard_has_accessible_mobile_navigation():
     assert 'id="customer-nav-scrim"' in html
     assert 'href="#customer-main"' in html
     assert 'responsive-shell.css?v=' in html
-    assert 'app.js?v=20260920-final1' in html
+    assert 'app.js?v=20260920-channels2' in html
 
     assert "function setCustomerNavigationOpen" in javascript
     assert 'event.key === "Escape"' in javascript
