@@ -68,6 +68,15 @@ async function xvondRefreshCustomerOverview() {
 window.openCustomerMetaChannelConnect = async function(agentId, channelType) {
     const type = String(channelType || "").toLowerCase();
     try {
+        if (type === "instagram") {
+            const result = await api("/customer/meta/channels/instagram/oauth/start", {
+                method: "POST",
+                body: JSON.stringify({agent_id: Number(agentId)}),
+            });
+            if (!result?.authorization_url) throw new Error("Instagram authorization URL was not returned.");
+            window.location.assign(result.authorization_url);
+            return;
+        }
         const config = await api(`/customer/meta/channels/connect/config?agent_id=${Number(agentId)}&channel_type=${encodeURIComponent(type)}`);
         if (!config.ready) {
             alert(`${xvondMetaChannelName(type)} connection is not available yet. Contact Xvond support.`);
@@ -118,6 +127,7 @@ window.openCustomerMetaChannelConnect = async function(agentId, channelType) {
             }
             })();
         }, {
+            config_id: config.config_id || undefined,
             scope: (config.scopes || []).join(","),
             return_scopes: true,
             auth_type: "rerequest",
@@ -145,9 +155,9 @@ function xvondDecorateAgentsWithMetaChannels() {
             box.style.cssText = "margin-top:10px;padding:12px;border:1px solid rgba(148,163,184,.25);border-radius:10px";
             box.innerHTML = `
                 <strong>${safe(xvondMetaChannelName(type))}</strong>
-                <p class="muted" style="margin:6px 0 10px">${connected ? "Connected to Meta through Xvond." : "Connect the business account securely with Meta. No access token needs to be copied manually."}</p>
+                <p class="muted" style="margin:6px 0 10px">${connected ? "Connected to Meta through Xvond." : (type === "instagram" ? "Connect the professional Instagram account directly. No Facebook Page or token copy is required." : "Connect the business account securely with Meta. No access token needs to be copied manually.")}</p>
                 <button type="button" onclick="openCustomerMetaChannelConnect(${Number(agent.id)},'${type}')">
-                    ${connected ? "Reconnect / Change Account" : "Connect with Meta"}
+                    ${connected ? "Reconnect / Change Account" : (type === "instagram" ? "Connect Instagram" : "Connect with Meta")}
                 </button>
             `;
             card.appendChild(box);
