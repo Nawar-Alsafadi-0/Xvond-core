@@ -137,7 +137,7 @@
     },
     {
       "parameters": {
-        "jsCode": "async function xvondManagedRoute(companyId, connectionKey) {\n  const base = String($env.XVOND_WORKFLOW_REGISTRY_URL || '').replace(/\\/$/, '');\n  const secret = String($env.XVOND_WORKFLOW_REGISTRY_SECRET || '');\n  if (!base || !secret || !companyId || !connectionKey) return null;\n  try {\n    const response = await fetch(\n      base + '/v1/routes/' + encodeURIComponent(String(companyId)) + '/' + encodeURIComponent(String(connectionKey)),\n      {headers:{'X-Xvond-Registry-Secret':secret}}\n    );\n    if (!response.ok) return null;\n    const payload = await response.json().catch(() => null);\n    const row = payload?.route;\n    if (!row) return null;\n    return {\n      ...(row.provider_config || {}),\n      provider_secret:String(row.provider_secret || ''),\n      provider_type:String(row.provider_type || ''),\n      provider_url:String(row.provider_url || ''),\n      company_id:Number(row.company_id || 0),\n      agent_id:Number(row.agent_id || 0),\n      channel_id:Number(row.channel_id || 0),\n      channel_type:String(row.channel_type || ''),\n      connection_key:String(row.connection_key || connectionKey)\n    };\n  } catch (_error) {\n    return null;\n  }\n}\nconst item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst supplied = String(headers['x-xvond-channel-secret'] || headers['X-Xvond-Channel-Secret'] || '');\nconst requestId = String(body.request_id || headers['x-xvond-request-id'] || '').trim();\nconst action = String(body.action || '').trim();\nconst data = body.data && typeof body.data === 'object' ? body.data : {};\nconst companyId = Number(body.company_id || 0);\nconst connectionKey = String(data.connection_key || '').trim();\nconst routeKey = `${companyId}:${connectionKey}`;\nconst route = await xvondManagedRoute(companyId, connectionKey);\nif (!route || !route.bot_token || !route.provider_secret) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Slack route is not configured',error_code:'provider_not_configured',data:null}}];\nif (!supplied || supplied !== String(route.provider_secret)) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unauthorized Slack provider request',error_code:'unauthorized',data:null}}];\nif (action !== 'channel.send') return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unsupported Slack provider action',error_code:'unsupported_action',data:null}}];\nconst channel = String(data.external_contact_id || '').trim();\nconst message = String(data.message || '').trim();\nif (!requestId || !channel || !message) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Invalid Slack send contract',error_code:'invalid_contract',data:null}}];\nreturn [{json:{success:true,_dispatch:'slack_send',request_id:requestId,action,route_key:routeKey,bot_token:String(route.bot_token),channel,message}}];"
+        "jsCode": "async function xvondManagedRoute(companyId, connectionKey) {\n  const base = String($env.XVOND_WORKFLOW_REGISTRY_URL || '').replace(/\\/$/, '');\n  const secret = String($env.XVOND_WORKFLOW_REGISTRY_SECRET || '');\n  if (!base || !secret || !companyId || !connectionKey) return null;\n  try {\n    const response = await fetch(\n      base + '/v1/routes/' + encodeURIComponent(String(companyId)) + '/' + encodeURIComponent(String(connectionKey)),\n      {headers:{'X-Xvond-Registry-Secret':secret}}\n    );\n    if (!response.ok) return null;\n    const payload = await response.json().catch(() => null);\n    const row = payload?.route;\n    if (!row) return null;\n    return {\n      ...(row.provider_config || {}),\n      provider_secret:String(row.provider_secret || ''),\n      provider_type:String(row.provider_type || ''),\n      provider_url:String(row.provider_url || ''),\n      company_id:Number(row.company_id || 0),\n      agent_id:Number(row.agent_id || 0),\n      channel_id:Number(row.channel_id || 0),\n      channel_type:String(row.channel_type || ''),\n      connection_key:String(row.connection_key || connectionKey)\n    };\n  } catch (_error) {\n    return null;\n  }\n}\nconst item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body || item;\nconst supplied = String(headers['x-xvond-channel-secret'] || headers['X-Xvond-Channel-Secret'] || '');\nconst requestId = String(body.request_id || headers['x-xvond-request-id'] || '').trim();\nconst action = String(body.action || '').trim();\nconst data = body.data && typeof body.data === 'object' ? body.data : {};\nconst companyId = Number(body.company_id || 0);\nconst connectionKey = String(data.connection_key || '').trim();\nconst routeKey = `${companyId}:${connectionKey}`;\nconst route = await xvondManagedRoute(companyId, connectionKey);\nif (!route || !route.bot_token || !route.provider_secret) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Slack route is not configured',error_code:'provider_not_configured',data:null}}];\nif (!supplied || supplied !== String(route.provider_secret)) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unauthorized Slack provider request',error_code:'unauthorized',data:null}}];\nif (action !== 'channel.send') return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Unsupported Slack provider action',error_code:'unsupported_action',data:null}}];\nconst channel = String(data.external_contact_id || '').trim();\nconst message = String(data.message || '').trim();\nif (!requestId || !channel || !message) return [{json:{success:false,_dispatch:'reject',request_id:requestId,action,error:'Invalid Slack send contract',error_code:'invalid_contract',data:null}}];\nreturn [{json:{success:true,_dispatch:'slack_send',request_id:requestId,action,route_key:routeKey,company_id:companyId,connection_key:connectionKey,channel,message}}];"
       },
       "id": "validate-slack-send",
       "name": "Validate Slack Send",
@@ -183,33 +183,12 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://slack.com/api/chat.postMessage",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{ $json.bot_token }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json; charset=utf-8"
-            }
-          ]
-        },
-        "sendBody": true,
-        "contentType": "raw",
-        "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ channel: $json.channel, text: $json.message }) }}",
-        "options": {
-          "timeout": 15000
-        }
+        "jsCode": "const request = $input.first().json || {};\nconst base = String($env.XVOND_WORKFLOW_REGISTRY_URL || '').replace(/\\/$/, '');\nconst secret = String($env.XVOND_WORKFLOW_REGISTRY_SECRET || '');\ntry {\n  const registryResponse = await fetch(\n    base + '/v1/routes/' + encodeURIComponent(String(request.company_id || '')) + '/' + encodeURIComponent(String(request.connection_key || '')),\n    {headers:{'X-Xvond-Registry-Secret':secret}}\n  );\n  const registryPayload = await registryResponse.json().catch(() => null);\n  const botToken = String(registryPayload?.route?.provider_config?.bot_token || '');\n  if (!registryResponse.ok || !botToken) return [{json:{ok:false}}];\n  const response = await fetch('https://slack.com/api/chat.postMessage', {\n    method:'POST',\n    headers:{'Authorization':'Bearer ' + botToken,'Content-Type':'application/json; charset=utf-8'},\n    body:JSON.stringify({channel:request.channel,text:request.message})\n  });\n  const payload = await response.json().catch(() => null);\n  return [{json:payload || {ok:false}}];\n} catch (_error) {\n  return [{json:{ok:false}}];\n}"
       },
       "id": "send-slack-message",
       "name": "Slack chat.postMessage",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         920,
         440
