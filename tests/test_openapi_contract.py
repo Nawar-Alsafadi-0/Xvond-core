@@ -413,3 +413,134 @@ def test_openapi_tracks_all_declared_query_parameters_for_request_shaping():
     operation = contract["operations"]["search_items"]
     assert operation["query_params"] == ["status", "limit"]
     assert operation["required_query_params"] == ["status"]
+
+def test_openapi_extracts_bounded_success_object_response_contract():
+    contract = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "components": {
+                "schemas": {
+                    "CreatedOrder": {
+                        "type": "object",
+                        "required": ["id"],
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "Created order identifier",
+                            },
+                            "total": {"type": "number"},
+                        },
+                    }
+                }
+            },
+            "paths": {
+                "/orders": {
+                    "post": {
+                        "operationId": "createOrder",
+                        "responses": {
+                            "400": {"description": "bad request"},
+                            "201": {
+                                "description": "created",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "$ref": "#/components/schemas/CreatedOrder"
+                                        }
+                                    }
+                                },
+                            },
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    operation = contract["operations"]["create_order"]
+    assert operation["response_status"] == "201"
+    assert operation["response_kind"] == "object"
+    fields = {item["key"]: item for item in operation["response_fields"]}
+    assert fields["id"]["required"] is True
+    assert fields["id"]["description"] == "Created order identifier"
+    assert fields["total"]["type"] == "number"
+
+
+def test_openapi_extracts_array_item_response_contract():
+    contract = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "components": {
+                "schemas": {
+                    "Order": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "state": {"type": "string"},
+                        },
+                    }
+                }
+            },
+            "paths": {
+                "/orders": {
+                    "get": {
+                        "operationId": "listOrders",
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/components/schemas/Order"
+                                            },
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    operation = contract["operations"]["list_orders"]
+    assert operation["response_status"] == "200"
+    assert operation["response_kind"] == "array"
+    assert operation["response_item_kind"] == "object"
+    assert [item["key"] for item in operation["response_item_fields"]] == [
+        "id",
+        "state",
+    ]
+
+
+def test_swagger_success_response_schema_is_supported():
+    contract = normalize_openapi_document(
+        {
+            "swagger": "2.0",
+            "paths": {
+                "/record": {
+                    "post": {
+                        "operationId": "createRecord",
+                        "responses": {
+                            "201": {
+                                "description": "created",
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["id"],
+                                    "properties": {"id": {"type": "integer"}},
+                                },
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    operation = contract["operations"]["create_record"]
+    assert operation["response_status"] == "201"
+    assert operation["response_kind"] == "object"
+    assert operation["response_fields"][0]["key"] == "id"
+    assert operation["response_fields"][0]["type"] == "integer"
