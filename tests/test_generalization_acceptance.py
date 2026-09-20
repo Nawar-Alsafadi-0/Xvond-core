@@ -99,3 +99,10 @@ def test_live_gate_uses_same_open_ended_compiler_contract_as_self_service():
     assert "graph_action_types" in SCRIPT
     assert "DEFAULT_JOB_BRIEFS" in SCRIPT
     assert "does_not_create_or_launch_customer_employees" in SCRIPT
+
+
+def test_production_deploy_can_require_live_generalization_gate():
+    deploy = (ROOT / "scripts" / "deploy_production.sh").read_text(encoding="utf-8")
+    assert 'GENERALIZATION_ACCEPTANCE="${GENERALIZATION_ACCEPTANCE:-false}"' in deploy
+    assert 'python -m scripts.generalization_acceptance' in deploy
+    assert 'Generalization gate requires ACCEPTANCE_COMPANY_ID and ACCEPTANCE_AGENT_ID' in deploy
