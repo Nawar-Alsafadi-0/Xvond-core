@@ -4301,5 +4301,5 @@ def test_external_ambiguous_operations_do_not_gain_an_unsafe_direct_default():
         spec={"permissions": []},
     )
 
-    assert action["destination"]["default_operation"] is None
+    assert "default_operation" not in action["destination"]
     assert action["fields"] == []
