@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from backend.app.core.config_secrets import merge_config, reveal_config
+from backend.app.core.n8n_gateway import N8NGatewayError, n8n_gateway
 from backend.app.modules.channels.catalog import (
     CHANNEL_SETUP_MANAGED,
+    N8N_CHANNEL_ADAPTER,
     canonical_channel_type,
     get_channel_capability,
 )
@@ -24,6 +26,82 @@ def _managed_types(values) -> list[str]:
     return result
 
 
+def deactivate_managed_channel_route(channel: AgentChannel) -> dict:
+    """Remove one managed provider route without exposing provider credentials.
+
+    Disabling a live employee/channel is a pause and deliberately does not call
+    this helper. Removing the channel from the employee contract or deleting the
+    channel does, because those are credential-retention boundaries.
+    """
+
+    capability = get_channel_capability(channel.channel_type) or {}
+    if (
+        capability.get("setup_mode") != CHANNEL_SETUP_MANAGED
+        or capability.get("runtime_adapter") != N8N_CHANNEL_ADAPTER
+    ):
+        return {
+            "required": False,
+            "complete": True,
+            "reason": "not_applicable",
+        }
+
+    config = reveal_config(channel.config) or {}
+    connection_key = str(config.get("connection_key") or "").strip()
+    state = str(config.get("provisioning_state") or "").strip().lower()
+    cleanup_state = str(config.get("registry_cleanup_state") or "").strip().lower()
+    route_may_exist = (
+        state == "connected"
+        or cleanup_state in {"active", "pending"}
+    )
+    if not route_may_exist:
+        return {
+            "required": False,
+            "complete": True,
+            "reason": "no_live_route",
+        }
+    if not connection_key:
+        return {
+            "required": True,
+            "complete": False,
+            "reason": "connection_key_missing",
+        }
+    if not n8n_gateway.configured():
+        return {
+            "required": True,
+            "complete": False,
+            "reason": "gateway_unavailable",
+        }
+
+    try:
+        result = n8n_gateway.deactivate_channel(
+            company_id=channel.company_id,
+            agent_id=channel.agent_id,
+            channel_id=channel.id,
+            connection_key=connection_key,
+        )
+    except N8NGatewayError:
+        return {
+            "required": True,
+            "complete": False,
+            "reason": "registry_cleanup_failed",
+        }
+
+    if result.get("success") is not True:
+        return {
+            "required": True,
+            "complete": False,
+            "reason": "registry_cleanup_failed",
+        }
+    return {
+        "required": True,
+        "complete": True,
+        "reason": "deactivated",
+        # DELETE is idempotent. False means the route was already absent, which
+        # still proves that provider material is no longer retained.
+        "deactivated": bool((result.get("data") or {}).get("deactivated")),
+    }
+
+
 def reconcile_managed_channel_requests(
     db,
     *,
@@ -36,7 +114,8 @@ def reconcile_managed_channel_requests(
 
     A managed request is not a live channel. It is represented by a disabled
     AgentChannel row so the admin provisioning surfaces have a durable work item.
-    Existing provider credentials/provisioning evidence are never overwritten.
+    Provider credentials stay in the workflow plane and are explicitly removed
+    when the channel leaves the employee contract.
     """
 
     desired = set(_managed_types(desired_channel_types))
@@ -76,7 +155,31 @@ def reconcile_managed_channel_requests(
 
         config = reveal_config(row.config) or {}
         state = str(config.get("provisioning_state") or "").strip().lower()
+        cleanup_state = str(config.get("registry_cleanup_state") or "").strip().lower()
         if state in {"", "cancelled"}:
+            # Do not resurrect a channel while an old provider route may still
+            # retain credentials. Reconciliation retries cleanup first.
+            if cleanup_state in {"active", "pending"}:
+                cleanup = deactivate_managed_channel_route(row)
+                if cleanup.get("complete") is not True:
+                    row.enabled = False
+                    row.config = merge_config(
+                        row.config,
+                        {
+                            "provisioning_state": "cancelled",
+                            "registry_cleanup_state": "pending",
+                            "provisioning_error": "workflow_registry_cleanup_pending",
+                        },
+                    )
+                    continue
+                row.config = merge_config(
+                    row.config,
+                    {
+                        "registry_cleanup_state": "complete",
+                        "provisioning_error": None,
+                    },
+                )
+
             row.config = merge_config(
                 row.config,
                 {
@@ -99,16 +202,33 @@ def reconcile_managed_channel_requests(
 
         config = reveal_config(row.config) or {}
         state = str(config.get("provisioning_state") or "").strip().lower()
+        cleanup_state = str(config.get("registry_cleanup_state") or "").strip().lower()
         if row.enabled:
             row.enabled = False
-        if state not in {"cancelled", "connected"}:
+
+        cleanup = deactivate_managed_channel_route(row)
+        cleanup_complete = cleanup.get("complete") is True
+        needs_state_update = (
+            state != "cancelled"
+            or cleanup_state != ("complete" if cleanup_complete else "pending")
+            or cleanup.get("required") is True
+        )
+        if needs_state_update:
             row.config = merge_config(
                 row.config,
                 {
                     "provisioning_state": "cancelled",
-                    "provisioning_error": None,
+                    "registry_cleanup_state": (
+                        "complete" if cleanup_complete else "pending"
+                    ),
+                    "provisioning_error": (
+                        None
+                        if cleanup_complete
+                        else "workflow_registry_cleanup_pending"
+                    ),
                 },
             )
+        if state != "cancelled" or cleanup_state == "pending":
             cancelled.append(channel_type)
 
     db.flush()
