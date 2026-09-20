@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from backend.app.api.admin_channels import _activation_blockers, _ensure_channels_module
+from backend.app.modules.channels.delivery import deactivate_managed_channel_route
 from backend.app.api.admin_meta_whatsapp import _graph_request, _graph_url, _meta_settings
 from backend.app.core.config.settings import settings
 from backend.app.core.config_secrets import merge_config, reveal_config
@@ -49,6 +50,11 @@ class MetaDiscoverRequest(BaseModel):
 
 class MetaCompleteRequest(MetaDiscoverRequest):
     page_id: str
+
+
+class MetaChannelAction(BaseModel):
+    agent_id: int
+    channel_type: str
 
 
 def _normalize_channel_type(value: str) -> str:
@@ -385,6 +391,146 @@ def complete_connect(
             "account_label": label,
             "ready_for_launch": not blockers,
             "blockers": blockers,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@router.post("/health")
+def channel_health(
+    data: MetaChannelAction,
+    current_user: User = Depends(require_customer_manager),
+):
+    channel_type = _normalize_channel_type(data.channel_type)
+    db = SessionLocal()
+    try:
+        _agent, channel, _capability = _customer_channel(
+            db,
+            current_user,
+            agent_id=data.agent_id,
+            channel_type=channel_type,
+        )
+        config = reveal_config(channel.config) or {}
+        state = str(config.get("provisioning_state") or "").strip().lower()
+        connection_key = str(config.get("connection_key") or "").strip()
+        blockers = _activation_blockers(db, channel)
+        if state != "connected" or not connection_key:
+            return {
+                "healthy": False,
+                "connected": False,
+                "enabled": bool(channel.enabled),
+                "channel_type": channel_type,
+                "account_label": config.get("provider_account_label"),
+                "checked_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "issue": "Channel is not connected",
+                "blockers": blockers,
+            }
+        if not n8n_gateway.configured():
+            return {
+                "healthy": False,
+                "connected": True,
+                "enabled": bool(channel.enabled),
+                "channel_type": channel_type,
+                "account_label": config.get("provider_account_label"),
+                "checked_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "issue": "Xvond channel gateway is unavailable",
+                "blockers": blockers,
+            }
+        try:
+            result = n8n_gateway.execute(
+                company_id=channel.company_id,
+                agent_id=channel.agent_id,
+                action="channel.check",
+                data={
+                    "channel_id": channel.id,
+                    "channel_type": channel_type,
+                    "connection_key": connection_key,
+                },
+            )
+        except N8NGatewayError:
+            result = {"success": False, "data": {}}
+        result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        healthy = result.get("success") is True and result_data.get("configured") is True
+        return {
+            "healthy": healthy,
+            "connected": True,
+            "enabled": bool(channel.enabled),
+            "channel_type": channel_type,
+            "account_label": config.get("provider_account_label"),
+            "checked_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "issue": None if healthy else "Xvond could not verify the provider route",
+            "blockers": blockers,
+        }
+    finally:
+        db.close()
+
+
+@router.post("/disconnect")
+def disconnect_channel(
+    data: MetaChannelAction,
+    current_user: User = Depends(require_customer_manager),
+):
+    channel_type = _normalize_channel_type(data.channel_type)
+    db = SessionLocal()
+    try:
+        agent, channel, _capability = _customer_channel(
+            db,
+            current_user,
+            agent_id=data.agent_id,
+            channel_type=channel_type,
+        )
+        channel = (
+            db.query(AgentChannel)
+            .filter(AgentChannel.id == channel.id)
+            .with_for_update()
+            .first()
+        )
+        current = reveal_config(channel.config) or {}
+        channel.enabled = False
+        cleanup = deactivate_managed_channel_route(channel)
+        if cleanup.get("required") is True and cleanup.get("complete") is not True:
+            raise HTTPException(
+                502,
+                "Xvond could not safely remove the provider route; the channel was not disconnected",
+            )
+
+        preserved = {
+            "provisioning_state": "cancelled",
+            "registry_cleanup_state": "complete",
+            "request_source": current.get("request_source"),
+            "channel_instructions": current.get("channel_instructions"),
+            "connection_method": None,
+            "provider_account_label": None,
+            "provider_inbound_url": None,
+            "meta_page_id": None,
+            "meta_sender_id": None,
+            "meta_connected_at": None,
+        }
+        channel.config = preserved
+        audit_service.log(
+            db=db,
+            action="channel.meta_customer_disconnected",
+            resource_type="channel",
+            resource_id=channel.id,
+            user_id=current_user.id,
+            company_id=channel.company_id,
+            details={
+                "agent_id": agent.id,
+                "channel_type": channel_type,
+                "managed_route_cleanup": cleanup.get("reason"),
+            },
+        )
+        db.commit()
+        return {
+            "status": "disconnected",
+            "channel_id": channel.id,
+            "channel_type": channel_type,
         }
     except HTTPException:
         db.rollback()
