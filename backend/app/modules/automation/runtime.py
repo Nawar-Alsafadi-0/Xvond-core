@@ -270,6 +270,7 @@ _RETRY_TRANSIENT_STATE_KEYS = {
     "_xvond_retry_lineage",
     "_xvond_loop_item",
     "_xvond_loop_index",
+    "_xvond_repeat_previous",
     "_xvond_nested_graph_depth",
     "_xvond_graph_path",
     "_xvond_approved_request_id",
