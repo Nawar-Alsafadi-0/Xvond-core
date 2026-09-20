@@ -60,3 +60,11 @@ def test_readiness_exposes_canonical_and_legacy_profile_flags():
     source = READINESS.read_text(encoding="utf-8-sig")
     assert '"company_profile_ready": company_profile_ready' in source
     assert '"profile_ready": company_profile_ready' in source
+
+
+def test_managed_employee_profile_ensures_safe_human_handoff_default():
+    source = PROFILE_API.read_text(encoding="utf-8-sig")
+    assert "def _ensure_human_handoff" in source
+    assert 'tool_name="human_handoff"' in source
+    assert "enabled=True" in source
+    assert source.count("_ensure_human_handoff(db, agent.id)") >= 2
