@@ -207,20 +207,26 @@ def _object_schema_parts(document: dict, schema: dict, *, depth: int = 0) -> tup
     return properties, required
 
 
-def _multipart_scalar_schema_supported(document: dict, schema: dict) -> bool:
+def _multipart_schema_supported(document: dict, schema: dict) -> bool:
     if _schema_kind(document, schema) != "object":
         return False
     properties, _ = _object_schema_parts(document, schema)
     if not properties:
         return False
     allowed_types = {"string", "integer", "number", "boolean"}
+    binary_fields = 0
     for raw in properties.values():
         value = _local_schema_ref(document, raw) or raw
         value_type = str(value.get("type") or "").strip().lower()
         value_format = str(value.get("format") or "").strip().lower()
-        if value_type not in allowed_types:
-            return False
         if value_format == "binary":
+            if value_type != "string":
+                return False
+            binary_fields += 1
+            if binary_fields > 5:
+                return False
+            continue
+        if value_type not in allowed_types:
             return False
     return True
 
@@ -233,8 +239,8 @@ def _request_body_contract(
     """Return one bounded request media contract.
 
     JSON and application/x-www-form-urlencoded are executable. Multipart is
-    executable only for declared scalar fields; binary/file/object/array payloads
-    stay fail-closed until Xvond has a dedicated owned-file upload contract.
+    executable for declared scalar fields and bounded binary fields backed by
+    tenant-owned Xvond file assets. Object/array multipart fields stay fail-closed.
     """
     request_body = operation.get("requestBody")
     if isinstance(request_body, dict):
@@ -268,7 +274,7 @@ def _request_body_contract(
             schema = multipart.get("schema")
             if (
                 isinstance(schema, dict)
-                and _multipart_scalar_schema_supported(document, schema)
+                and _multipart_schema_supported(document, schema)
             ):
                 return "multipart", schema
 
@@ -322,9 +328,12 @@ def _request_body_contract(
                 continue
             field_type = str(parameter.get("type") or "string").strip().lower()[:20]
             fmt = str(parameter.get("format") or "").strip().lower()[:40]
+            if multipart_mode and field_type == "file":
+                field_type = "string"
+                fmt = "binary"
             if multipart_mode and (
                 field_type not in {"string", "integer", "number", "boolean"}
-                or fmt == "binary"
+                or (fmt == "binary" and field_type != "string")
             ):
                 return "unsupported", {}
             field: dict[str, Any] = {"type": field_type}
@@ -444,6 +453,27 @@ def _schema_kind(document: dict, schema: dict) -> str:
     return "unknown"
 
 
+def _json_array_request_metadata(document: dict, schema: dict) -> dict:
+    resolved = _local_schema_ref(document, schema) or schema
+    if not isinstance(resolved, dict) or _schema_kind(document, resolved) != "array":
+        return {}
+    items = resolved.get("items")
+    if not isinstance(items, dict):
+        return {}
+    item_kind = _schema_kind(document, items)
+    if item_kind not in {"object", "string", "integer", "number", "boolean"}:
+        return {}
+    result: dict[str, Any] = {
+        "array_item_kind": item_kind,
+        "array_max_items": 100,
+    }
+    if item_kind == "object":
+        required, fields = _json_field_metadata(document, items)
+        result["required_array_item_fields"] = required
+        result["array_item_fields"] = fields
+    return result
+
+
 def _response_metadata(document: dict, operation: dict) -> dict:
     status, schema = _success_response_schema(document, operation)
     if not status:
@@ -545,27 +575,35 @@ def normalize_openapi_document(document: dict) -> dict:
             )
             if request_mode == "unsupported":
                 continue
+            request_kind = _schema_kind(document, request_schema)
             if method == "GET" and request_mode in {"json", "form", "multipart"}:
                 # GET request bodies are not portable enough for the generic
                 # adapter; fail closed instead of manufacturing semantics.
                 continue
-            if (
-                request_mode in {"json", "form", "multipart"}
-                and _schema_kind(document, request_schema) != "object"
-            ):
-                # The action contract carries structured detail objects. Root
-                # arrays/scalars need a separate payload contract; pretending
-                # they are objects would send the provider the wrong shape.
+            if request_mode in {"form", "multipart"} and request_kind != "object":
+                continue
+            if request_mode == "json" and request_kind not in {"object", "array"}:
                 continue
 
-            required_body_fields, body_fields = _json_field_metadata(
-                document,
-                request_schema,
+            array_metadata = (
+                _json_array_request_metadata(document, request_schema)
+                if request_mode == "json" and request_kind == "array"
+                else {}
+            )
+            if request_mode == "json" and request_kind == "array" and not array_metadata:
+                continue
+
+            required_body_fields, body_fields = (
+                _json_field_metadata(document, request_schema)
+                if request_kind == "object"
+                else ([], [])
             )
             response_metadata = _response_metadata(document, operation)
 
             if method == "GET":
                 input_mode = "query"
+            elif request_mode == "json" and request_kind == "array":
+                input_mode = "json_array"
             elif request_mode in {"json", "form", "multipart"}:
                 input_mode = request_mode
             elif has_query_parameters:
@@ -591,6 +629,7 @@ def normalize_openapi_document(document: dict) -> dict:
                 "json_fields": body_fields if input_mode == "json" else [],
                 "required_form_fields": required_body_fields if input_mode in {"form", "multipart"} else [],
                 "form_fields": body_fields if input_mode in {"form", "multipart"} else [],
+                **array_metadata,
                 **response_metadata,
                 "description": str(
                     operation.get("summary")

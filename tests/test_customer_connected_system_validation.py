@@ -1197,3 +1197,148 @@ def test_generic_api_urlencoded_form_missing_required_field_fails_before_http(
     assert result.success is False
     assert result.data["missing_fields"] == ["username"]
     assert "requires form field(s): username" in str(result.error)
+
+def test_generic_api_root_json_array_is_shaped_and_sent(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    operation = {
+        "method": "POST",
+        "endpoint": "/records/batch",
+        "input_mode": "json_array",
+        "array_item_kind": "object",
+        "array_max_items": 100,
+        "required_array_item_fields": ["sku"],
+        "array_item_fields": [
+            {"key": "sku", "required": True, "type": "string"},
+            {"key": "quantity", "required": False, "type": "integer"},
+        ],
+    }
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {"execute": operation},
+            "auth_type": "none",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+        }
+        db.commit()
+
+    monkeypatch.setattr(action_runtime, "validate_public_http_url", lambda url: url)
+    captured = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status_code": 201,
+            "response": '{"created":2}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(action_runtime, "safe_http_request", fake_request)
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "batch_records",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "operations": {"execute": operation},
+                }
+            },
+            {
+                "details": {
+                    "items": [
+                        {"sku": "A", "quantity": 2, "extra": "drop"},
+                        {"sku": "B", "quantity": 1},
+                    ],
+                    "unrelated": "drop",
+                }
+            },
+            "execute",
+            idempotency_key="json-array-1",
+        )
+
+    assert result.success is True
+    assert captured["json_data"] == [
+        {"sku": "A", "quantity": 2},
+        {"sku": "B", "quantity": 1},
+    ]
+    assert captured["form_data"] is None
+    assert captured["multipart_data"] is None
+
+
+def test_generic_api_root_json_array_rejects_invalid_items(
+    connected_database,
+):
+    factory = connected_database
+    operation = {
+        "method": "POST",
+        "endpoint": "/records/batch",
+        "input_mode": "json_array",
+        "array_item_kind": "object",
+        "array_max_items": 2,
+        "required_array_item_fields": ["sku"],
+        "array_item_fields": [
+            {"key": "sku", "required": True, "type": "string"},
+        ],
+    }
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "operations": {"execute": operation},
+            "auth_type": "none",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+        }
+        db.commit()
+
+    with factory() as db:
+        missing = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "batch_records",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "operations": {"execute": operation},
+                }
+            },
+            {"details": {"items": [{"quantity": 1}]}},
+            "execute",
+            idempotency_key="json-array-invalid-1",
+        )
+    assert missing.success is False
+    assert missing.data["item_index"] == 0
+    assert missing.data["missing_fields"] == ["sku"]
+
+    with factory() as db:
+        too_many = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "batch_records",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "operations": {"execute": operation},
+                }
+            },
+            {"details": {"items": [{"sku": "A"}, {"sku": "B"}, {"sku": "C"}]}},
+            "execute",
+            idempotency_key="json-array-invalid-2",
+        )
+    assert too_many.success is False
+    assert "at most 2" in too_many.error

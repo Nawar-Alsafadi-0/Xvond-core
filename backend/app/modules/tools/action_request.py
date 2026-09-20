@@ -17,6 +17,7 @@ from backend.app.modules.channels.whatsapp_models import WhatsAppSession
 from backend.app.modules.integrations.catalog import integration_validation_ready
 from backend.app.modules.integrations.capability_discovery import oauth_client_credentials_token
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.files.models import EmployeeFileAsset
 from backend.app.modules.integrations.http_api_auth import apply_http_api_auth
 from backend.app.modules.integrations.oauth_authorization import (
     oauth_access_token_needs_refresh,
@@ -809,7 +810,7 @@ def _integration_call(
     input_mode = str(
         (op_config or {}).get("input_mode") or ("query" if method == "GET" else "json")
     ).strip().lower()
-    if input_mode not in {"json", "form", "multipart", "query", "none"}:
+    if input_mode not in {"json", "json_array", "form", "multipart", "query", "none"}:
         return ToolResult(success=False, error="Integration operation input mode is invalid")
     if input_mode == "json":
         source = request_payload if isinstance(request_payload, dict) else {}
@@ -850,6 +851,98 @@ def _integration_call(
                 data={"missing_fields": missing_json_fields},
             )
 
+    if input_mode == "json_array":
+        source = request_payload if isinstance(request_payload, dict) else {}
+        items = source.get("items")
+        if not isinstance(items, list):
+            return ToolResult(
+                success=False,
+                error=f"API operation '{operation}' requires items to be a JSON array",
+                data={"missing_fields": ["items"]},
+            )
+        try:
+            max_items = int((op_config or {}).get("array_max_items") or 100)
+        except (TypeError, ValueError):
+            max_items = 100
+        max_items = max(1, min(max_items, 100))
+        if len(items) > max_items:
+            return ToolResult(
+                success=False,
+                error=f"API operation '{operation}' accepts at most {max_items} array items",
+            )
+
+        item_kind = str((op_config or {}).get("array_item_kind") or "").strip().lower()
+        if item_kind not in {"object", "string", "integer", "number", "boolean"}:
+            return ToolResult(
+                success=False,
+                error=f"API operation '{operation}' has an invalid array item contract",
+            )
+
+        raw_item_fields = (op_config or {}).get("array_item_fields")
+        raw_item_fields = raw_item_fields if isinstance(raw_item_fields, list) else []
+        declared_item_fields = [
+            str(item.get("key") or "").strip()
+            for item in raw_item_fields
+            if isinstance(item, dict) and str(item.get("key") or "").strip()
+        ]
+        required_item_fields = [
+            str(item).strip()
+            for item in ((op_config or {}).get("required_array_item_fields") or [])
+            if str(item or "").strip()
+        ]
+        allowed_item_fields = list(
+            dict.fromkeys([*declared_item_fields, *required_item_fields])
+        )
+
+        normalized_items = []
+        for index, item in enumerate(items):
+            if item_kind == "object":
+                if not isinstance(item, dict):
+                    return ToolResult(
+                        success=False,
+                        error=f"Array item {index} must be an object",
+                    )
+                shaped = (
+                    {
+                        key: value
+                        for key, value in item.items()
+                        if key in allowed_item_fields
+                    }
+                    if allowed_item_fields
+                    else dict(item)
+                )
+                missing = [
+                    key
+                    for key in required_item_fields
+                    if key not in shaped or shaped.get(key) in (None, "")
+                ]
+                if missing:
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"Array item {index} is missing required field(s): "
+                            + ", ".join(missing)
+                        ),
+                        data={"item_index": index, "missing_fields": missing},
+                    )
+                normalized_items.append(shaped)
+                continue
+
+            if item_kind == "string":
+                if not isinstance(item, str):
+                    return ToolResult(success=False, error=f"Array item {index} must be a string")
+            elif item_kind == "integer":
+                if isinstance(item, bool) or not isinstance(item, int):
+                    return ToolResult(success=False, error=f"Array item {index} must be an integer")
+            elif item_kind == "number":
+                if isinstance(item, bool) or not isinstance(item, (int, float)):
+                    return ToolResult(success=False, error=f"Array item {index} must be a number")
+            elif item_kind == "boolean" and not isinstance(item, bool):
+                return ToolResult(success=False, error=f"Array item {index} must be a boolean")
+            normalized_items.append(item)
+        request_payload = normalized_items
+
+    multipart_files = None
     if input_mode in {"form", "multipart"}:
         source = request_payload if isinstance(request_payload, dict) else {}
         required_form_fields = [
@@ -887,15 +980,64 @@ def _integration_call(
                 ),
                 data={"missing_fields": missing_form_fields},
             )
+        binary_fields = {
+            str(item.get("key") or "").strip()
+            for item in raw_form_fields
+            if isinstance(item, dict)
+            and str(item.get("format") or "").strip().lower() == "binary"
+            and str(item.get("key") or "").strip()
+        }
+        multipart_files = {}
+        scalar_source = {}
         for key, value in source.items():
             if value is None:
+                continue
+            if input_mode == "multipart" and key in binary_fields:
+                try:
+                    if isinstance(value, bool):
+                        raise ValueError
+                    asset_id = int(value)
+                    if asset_id <= 0:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    return ToolResult(
+                        success=False,
+                        error=f"Multipart file field '{key}' requires an employee file asset id",
+                    )
+                agent_id = int(context.get("agent_id") or 0)
+                if agent_id <= 0:
+                    return ToolResult(
+                        success=False,
+                        error="Employee identity is required for file upload actions",
+                    )
+                asset = (
+                    db.query(EmployeeFileAsset)
+                    .filter(
+                        EmployeeFileAsset.id == asset_id,
+                        EmployeeFileAsset.company_id == context["company_id"],
+                        EmployeeFileAsset.agent_id == agent_id,
+                        EmployeeFileAsset.enabled.is_(True),
+                    )
+                    .first()
+                )
+                if asset is None:
+                    return ToolResult(
+                        success=False,
+                        error=f"Employee file asset for field '{key}' was not found",
+                    )
+                multipart_files[key] = (
+                    asset.filename,
+                    bytes(asset.content),
+                    asset.content_type,
+                )
                 continue
             if not isinstance(value, (str, int, float, bool)):
                 return ToolResult(
                     success=False,
                     error=f"Form field '{key}' must be a scalar value",
                 )
-        request_payload = source
+            scalar_source[key] = value
+        request_payload = scalar_source
         if input_mode == "form":
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         else:
@@ -973,9 +1115,10 @@ def _integration_call(
             url=url,
             method=method,
             headers=headers,
-            json_data=request_payload if input_mode == "json" else None,
+            json_data=request_payload if input_mode in {"json", "json_array"} else None,
             form_data=request_payload if input_mode == "form" else None,
             multipart_data=request_payload if input_mode == "multipart" else None,
+            multipart_files=multipart_files if input_mode == "multipart" else None,
             timeout=float((op_config or {}).get("timeout") or 15),
             max_response_bytes=MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS,
         )

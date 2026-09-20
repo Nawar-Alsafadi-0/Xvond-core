@@ -327,7 +327,9 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
         field_type = "text"
         value_type = str(raw_type or "").strip().lower()
         value_format = str(raw_format or "").strip().lower()
-        if value_format == "email":
+        if value_format == "binary":
+            field_type = "file"
+        elif value_format == "email":
             field_type = "email"
         elif value_format == "date":
             field_type = "date"
@@ -339,6 +341,8 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
             field_type = "number"
         elif value_type == "boolean":
             field_type = "boolean"
+        elif value_type in {"array", "object", "json"}:
+            field_type = "json"
         fields.append({
             "key": field_key,
             "label": re.sub(r"[_.-]+", " ", field_key).strip().title(),
@@ -350,6 +354,8 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
     def add_operation_fields(operation: dict) -> None:
         if not isinstance(operation, dict):
             return
+        if str(operation.get("input_mode") or "").strip().lower() == "json_array":
+            add_field("items", required=True, raw_type="array")
         for raw_key in operation.get("path_params") or []:
             add_field(raw_key, required=True)
 
