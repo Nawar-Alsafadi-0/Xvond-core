@@ -867,3 +867,66 @@ def test_openapi_root_scalar_array_is_supported_but_nested_arrays_are_not():
         }
     )
     assert set(nested["operations"]) == {"health"}
+
+def test_openapi_imports_safe_header_parameters_and_drops_reserved_headers():
+    contract = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "paths": {
+                "/records": {
+                    "parameters": [
+                        {
+                            "name": "X-Workspace-ID",
+                            "in": "header",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "post": {
+                        "operationId": "createRecord",
+                        "parameters": [
+                            {
+                                "name": "X-Region",
+                                "in": "header",
+                                "required": False,
+                                "schema": {"type": "string"},
+                            },
+                            {
+                                "name": "Authorization",
+                                "in": "header",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            },
+                            {
+                                "name": "Content-Type",
+                                "in": "header",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            },
+                            {
+                                "name": "Idempotency-Key",
+                                "in": "header",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            },
+                        ],
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "required": ["name"],
+                                        "properties": {"name": {"type": "string"}},
+                                    }
+                                }
+                            }
+                        },
+                    },
+                }
+            },
+        }
+    )
+
+    operation = contract["operations"]["create_record"]
+    assert operation["header_params"] == ["X-Workspace-ID", "X-Region"]
+    assert operation["required_header_params"] == ["X-Workspace-ID"]
