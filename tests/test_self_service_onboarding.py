@@ -54,7 +54,8 @@ def test_public_builder_is_open_ended_and_creates_directly_without_preview():
     assert "sessionStorage" in html
     assert "ابنِ موظفي" in html
     assert "شو بدك موظفك يعمل؟" in html
-    assert "/customer/employee-builder/${agentId}/compile" in html
+    assert '/compile"' in html
+    assert '/customer/employee-builder/" + selectedAgentId + "/compile' in html
     assert "مثل Replit بس للموظفين والـAgents" in html
     assert "Build status" in html
     assert 'id="employee-name"' not in html
