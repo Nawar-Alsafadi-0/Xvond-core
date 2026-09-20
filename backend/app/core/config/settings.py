@@ -185,10 +185,6 @@ class Settings:
         if self.N8N_ENABLED:
             if not self.N8N_WEBHOOK_URL:
                 errors.append("N8N_WEBHOOK_URL is required when n8n is enabled")
-            if not self.WORKFLOW_PUBLIC_URL:
-                errors.append("WORKFLOW_PUBLIC_URL is required when n8n is enabled")
-            elif self.is_production and not self.WORKFLOW_PUBLIC_URL.startswith("https://"):
-                errors.append("WORKFLOW_PUBLIC_URL must use HTTPS in production")
             if not self.N8N_SHARED_SECRET:
                 errors.append("N8N_SHARED_SECRET is required when n8n is enabled")
             elif _looks_like_placeholder(self.N8N_SHARED_SECRET):
