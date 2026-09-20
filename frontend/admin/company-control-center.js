@@ -130,18 +130,26 @@ function wsPill(text,kind='neutral'){return `<span class="workspace-pill ${kind}
 function wsEmpty(title,body=''){return `<div class="workspace-empty"><strong>${f(title)}</strong>${body?`<p>${f(body)}</p>`:''}</div>`}
 function wsOption(value,selected,label=null){return `<option value="${f(value)}" ${String(value)===String(selected||'')?'selected':''}>${f(label||value)}</option>`}
 function wsSelect(values,selected,empty='Select'){return `<option value="">${f(empty)}</option>`+(values||[]).map(x=>wsOption(x,selected)).join('')}
-async function wsOptional(path,fallback,label=null,issues=null){
-  try{return await api(path)}
+async function wsOptional(path,fallback,label=null,issues=null,timeoutMs=8000){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{return await api(path,{signal:controller.signal})}
   catch(error){
-    if(Array.isArray(issues)&&label)issues.push({label,message:error?.message||"Unavailable"});
+    const message=error?.name==='AbortError'?'Timed out':(error?.message||"Unavailable");
+    if(Array.isArray(issues)&&label)issues.push({label,message});
     return fallback;
   }
+  finally{clearTimeout(timer)}
 }
 
 async function loadCompanyControlCenter(companyId,tab=null){
   simpleCompanyId=Number(companyId);xvondWorkspace.companyId=Number(companyId);if(tab)xvondWorkspace.tab=tab;
   const loadIssues=[];
-  const view=await api(`/admin/company-view/${companyId}`);
+  const viewController=new AbortController();
+  const viewTimer=setTimeout(()=>viewController.abort(),8000);
+  let view;
+  try{view=await api(`/admin/company-view/${companyId}`,{signal:viewController.signal})}
+  finally{clearTimeout(viewTimer)}
   const [channelResult,moduleResult,catalog,integrations,requests,conversations,usage,profile,setup,handoffs,audit,serviceBilling,servicePlans,users,readiness,unresolved]=await Promise.all([
     wsOptional(`/admin/channels/companies/${companyId}`,{channels:[]},'Channels',loadIssues),
     wsOptional(`/admin/companies/${companyId}/modules`,{modules:[]},'Company capabilities',loadIssues),
