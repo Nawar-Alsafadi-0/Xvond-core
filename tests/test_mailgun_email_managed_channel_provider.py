@@ -38,6 +38,9 @@ def test_mailgun_inbound_verifies_hmac_and_normalizes_email():
     assert "body['body-plain']" in code
     assert "channel_type:'email'" in code
     assert "external_contact_id:sender" in code
+    assert ".slice(0, 200)" in code
+    assert ".slice(0, 180)" in code
+    assert ".slice(0, 12000)" in code
 
 
 def test_mailgun_inbound_acks_before_forwarding_to_xvond():
