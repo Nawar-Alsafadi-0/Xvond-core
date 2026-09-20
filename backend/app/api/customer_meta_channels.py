@@ -213,7 +213,7 @@ def _instagram_portal_redirect(status: str) -> str:
     if parsed and parsed.scheme and parsed.netloc:
         origin = f"{parsed.scheme}://{parsed.netloc}"
     else:
-        origin = str(settings.PUBLIC_BASE_URL or "").strip().rstrip("")
+        origin = str(settings.PUBLIC_BASE_URL or "").strip().rstrip("/")
     suffix = f"/customer-ui?instagram_oauth={status}#channels"
     return f"{origin.rstrip('/')}{suffix}" if origin else suffix
 
