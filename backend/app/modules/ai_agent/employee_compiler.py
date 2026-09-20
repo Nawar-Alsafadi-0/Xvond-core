@@ -229,7 +229,7 @@ Use this shape:
       "primitives": ["workflow_engine"],
       "schedule": {"kind":"interval|once|daily|weekly|monthly","every_minutes":60,"at":"2026-10-01T09:00:00+04:00","hour":8,"minute":0,"weekdays":[0,1,2,3,4],"day_of_month":1,"timezone":"Asia/Muscat","source_text":"exact cadence/time words copied from the customer Job Brief"},
       "runtime_inputs": {"url":"https://example.com/data","target_price":100},
-      "integration_operations": {"execute":{"method":"POST","endpoint":"/relative/path","input_mode":"json|form|query|none","path_params":[],"query_params":[],"required_query_params":[],"required_json_fields":["customer_name"],"json_fields":[{"key":"customer_name","required":true,"type":"string"}],"required_form_fields":[],"form_fields":[],"response_status":"201","response_kind":"object","response_fields":[{"key":"id","required":true,"type":"string"}]}},
+      "integration_operations": {"execute":{"method":"POST","endpoint":"/relative/path","input_mode":"json|form|multipart|query|none","path_params":[],"query_params":[],"required_query_params":[],"required_json_fields":["customer_name"],"json_fields":[{"key":"customer_name","required":true,"type":"string"}],"required_form_fields":[],"form_fields":[],"response_status":"201","response_kind":"object","response_fields":[{"key":"id","required":true,"type":"string"}]}},
       "discovery": {
         "needed": false,
         "capability": "short description of the missing external capability",
@@ -885,7 +885,7 @@ def _normalize_integration_operations(value: Any) -> dict[str, dict]:
         input_mode = str(
             raw.get("input_mode") or ("query" if method == "GET" else "json")
         ).strip().lower()
-        if input_mode not in {"json", "form", "query", "none"}:
+        if input_mode not in {"json", "form", "multipart", "query", "none"}:
             continue
 
         path_params = []
