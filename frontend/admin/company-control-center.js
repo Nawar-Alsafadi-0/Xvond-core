@@ -61,9 +61,11 @@ function wsManagedChannelPresentation(channel){
 }
 function wsManagedChannelDetail(channel){
   const source=String(channel?.config?.request_source||'').replaceAll('_',' ');
+  const callback=String(channel?.config?.provider_inbound_url||'').trim();
   if(channel?.runtime_state!=='live'){
     return `Requested${source?` via ${source}`:''}. Keep disabled until Xvond ships and validates the runtime adapter.`;
   }
+  if(callback)return `Provider route connected. Configure the provider callback/webhook with: ${callback}`;
   return `Xvond-managed provisioning${source?` requested via ${source}`:''}. Do not activate until provider/runtime verification is complete.`;
 }
 function wsManagedChannelActions(channel){
