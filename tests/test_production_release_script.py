@@ -247,3 +247,14 @@ def test_release_can_run_fail_closed_market_launch_gate_after_cutover():
     assert "--require-automation-run" in SOURCE
     assert '--automation-run-after "$deployment_started_at"' in SOURCE
     assert "requires ACCEPTANCE_COMPANY_ID and ACCEPTANCE_AGENT_ID" in SOURCE
+
+
+def test_release_skips_workflow_reimport_when_definitions_did_not_change():
+    assert 'WORKFLOW_SYNC_MODE="${WORKFLOW_SYNC_MODE:-auto}"' in SOURCE
+    assert 'WORKFLOW_SYNC_MARKER="${WORKFLOW_SYNC_MARKER:-.git/xvond-workflow-sync-sha}"' in SOURCE
+    assert "definitely-not-python" not in SOURCE
+    assert "workflow_sync_required()" in SOURCE
+    assert 'git diff --quiet "$base_sha" HEAD -- ops/n8n scripts/sync_workflow_engine.sh' in SOURCE
+    assert "skipping import/publish" in SOURCE
+    assert '--profile workflow up -d workflow-registry workflow-engine' in SOURCE
+    assert 'printf \'%s\\n\' "$release_sha" > "$WORKFLOW_SYNC_MARKER"' in SOURCE
