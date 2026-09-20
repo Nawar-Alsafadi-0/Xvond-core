@@ -113,6 +113,14 @@ SELF_SERVICE_FREE_TEST_MESSAGES = 0
 MAX_EMPLOYEE_FILE_BYTES = 15 * 1024 * 1024
 
 
+def _self_service_commercial_gating() -> bool:
+    """Billing is deliberately disabled while the Replit-style experiment is free."""
+    return bool(
+        settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION
+        and not settings.SELF_SERVICE_FREE_EXPERIMENT
+    )
+
+
 def _safe_asset_filename(value: str | None) -> str:
     filename = re.split(r"[\\/]", str(value or "file").strip())[-1].strip()
     filename = re.sub(r"[\x00-\x1f\x7f]+", "_", filename)
@@ -581,7 +589,40 @@ def _existing_employee(db, company_id: int) -> AIAgent | None:
             AIAgent.company_id == company_id,
             AgentConfig.agent_type == "employee",
         )
-        .order_by(AIAgent.id.asc())
+        .order_by(AIAgent.id.desc())
+        .first()
+    )
+
+
+def _employee_for_company(db, company_id: int, agent_id: int | None = None) -> AIAgent | None:
+    query = (
+        db.query(AIAgent)
+        .join(AgentConfig, AgentConfig.agent_id == AIAgent.id)
+        .filter(
+            AIAgent.company_id == company_id,
+            AgentConfig.agent_type == "employee",
+        )
+    )
+    if agent_id is not None:
+        query = query.filter(AIAgent.id == agent_id)
+    return query.order_by(AIAgent.id.desc()).first()
+
+
+def _employee_for_workspace(
+    db,
+    company_id: int,
+    agent_id: int | None = None,
+) -> AIAgent | None:
+    if agent_id is None:
+        return _existing_employee(db, company_id)
+    return (
+        db.query(AIAgent)
+        .join(AgentConfig, AgentConfig.agent_id == AIAgent.id)
+        .filter(
+            AIAgent.company_id == company_id,
+            AIAgent.id == agent_id,
+            AgentConfig.agent_type == "employee",
+        )
         .first()
     )
 
@@ -1532,7 +1573,7 @@ def _self_service_builder_journey(
         "Your job description is saved as the source of truth for this employee.",
     )
 
-    if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+    if _self_service_commercial_gating():
         subscription_status = str(subscription.get("status") or "")
         if subscription.get("active"):
             add_stage(
@@ -1564,7 +1605,7 @@ def _self_service_builder_journey(
             "complete",
             "Xvond compiled the job and provisioned its employee capability plan.",
         )
-    elif has_entitlement or not settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+    elif has_entitlement or not _self_service_commercial_gating():
         add_stage(
             "build",
             "Build",
@@ -1996,7 +2037,7 @@ def _self_service_builder_journey(
                 else "The current conversational employee build has been preview-tested safely."
             ),
         )
-    elif provisioned and (has_entitlement or not settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION) and setup_complete:
+    elif provisioned and (has_entitlement or not _self_service_commercial_gating()) and setup_complete:
         if routine_required:
             preview_actions = [
                 _builder_action(
@@ -2104,11 +2145,54 @@ def _self_service_builder_journey(
     }
 
 
-@router.get("/current")
-def current_employee(current_user: User = Depends(require_customer_manager)):
+@router.get("/employees")
+def list_self_service_employees(
+    current_user: User = Depends(require_customer_manager),
+):
+    """List employee projects in the customer's Replit-style workspace."""
     db = SessionLocal()
     try:
-        agent = _existing_employee(db, current_user.company_id)
+        company = _company_or_404(db, current_user.company_id)
+        rows = (
+            db.query(AIAgent, AgentConfig)
+            .join(AgentConfig, AgentConfig.agent_id == AIAgent.id)
+            .filter(
+                AIAgent.company_id == company.id,
+                AgentConfig.agent_type == "employee",
+            )
+            .order_by(AIAgent.id.desc())
+            .all()
+        )
+        employees = []
+        for agent, config in rows:
+            builder = (config.settings or {}).get("employee_builder") or {}
+            spec = builder.get("compiled_spec") if isinstance(builder, dict) else None
+            employees.append({
+                "agent_id": agent.id,
+                "name": agent.name,
+                "description": agent.description,
+                "enabled": bool(agent.enabled),
+                "lifecycle": "live" if agent.enabled else "draft",
+                "compiled": isinstance(spec, dict),
+                "updated_at": (
+                    str(builder.get("compiled_at") or builder.get("updated_at") or "")
+                    if isinstance(builder, dict)
+                    else ""
+                ),
+            })
+        return {"employees": employees}
+    finally:
+        db.close()
+
+
+@router.get("/current")
+def current_employee(
+    agent_id: int | None = Query(default=None, ge=1),
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        agent = _employee_for_company(db, current_user.company_id, agent_id)
         if agent is None:
             return {"employee": None}
         config = _employee_config_or_404(db, agent)
@@ -2224,11 +2308,11 @@ def create_employee(
             service_limits.entitlement(db, company.id, "ai_agents")
 
         existing = _existing_employee(db, company.id)
-        if existing is not None:
+        if existing is not None and not is_self_service:
             raise HTTPException(
                 409,
                 detail={
-                    "message": "This workspace already has an AI employee",
+                    "message": "This managed workspace already has an AI employee",
                     "agent_id": existing.id,
                 },
             )
@@ -2284,7 +2368,7 @@ def create_employee(
             settings=settings,
             capabilities={item: True for item in blueprint.capabilities},
             customer_controls=dict(DEFAULT_CUSTOMER_CONTROLS),
-            enforce_capacity=has_entitlement,
+            enforce_capacity=(has_entitlement if not is_self_service else False),
         )
 
         db.add(
@@ -2328,7 +2412,11 @@ def create_employee(
             "agent_id": agent.id,
             "name": agent.name,
             "enabled": agent.enabled,
-            "subscription_required_for_go_live": bool(settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION and not has_entitlement),
+            "subscription_required_for_go_live": bool(
+                settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION
+                and not settings.SELF_SERVICE_FREE_EXPERIMENT
+                and not has_entitlement
+            ),
             "subscription_required_for_compile": bool(not has_entitlement and not is_self_service),
             "blueprint": blueprint.as_dict(),
             "readiness": blueprint_readiness(blueprint),
@@ -2599,8 +2687,7 @@ def refine_self_service_employee(
                 "updated_at": now_iso,
                 "compiled_spec": None,
             }
-            if _has_ai_agents_entitlement(db, company.id):
-                staged = _compile_staged_employee_spec(
+            staged = _compile_staged_employee_spec(
                     db,
                     company_id=company.id,
                     agent=agent,
@@ -2616,8 +2703,8 @@ def refine_self_service_employee(
                         )
                     ),
                 )
-                pending.update(staged)
-                pending["status"] = "built"
+            pending.update(staged)
+            pending["status"] = "built"
 
             settings_value = dict(config.settings or {})
             builder["pending_revision"] = pending
@@ -2649,19 +2736,20 @@ def refine_self_service_employee(
         EmployeeBuilderReviseRequest(description=revised),
         current_user,
     )
-    if _has_ai_agents_entitlement_for_user(current_user):
-        try:
-            compile_employee(agent_id, current_user)
-            result["compiled"] = True
-            result["status"] = "refined_and_rebuilt"
-        except HTTPException:
-            # The refinement itself is durable. The normal journey will surface
-            # the build blocker rather than losing the owner's instruction.
-            result["status"] = "refined"
+    try:
+        compile_employee(agent_id, current_user)
+        result["compiled"] = True
+        result["status"] = "refined_and_rebuilt"
+    except HTTPException:
+        # The refinement itself is durable. The normal journey will surface
+        # the build blocker rather than losing the owner's instruction.
+        result["status"] = "refined"
     return result
 
 
 def _has_ai_agents_entitlement_for_user(current_user: User) -> bool:
+    if settings.SELF_SERVICE_FREE_EXPERIMENT:
+        return True
     db = SessionLocal()
     try:
         return _has_ai_agents_entitlement(db, current_user.company_id)
@@ -5226,7 +5314,7 @@ def launch_self_service_employee(
         # Existing AI Agents plan still owns employee capacity. The self-service
         # workspace currently owns one employee, so its active subscription is
         # the commercial entitlement for this employee.
-        if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+        if _self_service_commercial_gating():
             limits_service.check_agent_limit(db, company.id)
 
         target_channel_types = [
@@ -5288,7 +5376,7 @@ def launch_self_service_employee(
                     },
                 )
             if not channel.enabled:
-                if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+                if _self_service_commercial_gating():
                     limits_service.check_channel_limit(db, company.id)
                 channel.enabled = True
                 db.flush()
@@ -5511,7 +5599,7 @@ def preview_employee_routine(
             if not message:
                 raise HTTPException(409, f"Preview AI node {node_scope} has no prompt")
 
-            if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+            if _self_service_commercial_gating():
                 limits_service.check_token_limit(db, company.id)
             selections = runtime_selections(
                 db,
@@ -5663,7 +5751,7 @@ def test_draft_employee(
             else None
         )
         if pending_spec is not None:
-            if settings.SELF_SERVICE_REQUIRE_SUBSCRIPTION:
+            if _self_service_commercial_gating():
                 if not _has_ai_agents_entitlement(db, current_user.company_id):
                     raise HTTPException(
                         403,

@@ -3,263 +3,455 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Xvond — Build your AI employee</title>
+  <title>Xvond — Build AI employees</title>
   <style>
-    :root{font-family:Inter,Arial,sans-serif;color:#0f172a;background:#f8fafc}*{box-sizing:border-box}body{margin:0}.wrap{max-width:920px;margin:0 auto;padding:28px 20px 64px}.brand{font-size:28px;font-weight:800;color:#2563eb}.hero{padding:72px 0 34px}.hero h1{font-size:clamp(38px,7vw,72px);line-height:1.05;margin:12px 0}.hero p{font-size:20px;color:#475569;max-width:780px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:24px;box-shadow:0 14px 40px rgba(15,23,42,.06);margin-top:18px}textarea,input{width:100%;border:1px solid #cbd5e1;border-radius:12px;padding:14px 16px;font:inherit;background:#fff}textarea{min-height:190px;resize:vertical}button{border:0;border-radius:12px;padding:13px 18px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff}button:disabled{opacity:.55;cursor:not-allowed}.row{display:flex;gap:10px;flex-wrap:wrap}.muted{color:#64748b}.status{margin-top:12px;color:#b91c1c}.hidden{display:none!important}.chips{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.chip{display:grid;grid-template-columns:auto 1fr;gap:8px 10px;align-items:start;padding:12px 14px;border:1px solid #dbeafe;border-radius:14px;background:#eff6ff}.chip input{width:auto;margin-top:3px}.chip-copy{display:grid;gap:3px}.chip-meta{font-size:12px;color:#64748b}.auth-tabs{display:flex;gap:8px;margin-bottom:14px}.auth-tabs button{background:#e2e8f0;color:#0f172a}.auth-tabs button.active{background:#2563eb;color:#fff}.success{border-color:#86efac;background:#f0fdf4}.build-progress{display:grid;gap:12px}.build-step{padding:12px 14px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc}.build-step.active{border-color:#93c5fd;background:#eff6ff}.build-step.done{border-color:#86efac;background:#f0fdf4}.note{margin-top:14px;padding:12px 14px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0}.examples{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:16px 0 0}.example{padding:12px 14px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc;color:#334155;font-size:14px}.ltr{direction:ltr;text-align:left}@media(max-width:720px){.hero{padding-top:40px}.examples,.chips{grid-template-columns:1fr}}
+    :root{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#e5e7eb;background:#0b0d12}
+    *{box-sizing:border-box}body{margin:0;background:#0b0d12;color:#e5e7eb}
+    button,input,textarea{font:inherit}button{cursor:pointer}
+    .app{min-height:100vh;display:grid;grid-template-rows:54px 1fr}
+    .top{display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid #242833;background:#11141b;position:sticky;top:0;z-index:10}
+    .brand{font-weight:900;font-size:20px;color:#4f8cff}.top-actions{display:flex;gap:8px;align-items:center}
+    .pill{border:1px solid #303644;background:#171b24;color:#cbd5e1;border-radius:9px;padding:7px 10px;font-size:12px}
+    .workspace{display:grid;grid-template-columns:240px minmax(0,1fr) 330px;min-height:calc(100vh - 54px);direction:ltr}
+    .sidebar,.inspector{background:#10131a;min-width:0}.sidebar{border-right:1px solid #242833}.inspector{border-left:1px solid #242833}
+    .sidebar,.main,.inspector{direction:rtl}.side-head,.inspect-head{padding:14px;border-bottom:1px solid #242833}
+    .side-title,.inspect-title{font-size:12px;color:#8f98aa;text-transform:uppercase;letter-spacing:.08em;font-weight:800}
+    .new{width:100%;margin-top:10px;border:1px solid #3b4353;background:#1a1f29;color:#fff;border-radius:9px;padding:10px 12px;font-weight:700}
+    .agents{padding:8px;display:grid;gap:4px}.agent{display:block;width:100%;text-align:right;border:0;background:transparent;color:#cbd5e1;padding:9px 10px;border-radius:8px}
+    .agent:hover,.agent.active{background:#1b202a;color:#fff}.agent small{display:block;color:#737e91;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .main{min-width:0;display:grid;grid-template-rows:auto 1fr auto;background:#0d1016}
+    .project-head{padding:13px 18px;border-bottom:1px solid #242833;display:flex;justify-content:space-between;align-items:center;gap:12px}
+    .project-title{font-weight:800}.project-meta{font-size:12px;color:#7f8899}
+    .chat{padding:24px clamp(16px,4vw,56px);overflow:auto;display:flex;flex-direction:column;gap:14px}
+    .hero{margin:auto;max-width:760px;width:100%;text-align:center;padding:36px 0}.hero h1{font-size:clamp(30px,5vw,48px);margin:0 0 10px}.hero p{color:#97a1b3;line-height:1.7}
+    .examples{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:20px}.example{border:1px solid #2b3140;background:#141820;color:#b8c1d1;border-radius:10px;padding:11px;text-align:right}
+    .msg{max-width:780px;border:1px solid #292f3a;border-radius:12px;padding:13px 14px;line-height:1.65;white-space:pre-wrap}
+    .msg.user{background:#1a2230;margin-right:auto}.msg.system{background:#12161e;color:#cbd5e1}.msg strong{color:#fff}
+    .composer-wrap{padding:14px 18px 18px;border-top:1px solid #242833;background:#0d1016}
+    .composer{max-width:860px;margin:auto;border:1px solid #343b4b;background:#151922;border-radius:14px;padding:10px;box-shadow:0 8px 30px rgba(0,0,0,.22)}
+    textarea{width:100%;min-height:74px;max-height:220px;resize:vertical;border:0;outline:none;background:transparent;color:#fff;padding:8px;line-height:1.5}
+    .composer-foot{display:flex;justify-content:space-between;align-items:center;gap:10px}.hint{font-size:12px;color:#707b8e}
+    .primary{border:0;background:#2f6fed;color:#fff;border-radius:9px;padding:9px 14px;font-weight:800}.primary:disabled{opacity:.45;cursor:not-allowed}
+    .inspector-body{padding:12px;display:grid;gap:10px}.panel{border:1px solid #292f3a;background:#141820;border-radius:10px;padding:12px}
+    .panel h3{font-size:13px;margin:0 0 8px}.muted{color:#8791a4;font-size:12px;line-height:1.5}
+    .step{display:grid;grid-template-columns:20px 1fr;gap:9px;padding:8px 0;border-bottom:1px solid #242a35}.step:last-child{border-bottom:0}
+    .dot{width:18px;height:18px;border-radius:50%;border:1px solid #455066;display:grid;place-items:center;font-size:10px;color:#95a0b4}.step.complete .dot{background:#193b2b;border-color:#2e8b57;color:#8ff0b4}.step.action_required .dot{background:#253559;border-color:#4f78d4;color:#c7d9ff}
+    .setup-action{width:100%;margin-top:8px;border:1px solid #394253;background:#191f2a;color:#e5e7eb;border-radius:8px;padding:9px;text-align:right}
+    .status{display:inline-flex;align-items:center;gap:6px;font-size:11px;border:1px solid #30384a;border-radius:999px;padding:5px 8px;color:#aeb8ca}
+    .green{border-color:#28543d;color:#8fe1af}.error{color:#ff9d9d;font-size:13px;margin-top:8px}.hidden{display:none!important}
+    .auth-layer{position:fixed;inset:0;background:rgba(5,7,10,.76);display:grid;place-items:center;z-index:40;padding:18px}
+    .auth{width:min(420px,100%);background:#12161e;border:1px solid #323948;border-radius:14px;padding:20px;box-shadow:0 24px 80px rgba(0,0,0,.45)}
+    .auth h2{margin:0 0 6px}.auth input{width:100%;margin-top:9px;border:1px solid #343b4b;background:#0d1016;color:#fff;border-radius:9px;padding:11px}
+    .tabs{display:flex;gap:6px;margin:14px 0}.tabs button{flex:1;border:1px solid #303747;background:#171c25;color:#aeb7c8;border-radius:8px;padding:9px}.tabs button.active{background:#24304a;color:#fff}
+    .mobile-agents{display:none}
+    @media(max-width:980px){.workspace{grid-template-columns:200px minmax(0,1fr)}.inspector{display:none}}
+    @media(max-width:720px){
+      .workspace{display:block}.sidebar{display:none}.mobile-agents{display:flex;gap:8px;padding:9px 12px;border-bottom:1px solid #242833;overflow:auto;background:#10131a}
+      .mobile-agents button{white-space:nowrap;border:1px solid #303747;background:#171c25;color:#cbd5e1;border-radius:8px;padding:8px 10px}
+      .examples{grid-template-columns:1fr}.project-head{padding:11px 13px}.chat{padding:16px 12px}.composer-wrap{padding:10px 12px 14px}
+    }
   </style>
 </head>
 <body>
-  <main class="wrap">
-    <div class="brand" dir="ltr">Xvond</div>
-    <section class="hero">
-      <div class="muted" dir="ltr">BUILD WHATEVER AI EMPLOYEE YOU NEED</div>
-      <h1>شو بدك موظفك يعمل؟</h1>
-      <p>احكيلنا الوظيفة أو الشغل اللي بدك ياه مثل ما بتحكي مع شخص. ممكن يكون موظف لشركة، مساعد شخصي، Agent للمتابعة، أو موظف ينفذ مهام بشكل تلقائي.</p>
-      <div class="examples">
-        <div class="example">يقرأ إيميلاتي ويلخص المهم ويرد على أنواع محددة.</div>
-        <div class="example">يرد على العملاء، يحجز مواعيد، ويحوّل لبشري عند اللزوم.</div>
-        <div class="example">يتابع عروض أو أسعار معينة ويخبرني لما يصير تغيير.</div>
-        <div class="example">يولّد محتوى وينشره تلقائيًا على القنوات اللي أوصلها.</div>
-      </div>
-    </section>
+<div class="app">
+  <header class="top">
+    <div class="brand">Xvond</div>
+    <div class="top-actions">
+      <span id="session-state" class="pill">Self-Service Builder</span>
+    </div>
+  </header>
 
-    <section id="build-card" class="card">
-      <label for="description">شو بدك منه؟</label>
-      <textarea id="description" placeholder="مثال: بدي موظف شخصي يقرأ إيميلاتي كل صباح، يلخصلي المهم، وإذا كان الإيميل من عميل محتمل يجهز رد مناسب وما يرسله إلا بعد موافقتي."></textarea>
+  <div id="mobile-agents" class="mobile-agents"></div>
 
-      <div class="note muted">اكتب المطلوب فقط. Xvond رح يفهم الوظيفة ويحدد لحاله القدرات والقنوات والـIntegrations اللازمة، وبعدها يطلب منك فقط الشي الضروري اللي ما بيقدر يعرفه أو يربطه بدونك. الاشتراك غير مطلوب خلال التجربة الحالية.</div>
-      <div class="row" style="margin-top:22px;align-items:center">
-        <button id="create-btn">ابنِ موظفي</button>
+  <div class="workspace">
+    <aside class="sidebar">
+      <div class="side-head">
+        <div class="side-title">Agents</div>
+        <button id="new-agent" class="new">+ Agent جديد</button>
       </div>
-      <div id="create-error" class="status"></div>
-    </section>
+      <div id="agents" class="agents"></div>
+    </aside>
 
-    <section id="auth-card" class="card hidden">
-      <h2>سجّل دخول حتى نبدأ البناء</h2>
-      <p class="muted">طلبك محفوظ. بعد تسجيل الدخول Xvond يبدأ البناء مباشرة.</p>
-      <div class="auth-tabs">
-        <button id="login-tab" class="active">تسجيل دخول</button>
-        <button id="signup-tab">إنشاء حساب</button>
+    <main class="main">
+      <div class="project-head">
+        <div>
+          <div id="project-title" class="project-title">Agent جديد</div>
+          <div id="project-meta" class="project-meta">اكتب المطلوب وXvond يبنيه</div>
+        </div>
+        <span id="project-status" class="status">Ready</span>
       </div>
-      <div id="login-form">
-        <input id="login-email" class="ltr" type="email" placeholder="Email">
-        <input id="login-password" class="ltr" type="password" placeholder="Password" style="margin-top:10px">
-        <button id="login-btn" style="margin-top:12px">تسجيل دخول وابدأ البناء</button>
-      </div>
-      <div id="signup-form" class="hidden">
-        <input id="signup-name" placeholder="اسمك">
-        <input id="signup-workspace" placeholder="اسم الشركة أو مساحة العمل (اختياري)" style="margin-top:10px">
-        <input id="signup-email" class="ltr" type="email" placeholder="Email" style="margin-top:10px">
-        <input id="signup-password" class="ltr" type="password" placeholder="Password" style="margin-top:10px">
-        <button id="signup-btn" style="margin-top:12px">إنشاء حساب وابدأ البناء</button>
-      </div>
-      <div id="auth-error" class="status"></div>
-    </section>
 
-    <section id="progress-card" class="card hidden">
-      <h2>عم نبني موظفك</h2>
-      <p class="muted">Xvond عم يحوّل طلبك إلى موظف قابل للتنفيذ، مو مجرد Prompt.</p>
-      <div class="build-progress">
-        <div id="step-understand" class="build-step">1. فهم الوظيفة والهدف</div>
-        <div id="step-compile" class="build-step">2. بناء القدرات والـ workflows</div>
-        <div id="step-setup" class="build-step">3. تحديد المعلومات والاتصالات المطلوبة</div>
-      </div>
-      <div id="build-result" class="note muted">جاري البدء…</div>
-      <div id="build-error" class="status"></div>
-    </section>
+      <section id="chat" class="chat">
+        <div id="hero" class="hero">
+          <h1>شو بدك موظفك يعمل؟</h1>
+          <p>مثل Replit بس للموظفين والـAgents: اكتب النتيجة اللي بدك ياها. Xvond يفهم، يبني، يربط، ويطلب منك فقط الشي اللي ما بيقدر يعمله بدونك.</p>
+          <div class="examples">
+            <button class="example" data-example="بدي Agent يولد محتوى وينشر تلقائيًا على Instagram">يولد محتوى وينشر تلقائيًا على Instagram</button>
+            <button class="example" data-example="بدي موظف لعيادة يرد على العملاء ويحجز المواعيد">يرد على العملاء ويحجز المواعيد</button>
+            <button class="example" data-example="بدي Agent يراقب الأسعار كل يوم ويخبرني عند التغيير المهم">يراقب الأسعار ويخبرني بالتغييرات</button>
+            <button class="example" data-example="بدي موظف يقرأ الإيميلات ويلخص المهم ويرد حسب القواعد">يقرأ الإيميلات ويلخص ويرد</button>
+          </div>
+        </div>
+      </section>
 
-    <section id="success-card" class="card success hidden">
-      <h2>موظفك انبنى</h2>
-      <p id="success-copy">صار عندك نسخة أولية فعلية. افتح مساحة الموظف لتكمل أي معلومات ناقصة، تربط الأنظمة المطلوبة، تجرّبه وتعدّله باللغة الطبيعية.</p>
-      <a href="/customer-ui#employee-builder"><button>افتح موظفي وكمل البناء</button></a>
-    </section>
-  </main>
+      <div class="composer-wrap">
+        <div class="composer">
+          <textarea id="prompt" placeholder="صف الموظف أو التعديل اللي بدك ياه..."></textarea>
+          <div class="composer-foot">
+            <span id="composer-hint" class="hint">أي وظيفة. Xvond يحدد القدرات والقنوات والـIntegrations لحاله.</span>
+            <button id="send" class="primary">ابنِ موظفي</button>
+          </div>
+          <div id="composer-error" class="error"></div>
+        </div>
+      </div>
+    </main>
+
+    <aside class="inspector">
+      <div class="inspect-head"><div class="inspect-title">Build</div></div>
+      <div id="inspector" class="inspector-body">
+        <div class="panel">
+          <h3>جاهز للبناء</h3>
+          <div class="muted">بعد ما تكتب المطلوب، هون بتشوف البناء والـSetup والـPreview الخاص بهالموظف فقط.</div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<div id="auth-layer" class="auth-layer hidden">
+  <div class="auth">
+    <h2>كمّل من نفس الـWorkspace</h2>
+    <div class="muted">سجّل دخول أو أنشئ حساب، وبعدها Xvond يكمل البناء مباشرة.</div>
+    <div class="tabs">
+      <button id="login-tab" class="active">تسجيل دخول</button>
+      <button id="signup-tab">حساب جديد</button>
+    </div>
+    <div id="login-form">
+      <input id="login-email" type="email" placeholder="Email" dir="ltr">
+      <input id="login-password" type="password" placeholder="Password" dir="ltr">
+      <button id="login" class="primary" style="width:100%;margin-top:12px">دخول ومتابعة البناء</button>
+    </div>
+    <div id="signup-form" class="hidden">
+      <input id="signup-name" placeholder="اسمك">
+      <input id="signup-workspace" placeholder="اسم مساحة العمل (اختياري)">
+      <input id="signup-email" type="email" placeholder="Email" dir="ltr">
+      <input id="signup-password" type="password" placeholder="Password" dir="ltr">
+      <button id="signup" class="primary" style="width:100%;margin-top:12px">إنشاء الحساب ومتابعة البناء</button>
+    </div>
+    <div id="auth-error" class="error"></div>
+  </div>
+</div>
 
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const show = (id, yes=true) => $(id).classList.toggle("hidden", !yes);
-  const detail = async response => {
+  let selectedAgentId = null;
+  let selectedEmployee = null;
+  let pendingPrompt = "";
+  let authenticated = false;
+  let busy = false;
+
+  const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, ch => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[ch]));
+
+  async function detail(response) {
     try {
       const data = await response.json();
       return typeof data.detail === "string" ? data.detail : (data.detail?.message || "حدث خطأ");
-    } catch {
+    } catch (_) {
       return "حدث خطأ";
-    }
-  };
-
-  const saveDraft = () => sessionStorage.setItem("xvond_employee_draft", JSON.stringify({
-    description: $("description").value.trim()
-  }));
-  const loadDraft = () => { try { return JSON.parse(sessionStorage.getItem("xvond_employee_draft") || "null"); } catch { return null; } };
-
-  async function createEmployee(showAuthOn401=true) {
-    $("create-error").textContent = "";
-    $("auth-error").textContent = "";
-    const description = $("description").value.trim();
-    if (description.length < 8) {
-      $("create-error").textContent = "اكتب شوي أكتر عن الشغل اللي بدك الموظف يعمله.";
-      return false;
-    }
-
-    saveDraft();
-    const draft = loadDraft();
-    $("create-btn").disabled = true;
-    try {
-      const response = await fetch("/customer/employee-builder/create", {
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body:JSON.stringify(draft)
-      });
-      if (response.ok) {
-        const created = await response.json();
-        sessionStorage.removeItem("xvond_employee_draft");
-        show("auth-card", false);
-        show("build-card", false);
-        show("progress-card", true);
-        $("progress-card").scrollIntoView({behavior:"smooth"});
-        await buildEmployee(created.agent_id);
-        return true;
-      }
-      if (response.status === 401 && showAuthOn401) {
-        show("auth-card", true);
-        $("auth-card").scrollIntoView({behavior:"smooth"});
-        return false;
-      }
-      if (response.status === 409) {
-        let conflict = null;
-        try { conflict = await response.json(); } catch (_) {}
-        const existingAgentId = Number(conflict?.detail?.agent_id || 0);
-        if (existingAgentId) {
-          const revise = await fetch(`/customer/employee-builder/${existingAgentId}/job-brief`, {
-            method:"PATCH",
-            headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({description})
-          });
-          if (revise.ok) {
-            sessionStorage.removeItem("xvond_employee_draft");
-            show("auth-card", false);
-            show("build-card", false);
-            show("progress-card", true);
-            $("progress-card").scrollIntoView({behavior:"smooth"});
-            await buildEmployee(existingAgentId);
-            return true;
-          }
-          if (revise.status === 409) {
-            sessionStorage.removeItem("xvond_employee_draft");
-            show("auth-card", false);
-            show("build-card", false);
-            show("success-card", true);
-            $("success-card").querySelector("h2").textContent = "موظفك الحالي شغال";
-            $("success-copy").textContent = "افتح مساحة الموظف وعدّل نفس الموظف بالكلام بدون ما نوقف النسخة الشغالة.";
-            return true;
-          }
-          $("create-error").textContent = await detail(revise);
-          return false;
-        }
-        $("create-error").textContent = conflict?.detail?.message || "تعذر تحديث الموظف الحالي.";
-        return false;
-      }
-      const message = await detail(response);
-      if (showAuthOn401) $("create-error").textContent = message;
-      else $("auth-error").textContent = message;
-      return false;
-    } finally {
-      $("create-btn").disabled = false;
     }
   }
 
-  const setStep = (id, state) => {
-    const el = $(id);
-    if (!el) return;
-    el.classList.remove("active", "done");
-    if (state) el.classList.add(state);
-  };
-
-  async function buildEmployee(agentId) {
-    $("build-error").textContent = "";
-    setStep("step-understand", "done");
-    setStep("step-compile", "active");
-    $("build-result").textContent = "عم نبني خطة التنفيذ والقدرات المطلوبة…";
-    try {
-      const response = await fetch(`/customer/employee-builder/${agentId}/compile`, {
-        method:"POST",
-        headers:{"Accept":"application/json"}
-      });
-      if (!response.ok) {
-        $("build-error").textContent = await detail(response);
-        $("build-result").textContent = "توقف البناء. فيك تعيد المحاولة بعد معالجة الخطأ.";
-        return false;
-      }
-      const data = await response.json();
-      setStep("step-compile", "done");
-      setStep("step-setup", "active");
-      $("build-result").textContent = "تم بناء الموظف. عم نحدد فقط شو ناقص لإكمال الإعداد…";
-      const current = await fetch("/customer/employee-builder/current", {headers:{"Accept":"application/json"}});
-      const currentData = current.ok ? await current.json() : null;
-      const actions = currentData?.employee?.builder_journey?.next_actions || [];
-      setStep("step-setup", "done");
-      show("progress-card", false);
-      show("success-card", true);
-      if (actions.length) {
-        $("success-copy").textContent = `Xvond بنى النسخة الأولى. بقي ${actions.length} إجراء إعداد مطلوب فقط، ومنكمله من مساحة الموظف.`;
-      }
-      $("success-card").scrollIntoView({behavior:"smooth"});
-      return true;
-    } catch (_) {
-      $("build-error").textContent = "تعذر إكمال البناء الآن. حاول مرة ثانية.";
-      return false;
+  async function api(url, options={}) {
+    const response = await fetch(url, {
+      ...options,
+      headers: {"Accept":"application/json", ...(options.body ? {"Content-Type":"application/json"} : {}), ...(options.headers || {})}
+    });
+    if (!response.ok) {
+      const err = new Error(await detail(response));
+      err.status = response.status;
+      throw err;
     }
+    return response.status === 204 ? null : response.json();
+  }
+
+  function addMessage(kind, html) {
+    $("hero")?.classList.add("hidden");
+    const node = document.createElement("div");
+    node.className = "msg " + kind;
+    node.innerHTML = html;
+    $("chat").appendChild(node);
+    $("chat").scrollTop = $("chat").scrollHeight;
+    return node;
+  }
+
+  function setBusy(value, label) {
+    busy = value;
+    $("send").disabled = value;
+    $("send").textContent = value ? (label || "عم نبني...") : (selectedAgentId ? "طبّق التعديل" : "ابنِ موظفي");
+    $("project-status").textContent = value ? "Building" : (selectedEmployee?.enabled ? "Live" : "Ready");
+    $("project-status").classList.toggle("green", Boolean(selectedEmployee?.enabled));
+  }
+
+  function newAgent() {
+    selectedAgentId = null;
+    selectedEmployee = null;
+    $("project-title").textContent = "Agent جديد";
+    $("project-meta").textContent = "اكتب المطلوب وXvond يبنيه";
+    $("project-status").textContent = "Ready";
+    $("chat").innerHTML = `
+      <div id="hero" class="hero">
+        <h1>شو بدك موظفك يعمل؟</h1>
+        <p>اكتب النتيجة اللي بدك ياها. Xvond رح يبني Agent مستقل جديد.</p>
+        <div class="examples">
+          <button class="example" data-example="بدي Agent يولد محتوى وينشر تلقائيًا على Instagram">يولد محتوى وينشر تلقائيًا على Instagram</button>
+          <button class="example" data-example="بدي موظف لعيادة يرد على العملاء ويحجز المواعيد">يرد على العملاء ويحجز المواعيد</button>
+        </div>
+      </div>`;
+    wireExamples();
+    $("inspector").innerHTML = '<div class="panel"><h3>جاهز للبناء</h3><div class="muted">اكتب المطلوب، وXvond يبدأ يبني الموظف من الصفر.</div></div>';
+    $("prompt").value = "";
+    $("send").textContent = "ابنِ موظفي";
+  }
+
+  function wireExamples() {
+    document.querySelectorAll("[data-example]").forEach(button => {
+      button.addEventListener("click", () => {
+        $("prompt").value = button.dataset.example || "";
+        $("prompt").focus();
+      });
+    });
+  }
+
+  function renderAgents(items) {
+    const markup = (items || []).map(item => `
+      <button class="agent ${Number(item.agent_id) === Number(selectedAgentId) ? "active" : ""}" data-agent-id="${Number(item.agent_id)}">
+        <strong>${escapeHtml(item.name || "AI Agent")}</strong>
+        <small>${escapeHtml(item.description || "")}</small>
+      </button>`).join("") || '<div class="muted" style="padding:10px">ما عندك Agents بعد.</div>';
+    $("agents").innerHTML = markup;
+    $("mobile-agents").innerHTML = '<button id="mobile-new">+ جديد</button>' + (items || []).slice(0,6).map(item =>
+      `<button data-agent-id="${Number(item.agent_id)}">${escapeHtml(item.name || "Agent")}</button>`
+    ).join("");
+    document.querySelectorAll("[data-agent-id]").forEach(button => button.addEventListener("click", () => openAgent(Number(button.dataset.agentId))));
+    $("mobile-new")?.addEventListener("click", newAgent);
+  }
+
+  async function loadAgents(selectNewest=false) {
+    try {
+      const result = await api("/customer/employee-builder/employees");
+      authenticated = true;
+      $("session-state").textContent = "Workspace connected";
+      const items = result.employees || [];
+      if (selectNewest && !selectedAgentId && items.length) selectedAgentId = Number(items[0].agent_id);
+      renderAgents(items);
+      return items;
+    } catch (err) {
+      if (err.status === 401) {
+        authenticated = false;
+        $("session-state").textContent = "Sign in to build";
+        renderAgents([]);
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  function renderInspector(employee) {
+    const journey = employee?.builder_journey || {};
+    const stages = Array.isArray(journey.stages) ? journey.stages : [];
+    const actions = Array.isArray(journey.next_actions) ? journey.next_actions : [];
+    const stageMarkup = stages.map(stage => `
+      <div class="step ${escapeHtml(stage.status || "")}">
+        <div class="dot">${stage.status === "complete" ? "✓" : "•"}</div>
+        <div><strong>${escapeHtml(stage.label || stage.id || "Step")}</strong><div class="muted">${escapeHtml(stage.detail || "")}</div></div>
+      </div>`).join("");
+    const actionMarkup = actions.map(action => `
+      <button class="setup-action" data-next-action="${escapeHtml(action.type || "")}">
+        ${escapeHtml(action.label || "كمّل الإعداد")}
+      </button>`).join("");
+    $("inspector").innerHTML = `
+      <div class="panel">
+        <h3>${employee?.enabled ? "Live" : "Build status"}</h3>
+        <div class="muted">${employee?.enabled ? "الموظف شغال. فيك تعدله من نفس الشات." : "Xvond عم يبني فقط الأشياء المطلوبة لهالموظف."}</div>
+      </div>
+      <div class="panel"><h3>Progress</h3>${stageMarkup || '<div class="muted">عم نحضر خطة البناء...</div>'}</div>
+      ${actions.length ? '<div class="panel"><h3>مطلوب منك فقط</h3>'+actionMarkup+'</div>' : ''}
+      <div class="panel"><h3>Preview</h3><div class="muted">الـPreview والاختبار يتجهزوا حسب نوع الـAgent بعد اكتمال الأشياء الضرورية.</div></div>`;
+    document.querySelectorAll("[data-next-action]").forEach(button => {
+      button.addEventListener("click", () => {
+        const type = button.dataset.nextAction || "";
+        if (type === "build_employee") buildSelected();
+        else window.location.href = "/customer-ui?employee_id=" + Number(employee.agent_id) + "#employee-builder";
+      });
+    });
+  }
+
+  async function openAgent(agentId) {
+    selectedAgentId = Number(agentId);
+    setBusy(true, "عم نفتح...");
+    try {
+      const result = await api("/customer/employee-builder/current?agent_id=" + encodeURIComponent(selectedAgentId));
+      selectedEmployee = result.employee;
+      if (!selectedEmployee) return newAgent();
+      $("project-title").textContent = selectedEmployee.name || "AI Agent";
+      $("project-meta").textContent = selectedEmployee.enabled ? "Live agent" : "Draft agent";
+      $("chat").innerHTML = "";
+      addMessage("user", escapeHtml(selectedEmployee.description || ""));
+      addMessage("system", "<strong>Xvond</strong><br>" + (selectedEmployee.compiled
+        ? "الموظف مبني. اكتب أي تعديل تحت وأنا بحدث نفس الـAgent."
+        : "الطلب محفوظ. عم نكمل بناء الـAgent."));
+      renderInspector(selectedEmployee);
+      $("composer-hint").textContent = "أي رسالة جديدة هون تعدّل نفس الـAgent، مثل Replit.";
+      await loadAgents(false);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function buildSelected() {
+    if (!selectedAgentId) return;
+    setBusy(true, "عم نبني...");
+    const log = addMessage("system", "<strong>Xvond</strong><br>عم أفهم الوظيفة، أبني القدرات والـworkflows، وأحدد شو لازم يتركب أو ينربط...");
+    try {
+      await api("/customer/employee-builder/" + selectedAgentId + "/compile", {method:"POST"});
+      log.innerHTML = "<strong>Xvond</strong><br>تم بناء النسخة الأولى. هلق عم بعرض فقط الأشياء الضرورية لهالـAgent.";
+      await openAgent(selectedAgentId);
+    } catch (err) {
+      log.innerHTML = "<strong>تعذر البناء:</strong><br>" + escapeHtml(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createAgent(description) {
+    setBusy(true, "عم نبني...");
+    $("composer-error").textContent = "";
+    addMessage("user", escapeHtml(description));
+    const log = addMessage("system", "<strong>Xvond</strong><br>عم أبدأ Agent جديد وأحوّل طلبك إلى موظف قابل للتنفيذ...");
+    try {
+      const created = await api("/customer/employee-builder/create", {
+        method:"POST",
+        body:JSON.stringify({description})
+      });
+      selectedAgentId = Number(created.agent_id);
+      log.innerHTML = "<strong>Xvond</strong><br>أنشأت مشروع الـAgent. عم أبني قدراته والـworkflows المطلوبة...";
+      await api("/customer/employee-builder/" + selectedAgentId + "/compile", {method:"POST"});
+      await loadAgents(false);
+      await openAgent(selectedAgentId);
+    } catch (err) {
+      log.innerHTML = "<strong>تعذر البناء:</strong><br>" + escapeHtml(err.message);
+      $("composer-error").textContent = err.message;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refineAgent(instruction) {
+    setBusy(true, "عم أعدّل...");
+    addMessage("user", escapeHtml(instruction));
+    const log = addMessage("system", "<strong>Xvond</strong><br>عم أطبّق التعديل على نفس الـAgent وأعيد بناء الجزء المتأثر...");
+    try {
+      await api("/customer/employee-builder/" + selectedAgentId + "/refine", {
+        method:"POST",
+        body:JSON.stringify({instruction})
+      });
+      log.innerHTML = "<strong>Xvond</strong><br>تم تطبيق التعديل.";
+      await openAgent(selectedAgentId);
+    } catch (err) {
+      log.innerHTML = "<strong>تعذر التعديل:</strong><br>" + escapeHtml(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitPrompt() {
+    if (busy) return;
+    const text = $("prompt").value.trim();
+    if (text.length < 2) return;
+    $("prompt").value = "";
+    if (!authenticated) {
+      pendingPrompt = text;
+      sessionStorage.setItem("xvond_pending_prompt", text);
+      $("auth-layer").classList.remove("hidden");
+      return;
+    }
+    if (selectedAgentId) await refineAgent(text);
+    else await createAgent(text);
   }
 
   async function login() {
     $("auth-error").textContent = "";
-    const response = await fetch("/auth/login", {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({email:$("login-email").value.trim(),password:$("login-password").value})
-    });
-    if (!response.ok) { $("auth-error").textContent = await detail(response); return; }
-    await createEmployee(false);
+    try {
+      await api("/auth/login", {
+        method:"POST",
+        body:JSON.stringify({email:$("login-email").value.trim(),password:$("login-password").value})
+      });
+      authenticated = true;
+      $("auth-layer").classList.add("hidden");
+      await loadAgents(false);
+      const text = pendingPrompt || sessionStorage.getItem("xvond_pending_prompt") || "";
+      pendingPrompt = "";
+      sessionStorage.removeItem("xvond_pending_prompt");
+      if (text) await createAgent(text);
+    } catch (err) {
+      $("auth-error").textContent = err.message;
+    }
   }
 
   async function signup() {
     $("auth-error").textContent = "";
-    const payload = {
-      full_name:$("signup-name").value.trim(),
-      workspace_name:$("signup-workspace").value.trim() || null,
-      email:$("signup-email").value.trim(),
-      password:$("signup-password").value
-    };
-    const response = await fetch("/auth/signup", {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(payload)
-    });
-    if (!response.ok) { $("auth-error").textContent = await detail(response); return; }
-    await createEmployee(false);
+    try {
+      await api("/auth/signup", {
+        method:"POST",
+        body:JSON.stringify({
+          full_name:$("signup-name").value.trim(),
+          workspace_name:$("signup-workspace").value.trim() || null,
+          email:$("signup-email").value.trim(),
+          password:$("signup-password").value
+        })
+      });
+      authenticated = true;
+      $("auth-layer").classList.add("hidden");
+      await loadAgents(false);
+      const text = pendingPrompt || sessionStorage.getItem("xvond_pending_prompt") || "";
+      pendingPrompt = "";
+      sessionStorage.removeItem("xvond_pending_prompt");
+      if (text) await createAgent(text);
+    } catch (err) {
+      $("auth-error").textContent = err.message;
+    }
   }
 
-  const saved = loadDraft();
-  if (saved?.description) {
-    $("description").value = saved.description;
-  }
-
-  $("create-btn").addEventListener("click", () => createEmployee(true));
-  $("login-btn").addEventListener("click", login);
-  $("signup-btn").addEventListener("click", signup);
+  $("send").addEventListener("click", submitPrompt);
+  $("prompt").addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submitPrompt();
+    }
+  });
+  $("new-agent").addEventListener("click", newAgent);
+  $("login").addEventListener("click", login);
+  $("signup").addEventListener("click", signup);
   $("login-tab").addEventListener("click", () => {
-    $("login-tab").classList.add("active");
-    $("signup-tab").classList.remove("active");
-    show("login-form", true);
-    show("signup-form", false);
+    $("login-tab").classList.add("active"); $("signup-tab").classList.remove("active");
+    $("login-form").classList.remove("hidden"); $("signup-form").classList.add("hidden");
   });
   $("signup-tab").addEventListener("click", () => {
-    $("signup-tab").classList.add("active");
-    $("login-tab").classList.remove("active");
-    show("signup-form", true);
-    show("login-form", false);
+    $("signup-tab").classList.add("active"); $("login-tab").classList.remove("active");
+    $("signup-form").classList.remove("hidden"); $("login-form").classList.add("hidden");
   });
+
+  wireExamples();
+  (async () => {
+    const params = new URLSearchParams(location.search);
+    const requested = Number(params.get("employee_id") || 0);
+    const items = await loadAgents(false);
+    if (requested && items.some(item => Number(item.agent_id) === requested)) await openAgent(requested);
+    else if (items.length) await openAgent(Number(items[0].agent_id));
+  })().catch(err => { $("composer-error").textContent = err.message || "تعذر فتح الـWorkspace."; });
 })();
 </script>
 </body>

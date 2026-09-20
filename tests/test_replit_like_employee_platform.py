@@ -82,3 +82,15 @@ def test_dynamic_setup_data_reprovisions_instead_of_only_being_saved():
     assert "provision_compiled_capabilities(" in setup
     assert 'builder["delivery"] = delivery' in setup
     assert "build_compiled_employee_system_prompt" in setup
+
+
+def test_self_service_workspace_supports_multiple_independent_agent_projects():
+    assert '@router.get("/employees")' in BUILDER
+    assert "if existing is not None and not is_self_service" in BUILDER
+    assert "enforce_capacity=(has_entitlement if not is_self_service else False)" in BUILDER
+    assert "/customer/employee-builder/employees" in (ROOT / "frontend" / "public" / "employee-builder.html").read_text(encoding="utf-8")
+    workspace = (ROOT / "frontend" / "public" / "employee-builder.html").read_text(encoding="utf-8")
+    assert "Agent جديد" in workspace
+    assert "selectedAgentId" in workspace
+    assert "موظفك الحالي شغال" not in workspace
+    assert "/refine" in workspace

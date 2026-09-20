@@ -67,6 +67,11 @@ class Settings:
     SELF_SERVICE_REQUIRE_SUBSCRIPTION = os.getenv(
         "SELF_SERVICE_REQUIRE_SUBSCRIPTION", "false"
     ).strip().lower() in {"1", "true", "yes", "on"}
+    # Current product experiment: Self-Service build/run is free. Billing stays
+    # in place for the future Credits rollout, but cannot block this experiment.
+    SELF_SERVICE_FREE_EXPERIMENT = os.getenv(
+        "SELF_SERVICE_FREE_EXPERIMENT", "true"
+    ).strip().lower() in {"1", "true", "yes", "on"}
     PADDLE_API_KEY = os.getenv("PADDLE_API_KEY", "").strip()
     PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
     PADDLE_CLIENT_TOKEN = os.getenv("PADDLE_CLIENT_TOKEN", "").strip()

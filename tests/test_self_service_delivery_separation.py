@@ -33,7 +33,7 @@ def test_self_service_allows_zero_channels_when_job_does_not_need_conversation()
 
 
 def test_self_service_ui_lets_xvond_infer_channels_and_integrations():
-    assert "القدرات والقنوات والـIntegrations اللازمة" in PUBLIC_BUILDER
+    assert "القدرات والقنوات والـIntegrations" in PUBLIC_BUILDER
     assert 'name="channel"' not in PUBLIC_BUILDER
     assert 'id="employee-name"' not in PUBLIC_BUILDER
     assert 'instagram: "إنستغرام"' not in PUBLIC_BUILDER
