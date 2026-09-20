@@ -648,7 +648,7 @@ def _self_service_employee_or_404(
     if not is_self_service_employee(company, config):
         raise HTTPException(
             409,
-            "This employee belongs to Xvond Managed delivery and must use the managed flow",
+            "Managed employees must use the Xvond Managed delivery flow",
         )
     return agent, config
 
@@ -658,19 +658,29 @@ def _agent_id_is_self_service(
     company: Company,
     agent_id: int,
 ) -> bool:
-    row = (
-        db.query(AIAgent, AgentConfig)
-        .join(AgentConfig, AgentConfig.agent_id == AIAgent.id)
+    agent = (
+        db.query(AIAgent)
         .filter(
             AIAgent.id == int(agent_id),
             AIAgent.company_id == company.id,
+        )
+        .first()
+    )
+    if agent is None:
+        return False
+    config = (
+        db.query(AgentConfig)
+        .filter(
+            AgentConfig.agent_id == agent.id,
             AgentConfig.agent_type == "employee",
         )
         .first()
     )
-    if row is None:
-        return False
-    _, config = row
+    # Legacy Self-Service records created before employee_builder delivery_mode
+    # existed inherit the company source. New mixed-delivery accounts always
+    # carry an explicit per-agent delivery_mode.
+    if config is None:
+        return is_self_service_company(company)
     return is_self_service_employee(company, config)
 
 
