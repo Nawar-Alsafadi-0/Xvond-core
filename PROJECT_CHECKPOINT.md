@@ -368,9 +368,9 @@ Production deploy additionally:
 
 ## Open-ended generalization gate
 
-Xvond has a live compiler acceptance gate at `scripts/generalization_acceptance.py`. It compiles a diverse set of unrelated Job Briefs through the same production AI Employee Compiler used by Self-Service, without creating or launching customer employees.
+Xvond has a live compiler acceptance gate at `scripts/generalization_acceptance.py`. It compiles a diverse set of unrelated Job Briefs through the same production AI Employee Compiler used by Self-Service, then exercises the real capability provisioner inside a rolled-back database savepoint without persisting or launching customer employees.
 
-The gate fails closed when a compiler result returns unsupported work, has no executable graph/routine, violates the execution-graph contract, or references an action without a matching requirement contract. This is a release-level check for the core product promise: Xvond composes novel digital work from generic primitives rather than predefined employee templates.
+The gate fails closed when a compiler result returns unsupported work, has no executable graph/routine, violates the execution-graph contract, references an action without a matching requirement contract, cannot provision a required action contract/workflow, or reports a setup block without an explicit external dependency. This is a release-level check for the core product promise: Xvond composes novel digital work from generic primitives rather than predefined employee templates.
 
 Unknown communication providers are not added as one-off channel types. The compiler receives the live channel registry; only registered Xvond communication surfaces remain `kind=channel`. A new provider name is normalized to a generic connected integration with messaging/workflow/webhook primitives and API discovery, so a future platform can be composed from its API/webhook contract without adding a provider-specific employee type. If no usable external contract can be found or connected, launch remains blocked truthfully instead of fabricating a working channel.
 
