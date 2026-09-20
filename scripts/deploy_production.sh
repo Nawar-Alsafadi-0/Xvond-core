@@ -12,6 +12,8 @@ MARKET_ACCEPTANCE_CHANNELS="${MARKET_ACCEPTANCE_CHANNELS:-}"
 MARKET_ACCEPTANCE_REQUIRE_AUTOMATION_RUN="${MARKET_ACCEPTANCE_REQUIRE_AUTOMATION_RUN:-false}"
 MARKET_ACCEPTANCE_REQUIRE_ONLINE_BILLING="${MARKET_ACCEPTANCE_REQUIRE_ONLINE_BILLING:-false}"
 MARKET_ACCEPTANCE_REQUIRE_PAYMENT_EVIDENCE="${MARKET_ACCEPTANCE_REQUIRE_PAYMENT_EVIDENCE:-false}"
+WORKFLOW_SYNC_MODE="${WORKFLOW_SYNC_MODE:-auto}"
+WORKFLOW_SYNC_MARKER="${WORKFLOW_SYNC_MARKER:-.git/xvond-workflow-sync-sha}"
 deployment_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 compose() {
@@ -98,6 +100,38 @@ fetch(url, {
   console.error(`Workflow contract probe failed: ${String(error && error.message || "unknown")}`);
   process.exit(1);
 });'
+}
+
+workflow_sync_required() {
+    case "$WORKFLOW_SYNC_MODE" in
+        force) return 0 ;;
+        skip|never) return 1 ;;
+        auto) ;;
+        *)
+            echo "Refusing production deploy: invalid WORKFLOW_SYNC_MODE '$WORKFLOW_SYNC_MODE' (use auto, force, or skip)" >&2
+            exit 1
+            ;;
+    esac
+
+    base_sha=""
+    if [ -f "$WORKFLOW_SYNC_MARKER" ]; then
+        base_sha="$(tr -d '[:space:]' < "$WORKFLOW_SYNC_MARKER")"
+    fi
+    if [ -z "$base_sha" ] || ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+        base_sha="$(git rev-parse ORIG_HEAD 2>/dev/null || true)"
+    fi
+    if [ -z "$base_sha" ] || ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+        echo "Workflow sync: no trustworthy previous release found; full sync required."
+        return 0
+    fi
+
+    if git diff --quiet "$base_sha" HEAD -- ops/n8n scripts/sync_workflow_engine.sh; then
+        echo "Workflow sync: no workflow definitions changed since $base_sha; skipping import/publish."
+        return 1
+    fi
+
+    echo "Workflow sync: workflow definitions changed since $base_sha; full sync required."
+    return 0
 }
 
 probe_workflow_to_app_health() {
@@ -245,7 +279,11 @@ fi
 if [ "$workflow_enabled" = "true" ]; then
     docker compose -f "$COMPOSE_FILE" --profile workflow up -d workflow-postgres
     wait_healthy xvond-workflow-postgres
-    COMPOSE_FILE="$COMPOSE_FILE" sh scripts/sync_workflow_engine.sh
+    if workflow_sync_required; then
+        COMPOSE_FILE="$COMPOSE_FILE" sh scripts/sync_workflow_engine.sh
+    else
+        docker compose -f "$COMPOSE_FILE" --profile workflow up -d workflow-registry workflow-engine
+    fi
     wait_healthy xvond-workflow-engine
     probe_workflow_contract
 fi
@@ -337,9 +375,14 @@ if [ -n "$MARKET_ACCEPTANCE_MODE" ]; then
     compose exec -T app "$@"
 fi
 
+if [ "$workflow_enabled" = "true" ]; then
+    printf '%s\n' "$release_sha" > "$WORKFLOW_SYNC_MARKER"
+fi
+
 printf 'Xvond release complete: %s\n' "$release_sha"
 printf 'API image: %s\n' "$app_image"
 printf 'WhatsApp worker image: %s\n' "$worker_image"
 printf 'Automation scheduler image: %s\n' "$scheduler_image"
 printf 'Workflow engine enabled: %s\n' "$workflow_enabled"
+printf 'Workflow sync mode: %s\n' "$WORKFLOW_SYNC_MODE"
 printf 'Public Core origin: %s\n' "$public_base_url"
