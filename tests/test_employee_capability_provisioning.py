@@ -4731,3 +4731,99 @@ def test_external_action_exposes_declared_header_parameters_as_fields():
     assert fields["X-Workspace-ID"]["required"] is True
     assert fields["X-Region"]["required"] is False
     assert fields["name"]["required"] is True
+
+def test_bound_api_operation_resolution_reaches_nested_repeat_graph():
+    spec = {
+        "execution_graph": {
+            "version": 1,
+            "trigger": {"type": "manual"},
+            "nodes": [{
+                "id": "pages",
+                "type": "repeat",
+                "params": {
+                    "max_iterations": 5,
+                    "until": {"path": "graph_last.done", "operator": "eq", "value": True},
+                    "graph": {
+                        "version": 1,
+                        "nodes": [{
+                            "id": "list_records",
+                            "type": "action",
+                            "params": {"action_type": "records"},
+                        }],
+                    },
+                },
+            }],
+        }
+    }
+
+    resolved, unresolved = api._resolve_bound_graph_operations(
+        spec,
+        requirement_key="records",
+        operations={
+            "list_records": {
+                "method": "GET",
+                "endpoint": "/records",
+                "description": "List records",
+            },
+            "delete_record": {
+                "method": "DELETE",
+                "endpoint": "/records/{record_id}",
+                "description": "Delete record",
+            },
+        },
+    )
+
+    assert unresolved == []
+    nested = resolved["execution_graph"]["nodes"][0]["params"]["graph"]
+    assert nested["nodes"][0]["params"]["operation"] == "list_records"
+
+
+def test_repeat_graph_selected_operation_can_become_direct_default():
+    action = build_managed_action_config(
+        requirement={
+            "key": "records",
+            "kind": "integration",
+            "purpose": "Read records page by page",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 97,
+            "integration_operations": {
+                "list_records": {
+                    "method": "GET",
+                    "endpoint": "/records",
+                    "input_mode": "query",
+                },
+                "delete_record": {
+                    "method": "DELETE",
+                    "endpoint": "/records/{record_id}",
+                    "input_mode": "query",
+                },
+            },
+        },
+        spec={
+            "permissions": [],
+            "execution_graph": {
+                "version": 1,
+                "nodes": [{
+                    "id": "pages",
+                    "type": "repeat",
+                    "params": {
+                        "max_iterations": 5,
+                        "until": {"path": "graph_last.done", "operator": "eq", "value": True},
+                        "graph": {
+                            "version": 1,
+                            "nodes": [{
+                                "id": "list",
+                                "type": "action",
+                                "params": {
+                                    "action_type": "records",
+                                    "operation": "list_records",
+                                },
+                            }],
+                        },
+                    },
+                }],
+            },
+        },
+    )
+
+    assert action["destination"]["default_operation"] == "list_records"

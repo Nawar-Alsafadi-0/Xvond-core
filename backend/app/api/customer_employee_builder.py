@@ -3292,7 +3292,7 @@ def _resolve_bound_graph_operations(
                         "label": str(raw.get("label") or "")[:200],
                         "available_operations": sorted(available),
                     })
-            elif node_type == "foreach":
+            elif node_type in {"foreach", "repeat"}:
                 nested = params.get("graph")
                 if isinstance(nested, dict):
                     visit(nested, prefix=locator)
@@ -6259,7 +6259,7 @@ def _run_failure_detail(run: AutomationRun | None) -> dict | None:
         node_id = failed_span.get("node_id")
         if not node_id and error:
             match = re.search(
-                r"Execution graph (?:foreach )?node ([A-Za-z0-9_.:-]+)",
+                r"Execution graph (?:(?:foreach|repeat) )?node ([A-Za-z0-9_.:-]+)",
                 error,
             )
             if match:
@@ -6275,7 +6275,7 @@ def _run_failure_detail(run: AutomationRun | None) -> dict | None:
 
     error = str(run.error_message or "")
     match = re.search(
-        r"Execution graph (?:foreach )?node ([A-Za-z0-9_.:-]+)",
+        r"Execution graph (?:(?:foreach|repeat) )?node ([A-Za-z0-9_.:-]+)",
         error,
     )
     return {
