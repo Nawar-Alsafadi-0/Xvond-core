@@ -140,3 +140,89 @@ def exchange_authorization_code(
         "scope": payload.get("scope"),
         "token_type": "Bearer",
     }
+
+
+def oauth_token_timing(expires_in, *, now_epoch: int | None = None) -> dict:
+    """Return bounded token timing metadata without trusting provider types."""
+    now = int(time.time() if now_epoch is None else now_epoch)
+    result = {"obtained_at": now}
+    if expires_in in (None, ""):
+        return result
+    try:
+        seconds = int(float(expires_in))
+    except (TypeError, ValueError):
+        return result
+    if seconds > 0:
+        result["expires_at"] = now + min(seconds, 315_360_000)
+    return result
+
+
+def oauth_access_token_needs_refresh(
+    oauth_config: dict | None,
+    *,
+    now_epoch: int | None = None,
+    skew_seconds: int = 60,
+) -> bool:
+    value = oauth_config or {}
+    if str(value.get("flow") or "") != "authorization_code":
+        return False
+    expires_at = value.get("expires_at")
+    if expires_at in (None, ""):
+        return False
+    try:
+        expiry = int(float(expires_at))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("OAuth token expiry metadata is invalid") from exc
+    now = int(time.time() if now_epoch is None else now_epoch)
+    return expiry <= now + max(0, int(skew_seconds))
+
+
+def refresh_oauth_access_token(oauth_config: dict) -> dict:
+    """Refresh a provider-neutral OAuth authorization-code access token."""
+    value = oauth_config or {}
+    if str(value.get("flow") or "") != "authorization_code":
+        raise ValueError("OAuth refresh is available only for authorization-code connections")
+    token_url = validate_public_http_url(str(value.get("token_url") or ""))
+    if not token_url.startswith("https://"):
+        raise ValueError("OAuth token endpoint must use HTTPS")
+    refresh_token = str(value.get("refresh_token") or "").strip()
+    client_id = str(value.get("client_id") or "").strip()
+    client_secret = str(value.get("client_secret") or "")
+    if not refresh_token:
+        raise ValueError("OAuth refresh token is missing")
+    if not client_id or not client_secret:
+        raise ValueError("OAuth client credentials are missing")
+
+    result = safe_http_request(
+        url=token_url,
+        method="POST",
+        headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
+        form_data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+        timeout=15,
+        max_response_bytes=64_000,
+    )
+    status = int(result.get("status_code") or 0)
+    if not 200 <= status < 300:
+        raise ValueError(f"OAuth refresh endpoint returned HTTP {status}")
+    try:
+        payload = json.loads(str(result.get("response") or ""))
+    except json.JSONDecodeError as exc:
+        raise ValueError("OAuth refresh response is not valid JSON") from exc
+    access_token = str(payload.get("access_token") or "").strip()
+    if not access_token:
+        raise ValueError("OAuth refresh response has no access_token")
+    if str(payload.get("token_type") or "Bearer").lower() != "bearer":
+        raise ValueError("Only Bearer OAuth access tokens are supported")
+    new_refresh_token = str(payload.get("refresh_token") or "").strip() or refresh_token
+    return {
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "expires_in": payload.get("expires_in"),
+        "scope": payload.get("scope"),
+        "token_type": "Bearer",
+    }
