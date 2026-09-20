@@ -153,6 +153,15 @@ def test_market_gate_rejects_non_packaged_channel_as_launch_requirement(
         "_billing_gate",
         lambda *args, **kwargs: {"ok": True},
     )
+    real_capability = gate.get_channel_capability
+
+    def non_packaged_teams(channel_type):
+        capability = real_capability(channel_type)
+        if channel_type == "teams" and capability is not None:
+            return {**capability, "packaged_provider": False}
+        return capability
+
+    monkeypatch.setattr(gate, "get_channel_capability", non_packaged_teams)
     with launch_database() as db:
         db.add(
             AgentChannel(

@@ -217,9 +217,8 @@ def test_managed_channels_share_one_xvond_runtime_adapter_but_provider_packaging
         assert capability["runtime_state"] == CHANNEL_RUNTIME_LIVE
         assert capability["setup_mode"] == CHANNEL_SETUP_MANAGED
 
-    for key in ("telegram", "instagram", "messenger", "email", "slack", "sms", "custom"):
+    for key in ("telegram", "instagram", "messenger", "email", "slack", "sms", "teams", "custom"):
         assert get_channel_capability(key)["packaged_provider"] is True
-    assert get_channel_capability("teams")["packaged_provider"] is False
 
 
 def test_managed_gateway_channel_requires_connected_provisioning():
