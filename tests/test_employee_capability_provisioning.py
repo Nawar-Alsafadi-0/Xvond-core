@@ -4518,3 +4518,158 @@ def test_external_action_exposes_declared_form_fields():
     assert fields["username"]["type"] == "text"
     assert fields["remember"]["required"] is False
     assert fields["remember"]["type"] == "boolean"
+
+def test_external_booking_uses_provider_declared_fields_instead_of_fixed_booking_shape():
+    action = build_managed_action_config(
+        requirement={
+            "key": "booking",
+            "kind": "integration",
+            "purpose": "Create appointments in the clinic system",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 97,
+            "validation_required": True,
+            "integration_operations": {
+                "execute": {
+                    "method": "POST",
+                    "endpoint": "/appointments",
+                    "input_mode": "json",
+                    "required_json_fields": [
+                        "patient_id",
+                        "service_id",
+                        "starts_at",
+                    ],
+                    "json_fields": [
+                        {
+                            "key": "patient_id",
+                            "required": True,
+                            "type": "string",
+                        },
+                        {
+                            "key": "service_id",
+                            "required": True,
+                            "type": "integer",
+                        },
+                        {
+                            "key": "starts_at",
+                            "required": True,
+                            "type": "string",
+                            "format": "date-time",
+                        },
+                        {
+                            "key": "note",
+                            "required": False,
+                            "type": "string",
+                        },
+                    ],
+                }
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    fields = {item["key"]: item for item in action["fields"]}
+    assert set(fields) == {"patient_id", "service_id", "starts_at", "note"}
+    assert fields["patient_id"]["required"] is True
+    assert fields["service_id"]["type"] == "number"
+    assert fields["note"]["required"] is False
+    assert "customer_name" not in fields
+    assert "phone" not in fields
+    assert "date" not in fields
+    assert action["availability"] == {"mode": "none"}
+
+
+def test_external_booking_unions_declared_availability_inputs_with_execute_inputs():
+    action = build_managed_action_config(
+        requirement={
+            "key": "booking",
+            "kind": "integration",
+            "purpose": "Find slots and create appointments",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 98,
+            "validation_required": True,
+            "integration_operations": {
+                "availability": {
+                    "method": "POST",
+                    "endpoint": "/slots/search",
+                    "input_mode": "json",
+                    "required_json_fields": ["appointment_date", "service_id"],
+                    "json_fields": [
+                        {
+                            "key": "appointment_date",
+                            "required": True,
+                            "type": "string",
+                            "format": "date",
+                        },
+                        {
+                            "key": "service_id",
+                            "required": True,
+                            "type": "integer",
+                        },
+                    ],
+                },
+                "execute": {
+                    "method": "POST",
+                    "endpoint": "/appointments",
+                    "input_mode": "json",
+                    "required_json_fields": ["slot_id", "patient_id"],
+                    "json_fields": [
+                        {
+                            "key": "slot_id",
+                            "required": True,
+                            "type": "string",
+                        },
+                        {
+                            "key": "patient_id",
+                            "required": True,
+                            "type": "string",
+                        },
+                    ],
+                },
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    fields = {item["key"]: item for item in action["fields"]}
+    assert set(fields) == {
+        "slot_id",
+        "patient_id",
+        "appointment_date",
+        "service_id",
+    }
+    assert fields["appointment_date"]["type"] == "date"
+    assert action["availability"]["mode"] == "integration"
+    assert action["availability"]["date_field"] == "appointment_date"
+
+
+def test_packaged_calendar_booking_keeps_xvond_semantic_booking_fields():
+    action = build_managed_action_config(
+        requirement={
+            "key": "booking",
+            "kind": "integration",
+            "purpose": "Book appointments on Google Calendar",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 99,
+            "validation_required": True,
+            "integration_operations": {
+                "availability": {"adapter": "google_calendar"},
+                "execute": {"adapter": "google_calendar"},
+                "cancel": {"adapter": "google_calendar"},
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    assert [item["key"] for item in action["fields"]] == [
+        "customer_name",
+        "phone",
+        "service",
+        "date",
+        "time",
+        "notes",
+    ]
+    assert action["availability"] == {
+        "mode": "integration",
+        "date_field": "date",
+        "time_field": "time",
+    }

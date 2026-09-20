@@ -309,64 +309,71 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
         if default_operation and isinstance(operations.get(default_operation), dict)
         else {}
     )
-    if execute_operation and key != "booking":
-        seen_fields: set[str] = set()
+    seen_fields: set[str] = set()
 
-        def add_field(
-            raw_key,
-            *,
-            required: bool = True,
-            raw_type: str = "string",
-            raw_format: str = "",
-        ) -> None:
-            field_key = str(raw_key or "").strip()
-            if (
-                not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}", field_key)
-                or field_key in seen_fields
-            ):
-                return
-            field_type = "text"
-            value_type = str(raw_type or "").strip().lower()
-            value_format = str(raw_format or "").strip().lower()
-            if value_format == "email":
-                field_type = "email"
-            elif value_format in {"date"}:
-                field_type = "date"
-            elif value_format in {"time"}:
-                field_type = "time"
-            elif value_format in {"phone", "tel"}:
-                field_type = "phone"
-            elif value_type in {"integer", "number"}:
-                field_type = "number"
-            elif value_type == "boolean":
-                field_type = "boolean"
-            fields.append({
-                "key": field_key,
-                "label": re.sub(r"[_.-]+", " ", field_key).strip().title(),
-                "required": required,
-                "type": field_type,
-            })
-            seen_fields.add(field_key)
+    def add_field(
+        raw_key,
+        *,
+        required: bool = True,
+        raw_type: str = "string",
+        raw_format: str = "",
+    ) -> None:
+        field_key = str(raw_key or "").strip()
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}", field_key)
+            or field_key in seen_fields
+        ):
+            return
+        field_type = "text"
+        value_type = str(raw_type or "").strip().lower()
+        value_format = str(raw_format or "").strip().lower()
+        if value_format == "email":
+            field_type = "email"
+        elif value_format == "date":
+            field_type = "date"
+        elif value_format == "time":
+            field_type = "time"
+        elif value_format in {"phone", "tel"}:
+            field_type = "phone"
+        elif value_type in {"integer", "number"}:
+            field_type = "number"
+        elif value_type == "boolean":
+            field_type = "boolean"
+        fields.append({
+            "key": field_key,
+            "label": re.sub(r"[_.-]+", " ", field_key).strip().title(),
+            "required": required,
+            "type": field_type,
+        })
+        seen_fields.add(field_key)
 
-        for raw_key in execute_operation.get("path_params") or []:
+    def add_operation_fields(operation: dict) -> None:
+        if not isinstance(operation, dict):
+            return
+        for raw_key in operation.get("path_params") or []:
             add_field(raw_key, required=True)
+
         required_query_keys = {
             str(item or "").strip()
-            for item in (execute_operation.get("required_query_params") or [])
+            for item in (operation.get("required_query_params") or [])
             if str(item or "").strip()
         }
         declared_query_keys = {
             str(item or "").strip()
-            for item in (execute_operation.get("query_params") or [])
+            for item in (operation.get("query_params") or [])
             if str(item or "").strip()
         }
-        for raw_key in execute_operation.get("query_params") or []:
-            add_field(raw_key, required=str(raw_key or "").strip() in required_query_keys)
-        for raw_key in execute_operation.get("required_query_params") or []:
+        for raw_key in operation.get("query_params") or []:
+            add_field(
+                raw_key,
+                required=str(raw_key or "").strip() in required_query_keys,
+            )
+        for raw_key in operation.get("required_query_params") or []:
             if str(raw_key or "").strip() not in declared_query_keys:
                 add_field(raw_key, required=True)
+
         json_field_keys: set[str] = set()
-        for raw_field in execute_operation.get("json_fields") or []:
+        for raw_field in operation.get("json_fields") or []:
             if not isinstance(raw_field, dict):
                 continue
             raw_key = str(raw_field.get("key") or "").strip()
@@ -379,12 +386,12 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
                 raw_type=str(raw_field.get("type") or "string"),
                 raw_format=str(raw_field.get("format") or ""),
             )
-        for raw_key in execute_operation.get("required_json_fields") or []:
+        for raw_key in operation.get("required_json_fields") or []:
             if str(raw_key or "").strip() not in json_field_keys:
                 add_field(raw_key, required=True)
 
         form_field_keys: set[str] = set()
-        for raw_field in execute_operation.get("form_fields") or []:
+        for raw_field in operation.get("form_fields") or []:
             if not isinstance(raw_field, dict):
                 continue
             raw_key = str(raw_field.get("key") or "").strip()
@@ -397,25 +404,62 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
                 raw_type=str(raw_field.get("type") or "string"),
                 raw_format=str(raw_field.get("format") or ""),
             )
-        for raw_key in execute_operation.get("required_form_fields") or []:
+        for raw_key in operation.get("required_form_fields") or []:
             if str(raw_key or "").strip() not in form_field_keys:
                 add_field(raw_key, required=True)
 
+    if execute_operation:
+        add_operation_fields(execute_operation)
+
     if key == "booking":
-        fields = [
-            {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
-            {"key": "phone", "label": "Phone", "required": True, "type": "phone"},
-            {"key": "service", "label": "Service", "required": True, "type": "text"},
-            {"key": "date", "label": "Date", "required": True, "type": "date", "role": "date"},
-            {"key": "time", "label": "Time", "required": True, "type": "time", "role": "time"},
-            {"key": "notes", "label": "Notes", "required": False, "type": "text"},
-        ]
-        if isinstance(operations.get("availability"), dict):
-            availability = {
-                "mode": "integration",
-                "date_field": "date",
-                "time_field": "time",
-            }
+        availability_operation = (
+            operations.get("availability")
+            if isinstance(operations.get("availability"), dict)
+            else {}
+        )
+        if availability_operation:
+            add_operation_fields(availability_operation)
+            availability = {"mode": "integration"}
+
+        # Packaged calendar connectors intentionally have no HTTP request schema.
+        # Keep Xvond's semantic booking fields only for those schema-less
+        # connectors; imported/custom booking APIs use their exact provider
+        # contract instead of being forced into customer_name/date/time.
+        if not fields:
+            fields = [
+                {"key": "customer_name", "label": "Customer name", "required": True, "type": "text"},
+                {"key": "phone", "label": "Phone", "required": True, "type": "phone"},
+                {"key": "service", "label": "Service", "required": True, "type": "text"},
+                {"key": "date", "label": "Date", "required": True, "type": "date", "role": "date"},
+                {"key": "time", "label": "Time", "required": True, "type": "time", "role": "time"},
+                {"key": "notes", "label": "Notes", "required": False, "type": "text"},
+            ]
+            if availability_operation:
+                availability.update({
+                    "date_field": "date",
+                    "time_field": "time",
+                })
+        elif availability_operation:
+            date_field = next(
+                (
+                    field["key"]
+                    for field in fields
+                    if field.get("type") == "date"
+                ),
+                None,
+            )
+            time_field = next(
+                (
+                    field["key"]
+                    for field in fields
+                    if field.get("type") == "time"
+                ),
+                None,
+            )
+            if date_field:
+                availability["date_field"] = date_field
+            if time_field:
+                availability["time_field"] = time_field
 
     module_map = {
         "booking": "booking",
