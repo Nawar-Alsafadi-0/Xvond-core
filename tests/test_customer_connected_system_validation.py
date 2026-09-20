@@ -985,3 +985,84 @@ def test_generic_api_query_request_sends_only_declared_contract_parameters(
     assert "ai_response" not in captured["url"]
     assert "secret_context" not in captured["url"]
     assert captured["json_data"] is None
+
+def test_connected_api_response_contract_parses_json_and_preserves_text():
+    assert action_runtime._integration_response_value(
+        {"response": '{"id":"abc","items":[1,2]}', "truncated": False}
+    ) == {"id": "abc", "items": [1, 2]}
+    assert action_runtime._integration_response_value(
+        {"response": "provider accepted request", "truncated": False}
+    ) == "provider accepted request"
+    assert action_runtime._integration_response_value(
+        {"response": '{"id":"partial"', "truncated": True}
+    ) == '{"id":"partial"'
+
+
+def test_connected_api_runtime_exposes_structured_provider_response(
+    connected_database,
+    monkeypatch,
+):
+    factory = connected_database
+    with factory() as db:
+        integration = db.get(CompanyIntegration, 11)
+        integration.config = {
+            "base_url": "https://api.example.com",
+            "validation_endpoint": "/me",
+            "operations": {
+                "execute": {
+                    "method": "POST",
+                    "endpoint": "/records",
+                    "input_mode": "json",
+                    "required_json_fields": ["customer_name"],
+                }
+            },
+            "auth_type": "none",
+            "_xvond_validation": {
+                "validated": True,
+                "validated_at": "2026-09-20T00:00:00Z",
+            },
+        }
+        db.commit()
+
+    monkeypatch.setattr(action_runtime, "validate_public_http_url", lambda url: url)
+    captured = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status_code": 201,
+            "response": '{"id":"rec-42","state":"created"}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(action_runtime, "safe_http_request", fake_request)
+
+    with factory() as db:
+        result = action_runtime._integration_call(
+            db,
+            {"company_id": 7},
+            "records",
+            {
+                "destination": {
+                    "type": "integration",
+                    "integration_id": 11,
+                    "validation_required": True,
+                    "operations": {
+                        "execute": {
+                            "method": "POST",
+                            "endpoint": "/records",
+                            "input_mode": "json",
+                            "required_json_fields": ["customer_name"],
+                        }
+                    },
+                }
+            },
+            {"details": {"customer_name": "Test Customer"}},
+            "execute",
+            idempotency_key="response-contract-1",
+        )
+
+    assert result.success is True
+    assert result.data["status_code"] == 201
+    assert result.data["response"] == {"id": "rec-42", "state": "created"}
+    assert captured["max_response_bytes"] == action_runtime.MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS
