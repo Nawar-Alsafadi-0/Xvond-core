@@ -1806,3 +1806,51 @@ def test_compiler_preserves_connected_api_form_request_contract():
         "username",
         "remember",
     ]
+
+def test_compiler_preserves_root_json_array_request_contract():
+    spec = normalize_compiled_spec(
+        {
+            "role": "Batch employee",
+            "requirements": [
+                {
+                    "key": "batch_records",
+                    "kind": "integration",
+                    "purpose": "Create records in batches",
+                    "fulfillment_mode": "external_connection",
+                    "integration_operations": {
+                        "execute": {
+                            "method": "POST",
+                            "endpoint": "/records/batch",
+                            "input_mode": "json_array",
+                            "array_item_kind": "object",
+                            "array_max_items": 25,
+                            "required_array_item_fields": ["sku"],
+                            "array_item_fields": [
+                                {
+                                    "key": "sku",
+                                    "required": True,
+                                    "type": "string",
+                                },
+                                {
+                                    "key": "quantity",
+                                    "required": False,
+                                    "type": "integer",
+                                },
+                            ],
+                        }
+                    },
+                }
+            ],
+        },
+        job_brief="Create records in batches.",
+    )
+
+    operation = spec["requirements"][0]["integration_operations"]["execute"]
+    assert operation["input_mode"] == "json_array"
+    assert operation["array_item_kind"] == "object"
+    assert operation["array_max_items"] == 25
+    assert operation["required_array_item_fields"] == ["sku"]
+    assert [item["key"] for item in operation["array_item_fields"]] == [
+        "sku",
+        "quantity",
+    ]
