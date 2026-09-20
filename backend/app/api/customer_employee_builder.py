@@ -1697,12 +1697,16 @@ def _self_service_builder_journey(
                             {"key": "username", "label": "Username", "type": "text"},
                             {"key": "password", "label": "Password", "type": "password"},
                         ]
+                    oauth_interactive = False
                     elif auth_type == "oauth":
                         flows = [
                             item for item in (scheme.get("flows") or [])
                             if isinstance(item, dict)
                         ]
-                        if any(item.get("flow") == "client_credentials" for item in flows):
+                        oauth_interactive = any(
+                            item.get("flow") == "authorization_code" for item in flows
+                        )
+                        if oauth_interactive or any(item.get("flow") == "client_credentials" for item in flows):
                             fields = [
                                 {"key": "client_id", "label": "OAuth client ID", "type": "text"},
                                 {"key": "client_secret", "label": "OAuth client secret", "type": "password"},
@@ -1724,6 +1728,7 @@ def _self_service_builder_journey(
                                 "Provide only the missing credential so Xvond can validate and finish the connection."
                             ),
                             fields=fields,
+                            oauth_interactive=bool(auth_type == "oauth" and oauth_interactive),
                         )
                     )
                     continue
