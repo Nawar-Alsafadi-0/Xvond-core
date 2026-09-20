@@ -4482,3 +4482,137 @@ def test_graph_runtime_repeat_reports_limit_reached(monkeypatch):
     assert repeat["count"] == 2
     assert repeat["stopped"] is False
     assert repeat["limit_reached"] is True
+
+def test_nested_repeat_wait_resumes_without_replaying_completed_iterations(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    calls = {"fetch": 0}
+
+    monkeypatch.setattr(
+        automation_runtime_module.service_limits,
+        "record",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_request(**kwargs):
+        calls["fetch"] += 1
+        return {
+            "status_code": 200,
+            "response": '{"ok":true}',
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(automation_runtime_module, "safe_http_request", fake_request)
+
+    with Session(engine, autoflush=False) as db:
+        db.add(Company(
+            id=1,
+            name="Repeat Wait",
+            active=True,
+            lifecycle_status="live",
+            onboarding_source="self_service",
+        ))
+        db.add(AIAgent(
+            id=1,
+            company_id=1,
+            name="Paged worker",
+            system_prompt="Process pages with durable pauses.",
+            provider="mock",
+            model="mock",
+            enabled=True,
+        ))
+        db.flush()
+        db.add(AgentConfig(
+            agent_id=1,
+            agent_type="employee",
+            settings={},
+            capabilities={},
+            customer_controls={},
+        ))
+        workflow = AutomationWorkflow(
+            id=1,
+            company_id=1,
+            name="Repeat wait graph",
+            trigger_type="manual",
+            trigger_config={"_xvond_agent_id": 1},
+            steps=[{
+                "type": "graph",
+                "agent_id": 1,
+                "graph": {
+                    "version": 1,
+                    "nodes": [{
+                        "id": "pages",
+                        "type": "repeat",
+                        "params": {
+                            "max_iterations": 5,
+                            "until": {
+                                "path": "graph_last.done",
+                                "operator": "eq",
+                                "value": 1,
+                            },
+                            "graph": {
+                                "version": 1,
+                                "nodes": [
+                                    {
+                                        "id": "fetch",
+                                        "type": "http_get_json",
+                                        "params": {"url": "https://example.com/data"},
+                                    },
+                                    {
+                                        "id": "pause",
+                                        "type": "wait",
+                                        "depends_on": ["fetch"],
+                                        "params": {"duration": 1, "unit": "minutes"},
+                                    },
+                                    {
+                                        "id": "done",
+                                        "type": "transform",
+                                        "depends_on": ["pause"],
+                                        "params": {"values": {"done": "$index"}},
+                                    },
+                                ],
+                            },
+                        },
+                    }],
+                },
+            }],
+            enabled=True,
+        )
+        db.add(workflow)
+        db.commit()
+
+        runtime = automation_runtime_module.AutomationRuntime()
+        first = runtime.execute(
+            db=db,
+            company_id=1,
+            workflow=workflow,
+            input_data={"_xvond_execution_key": "repeat-wait-test"},
+        )
+        assert first.status == "waiting_time"
+        assert calls["fetch"] == 1
+
+        second = runtime.resume_wait(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=first,
+            now=first.resume_at,
+        )
+        assert second.status == "waiting_time"
+        assert calls["fetch"] == 2
+
+        finished = runtime.resume_wait(
+            db,
+            company_id=1,
+            workflow=workflow,
+            run=second,
+            now=second.resume_at,
+        )
+        assert finished.status == "success"
+        assert calls["fetch"] == 2
+        pages = finished.output_data["steps"][-1]["result"]["graph_outputs"]["pages"]
+        assert pages["count"] == 2
+        assert pages["stopped"] is True
+        assert pages["limit_reached"] is False
+
+    engine.dispose()
