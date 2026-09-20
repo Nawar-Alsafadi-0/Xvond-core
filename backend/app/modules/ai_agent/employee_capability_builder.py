@@ -359,6 +359,25 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
         for raw_key in operation.get("path_params") or []:
             add_field(raw_key, required=True)
 
+        required_header_keys = {
+            str(item or "").strip().lower()
+            for item in (operation.get("required_header_params") or [])
+            if str(item or "").strip()
+        }
+        declared_header_keys = {
+            str(item or "").strip().lower()
+            for item in (operation.get("header_params") or [])
+            if str(item or "").strip()
+        }
+        for raw_key in operation.get("header_params") or []:
+            add_field(
+                raw_key,
+                required=str(raw_key or "").strip().lower() in required_header_keys,
+            )
+        for raw_key in operation.get("required_header_params") or []:
+            if str(raw_key or "").strip().lower() not in declared_header_keys:
+                add_field(raw_key, required=True)
+
         required_query_keys = {
             str(item or "").strip()
             for item in (operation.get("required_query_params") or [])
