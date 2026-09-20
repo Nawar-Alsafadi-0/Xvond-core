@@ -4,6 +4,7 @@ from datetime import datetime
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from backend.app.api.admin_channels import _activation_blockers, _ensure_channels_module
@@ -13,12 +14,22 @@ from backend.app.core.config.settings import settings
 from backend.app.core.config_secrets import merge_config, reveal_config
 from backend.app.core.database.connection import SessionLocal
 from backend.app.core.dependencies import require_customer_manager
+from backend.app.core.execution_claims import execution_claims
 from backend.app.core.n8n_gateway import N8NGatewayError, n8n_gateway
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.audit.service import audit_service
 from backend.app.modules.channels.catalog import get_channel_capability
 from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.channels.instagram_oauth import (
+    InstagramOAuthError,
+    build_instagram_authorization_url,
+    exchange_instagram_code,
+    instagram_oauth_ready,
+    issue_instagram_oauth_state,
+    subscribe_instagram_messaging,
+    verify_instagram_oauth_state,
+)
 
 
 router = APIRouter(
@@ -57,6 +68,10 @@ class MetaChannelAction(BaseModel):
     channel_type: str
 
 
+class InstagramOAuthStart(BaseModel):
+    agent_id: int
+
+
 def _normalize_channel_type(value: str) -> str:
     channel_type = str(value or "").strip().lower()
     if channel_type not in META_CUSTOMER_CHANNELS:
@@ -92,9 +107,13 @@ def _customer_channel(db, current_user: User, *, agent_id: int, channel_type: st
     return agent, channel, capability
 
 
-def _meta_connect_settings() -> dict:
+def _meta_connect_settings(channel_type: str) -> dict:
     config = _meta_settings()
-    missing = [key for key in ("app_id", "app_secret") if not config.get(key)]
+    config["messenger_config_id"] = str(settings.META_MESSENGER_CONFIG_ID or "").strip()
+    required = ["app_id", "app_secret"]
+    if channel_type == "messenger":
+        required.append("messenger_config_id")
+    missing = [key for key in required if not config.get(key)]
     return {
         "ready": not missing and n8n_gateway.configured() and bool(settings.WORKFLOW_PUBLIC_URL),
         "missing": missing,
@@ -190,6 +209,226 @@ def _subscribe_asset(*, sender_id: str, access_token: str, config: dict) -> None
         raise HTTPException(502, "Meta did not confirm messaging webhook subscription")
 
 
+def _instagram_portal_redirect(status: str) -> str:
+    import urllib.parse
+
+    configured = str(settings.META_INSTAGRAM_REDIRECT_URI or "").strip()
+    parsed = urllib.parse.urlparse(configured) if configured else None
+    if parsed and parsed.scheme and parsed.netloc:
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+    else:
+        origin = str(settings.PUBLIC_BASE_URL or "").strip().rstrip("/")
+    suffix = f"/customer-ui?instagram_oauth={status}#channels"
+    return f"{origin.rstrip('/')}{suffix}" if origin else suffix
+
+
+def _instagram_manager_from_state(db, payload: dict) -> User:
+    user = db.query(User).filter(User.id == int(payload.get("user_id") or 0)).first()
+    company_id = int(payload.get("company_id") or 0)
+    if (
+        user is None
+        or not user.active
+        or user.role not in {"owner", "admin", "manager"}
+        or int(user.company_id or 0) != company_id
+    ):
+        raise HTTPException(403, "Instagram connection session is no longer authorized")
+    return user
+
+
+def _provision_direct_instagram(
+    db,
+    *,
+    user: User,
+    agent_id: int,
+    sender_id: str,
+    username: str,
+    access_token: str,
+) -> None:
+    agent, channel, capability = _customer_channel(
+        db,
+        user,
+        agent_id=agent_id,
+        channel_type="instagram",
+    )
+    channel = (
+        db.query(AgentChannel)
+        .filter(AgentChannel.id == channel.id)
+        .with_for_update()
+        .first()
+    )
+    if channel.enabled:
+        raise HTTPException(409, "Deactivate this channel before changing its Instagram connection")
+
+    current = reveal_config(channel.config) or {}
+    connection_key = str(current.get("connection_key") or "").strip() or secrets.token_urlsafe(24)
+    provider_secret = secrets.token_urlsafe(32)
+    provider_setup = capability.get("provider_setup") or {}
+    provider_path = str(provider_setup.get("provider_path") or "").strip()
+    if not provider_path:
+        raise HTTPException(503, "Xvond Instagram provider route is unavailable")
+
+    label = f"@{username}" if username else f"Instagram {sender_id}"
+    provider_config = {
+        "sender_id": sender_id,
+        "access_token": access_token,
+        "app_secret": settings.META_INSTAGRAM_APP_SECRET,
+        "graph_version": settings.META_GRAPH_API_VERSION,
+    }
+    try:
+        provisioned = n8n_gateway.provision_channel(
+            company_id=channel.company_id,
+            agent_id=channel.agent_id,
+            channel_id=channel.id,
+            channel_type="instagram",
+            connection_key=connection_key,
+            provider_type="meta",
+            provider_url=settings.WORKFLOW_PUBLIC_URL + provider_path,
+            provider_secret=provider_secret,
+            provider_config=provider_config,
+            provider_account_label=label,
+        )
+    except N8NGatewayError as exc:
+        raise HTTPException(502, "Xvond could not provision the Instagram channel") from exc
+    if provisioned.get("success") is not True:
+        raise HTTPException(502, "Xvond could not provision the Instagram channel")
+
+    try:
+        verified = n8n_gateway.execute(
+            company_id=channel.company_id,
+            agent_id=channel.agent_id,
+            action="channel.check",
+            data={
+                "channel_id": channel.id,
+                "channel_type": "instagram",
+                "connection_key": connection_key,
+            },
+        )
+    except N8NGatewayError as exc:
+        raise HTTPException(502, "Xvond could not verify the Instagram channel") from exc
+    verified_data = verified.get("data") if isinstance(verified.get("data"), dict) else {}
+    if verified.get("success") is not True or verified_data.get("configured") is not True:
+        raise HTTPException(409, "Instagram authorization succeeded but the Xvond route is not ready")
+
+    inbound_path = str(provider_setup.get("inbound_path") or "").strip()
+    channel.config = merge_config(
+        channel.config,
+        {
+            "connection_key": connection_key,
+            "provisioning_state": "connected",
+            "provisioning_error": None,
+            "registry_cleanup_state": "active",
+            "connection_method": "instagram_direct_oauth",
+            "provider_account_label": label,
+            "provider_inbound_url": (
+                settings.WORKFLOW_PUBLIC_URL + inbound_path if inbound_path else None
+            ),
+            "meta_page_id": None,
+            "meta_sender_id": sender_id,
+            "meta_connected_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        },
+    )
+    channel.enabled = False
+    _ensure_channels_module(db, channel.company_id)
+    audit_service.log(
+        db=db,
+        action="channel.instagram_direct_connected",
+        resource_type="channel",
+        resource_id=channel.id,
+        user_id=user.id,
+        company_id=channel.company_id,
+        details={
+            "agent_id": agent.id,
+            "channel_type": "instagram",
+            "provider_account_label": label,
+            "connection_method": "instagram_direct_oauth",
+        },
+    )
+    db.flush()
+    _activation_blockers(db, channel)
+
+
+@router.post("/instagram/oauth/start")
+def instagram_oauth_start(
+    data: InstagramOAuthStart,
+    current_user: User = Depends(require_customer_manager),
+):
+    if not instagram_oauth_ready() or not n8n_gateway.configured() or not settings.WORKFLOW_PUBLIC_URL:
+        raise HTTPException(503, "Direct Instagram Login is not configured")
+    db = SessionLocal()
+    try:
+        _agent, channel, _capability = _customer_channel(
+            db,
+            current_user,
+            agent_id=data.agent_id,
+            channel_type="instagram",
+        )
+        if channel.enabled:
+            raise HTTPException(409, "Deactivate this channel before changing its Instagram connection")
+        state = issue_instagram_oauth_state(
+            user_id=current_user.id,
+            company_id=current_user.company_id,
+            agent_id=data.agent_id,
+        )
+        return {
+            "authorization_url": build_instagram_authorization_url(state=state),
+            "expires_in": 600,
+        }
+    finally:
+        db.close()
+
+
+@router.get("/instagram/oauth/callback")
+def instagram_oauth_callback(
+    state: str,
+    code: str | None = None,
+    error: str | None = None,
+):
+    try:
+        oauth_state = verify_instagram_oauth_state(state)
+    except InstagramOAuthError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if error:
+        return RedirectResponse(_instagram_portal_redirect("cancelled"), status_code=303)
+    if not str(code or "").strip():
+        raise HTTPException(400, "Instagram authorization code is missing")
+
+    nonce = str(oauth_state.get("nonce") or "").strip()
+    if not execution_claims.claim(f"instagram_oauth:{nonce}", ttl_seconds=900):
+        raise HTTPException(409, "Instagram connection callback was already used")
+
+    try:
+        token = exchange_instagram_code(code=str(code).strip())
+        subscribe_instagram_messaging(
+            user_id=token["user_id"],
+            access_token=token["access_token"],
+        )
+    except InstagramOAuthError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+    db = SessionLocal()
+    try:
+        user = _instagram_manager_from_state(db, oauth_state)
+        _provision_direct_instagram(
+            db,
+            user=user,
+            agent_id=int(oauth_state["agent_id"]),
+            sender_id=str(token["user_id"]),
+            username=str(token.get("username") or ""),
+            access_token=str(token["access_token"]),
+        )
+        db.commit()
+        return RedirectResponse(_instagram_portal_redirect("connected"), status_code=303)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @router.get("/connect/config")
 def connect_config(
     agent_id: int,
@@ -205,7 +444,7 @@ def connect_config(
             agent_id=agent_id,
             channel_type=channel_type,
         )
-        config = _meta_connect_settings()
+        config = _meta_connect_settings(channel_type)
         return {
             "ready": config["ready"],
             "agent_id": agent_id,
@@ -214,6 +453,7 @@ def connect_config(
             "app_id": config["app_id"] if config["ready"] else None,
             "graph_api_version": config["graph_api_version"],
             "scopes": META_SCOPES[channel_type],
+            "config_id": config["messenger_config_id"] if channel_type == "messenger" else None,
             "missing_settings": config["missing"],
             "connected": str((reveal_config(channel.config) or {}).get("provisioning_state") or "").lower() == "connected",
         }

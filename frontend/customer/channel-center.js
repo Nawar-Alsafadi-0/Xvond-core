@@ -18,7 +18,8 @@ function xvondChannelCenterAction(agent, channel) {
         return `<button type="button" onclick="openCustomerMetaWhatsAppConnect(${Number(agent.id)})">${connected ? "Reconnect / Change number" : "Connect with Meta"}</button>`;
     }
     if (type === "instagram" || type === "messenger") {
-        return `<button type="button" onclick="openCustomerMetaChannelConnect(${Number(agent.id)},'${type}')">${connected ? "Reconnect / Change account" : "Connect with Meta"}</button>`;
+        const connectLabel = type === "instagram" ? "Connect Instagram" : "Connect with Meta";
+        return `<button type="button" onclick="openCustomerMetaChannelConnect(${Number(agent.id)},'${type}')">${connected ? "Reconnect / Change account" : connectLabel}</button>`;
     }
     if (type === "website") {
         return `<button type="button" onclick="openPage('agents',[...document.querySelectorAll('#portal-nav .nav-item')].find(x=>x.dataset.page==='agents')||null)">Manage Website Chat</button>`;
