@@ -370,16 +370,30 @@ def _compose_retry_graph_resume(
     }
     for raw_frame in reversed(list(lineage or [])):
         frame = raw_frame if isinstance(raw_frame, dict) else {}
-        checkpoint = {
-            "node_id": str(frame.get("node_id") or ""),
-            "node_outputs": deepcopy(frame.get("node_outputs") or {}),
-            "foreach": {
-                "loop_index": int(frame.get("loop_index") or 0),
-                "items_fingerprint": str(frame.get("items_fingerprint") or ""),
-                "completed_results": deepcopy(frame.get("completed_results") or []),
-                "child_resume": checkpoint,
-            },
-        }
+        frame_kind = str(frame.get("kind") or "foreach").strip().lower()
+        if frame_kind == "repeat":
+            checkpoint = {
+                "node_id": str(frame.get("node_id") or ""),
+                "node_outputs": deepcopy(frame.get("node_outputs") or {}),
+                "repeat": {
+                    "loop_index": int(frame.get("loop_index") or 0),
+                    "max_iterations": int(frame.get("max_iterations") or 0),
+                    "completed_results": deepcopy(frame.get("completed_results") or []),
+                    "previous_result": deepcopy(frame.get("previous_result")),
+                    "child_resume": checkpoint,
+                },
+            }
+        else:
+            checkpoint = {
+                "node_id": str(frame.get("node_id") or ""),
+                "node_outputs": deepcopy(frame.get("node_outputs") or {}),
+                "foreach": {
+                    "loop_index": int(frame.get("loop_index") or 0),
+                    "items_fingerprint": str(frame.get("items_fingerprint") or ""),
+                    "completed_results": deepcopy(frame.get("completed_results") or []),
+                    "child_resume": checkpoint,
+                },
+            }
     return checkpoint
 
 
@@ -2351,6 +2365,15 @@ class AutomationRuntime:
                         node_outputs=node_outputs,
                     )
                     params["graph"] = raw_params.get("graph") or {}
+                elif node_type == "repeat" and isinstance(raw_params, dict):
+                    params = dict(raw_params)
+                    params["initial"] = resolve_graph_value(
+                        raw_params.get("initial"),
+                        state=state,
+                        node_outputs=node_outputs,
+                    )
+                    params["graph"] = raw_params.get("graph") or {}
+                    params["until"] = deepcopy(raw_params.get("until"))
                 else:
                     params = resolve_graph_value(
                         raw_params,
@@ -3139,6 +3162,235 @@ class AutomationRuntime:
                     node_outputs[node_id] = {
                         "items": results,
                         "count": len(results),
+                    }
+                    continue
+                elif node_type == "repeat":
+                    try:
+                        max_iterations = int(params.get("max_iterations"))
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"Execution graph repeat node {node_id} requires integer max_iterations"
+                        ) from exc
+                    if max_iterations < 1 or max_iterations > 20:
+                        raise ValueError(
+                            f"Execution graph repeat node {node_id} max_iterations must be between 1 and 20"
+                        )
+                    until = params.get("until")
+                    if not isinstance(until, dict):
+                        raise ValueError(
+                            f"Execution graph repeat node {node_id} requires an until condition"
+                        )
+                    until_path = str(until.get("path") or "").strip()
+                    until_operator = str(until.get("operator") or "eq").strip().lower()
+                    if not until_path or len(until_path) > 300:
+                        raise ValueError(
+                            f"Execution graph repeat node {node_id} has an invalid until path"
+                        )
+                    if "value" not in until:
+                        raise ValueError(
+                            f"Execution graph repeat node {node_id} until condition requires value"
+                        )
+                    until_value = deepcopy(until.get("value"))
+
+                    nested_depth = int(state.get("_xvond_nested_graph_depth") or 0) + 1
+                    if nested_depth > MAX_NESTED_GRAPH_DEPTH:
+                        raise ValueError(
+                            f"Execution graph repeat node {node_id} exceeds nested depth "
+                            f"{MAX_NESTED_GRAPH_DEPTH}"
+                        )
+                    nested_graph = normalize_execution_graph(params.get("graph") or {})
+                    if not nested_graph.get("nodes"):
+                        raise ValueError(
+                            f"Execution graph repeat node {node_id} requires a nested graph"
+                        )
+
+                    repeat_resume = (
+                        node_resume.get("repeat")
+                        if isinstance(node_resume, dict)
+                        and isinstance(node_resume.get("repeat"), dict)
+                        else None
+                    )
+                    results = []
+                    start_index = 0
+                    previous_result = deepcopy(params.get("initial"))
+                    child_resume = None
+                    if repeat_resume is not None:
+                        try:
+                            saved_max = int(repeat_resume.get("max_iterations"))
+                            start_index = int(repeat_resume.get("loop_index"))
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError(
+                                f"Execution graph repeat node {node_id} has invalid resume state"
+                            ) from exc
+                        if saved_max != max_iterations:
+                            raise ValueError(
+                                f"Execution graph repeat node {node_id} max_iterations changed after checkpoint"
+                            )
+                        saved_results = repeat_resume.get("completed_results")
+                        if not isinstance(saved_results, list):
+                            raise ValueError(
+                                f"Execution graph repeat node {node_id} has invalid resume results"
+                            )
+                        if start_index < 0 or start_index >= max_iterations:
+                            raise ValueError(
+                                f"Execution graph repeat node {node_id} resume index is out of range"
+                            )
+                        if len(saved_results) != start_index:
+                            raise ValueError(
+                                f"Execution graph repeat node {node_id} resume results do not match its index"
+                            )
+                        results = deepcopy(saved_results)
+                        previous_result = deepcopy(repeat_resume.get("previous_result"))
+                        child_resume = repeat_resume.get("child_resume")
+                        if not isinstance(child_resume, dict):
+                            raise ValueError(
+                                f"Execution graph repeat node {node_id} is missing its child checkpoint"
+                            )
+
+                    stopped = False
+                    for loop_index in range(start_index, max_iterations):
+                        nested_step_index = (
+                            (step_index * 100000)
+                            + (node_index * 1000)
+                            + loop_index
+                            + 1
+                        )
+                        nested_state = {
+                            **state,
+                            "_xvond_loop_index": loop_index,
+                            "_xvond_repeat_previous": deepcopy(previous_result),
+                            "_xvond_nested_graph_depth": nested_depth,
+                            "_xvond_graph_path": f"{node_scope}[{loop_index}]",
+                            "_xvond_retry_root_step_index": retry_root_step_index,
+                            "_xvond_retry_root_state": deepcopy(retry_root_state),
+                            "_xvond_retry_lineage": [
+                                *deepcopy(retry_lineage),
+                                {
+                                    "kind": "repeat",
+                                    "node_id": node_id,
+                                    "node_outputs": deepcopy(node_outputs),
+                                    "loop_index": loop_index,
+                                    "max_iterations": max_iterations,
+                                    "completed_results": deepcopy(results),
+                                    "previous_result": deepcopy(previous_result),
+                                },
+                            ],
+                        }
+                        if child_resume is not None and loop_index == start_index:
+                            nested_state["_xvond_graph_resume"] = {
+                                "workflow_step_index": nested_step_index,
+                                **deepcopy(child_resume),
+                            }
+                        try:
+                            nested_result = self.execute_step(
+                                db,
+                                company_id,
+                                {
+                                    "type": "graph",
+                                    "agent_id": graph_agent_id,
+                                    "graph": nested_graph,
+                                },
+                                nested_state,
+                                run_id=run_id,
+                                step_index=nested_step_index,
+                            )
+                        except AutomationEventRequired as event_wait:
+                            child_checkpoint = deepcopy(
+                                event_wait.graph_resume
+                                if isinstance(event_wait.graph_resume, dict)
+                                else {
+                                    "node_id": event_wait.node_id,
+                                    "node_outputs": event_wait.node_outputs,
+                                    "event_received": False,
+                                    "event_name": event_wait.event_name,
+                                }
+                            )
+                            event_wait.workflow_step_index = int(step_index)
+                            event_wait.node_outputs = deepcopy(node_outputs)
+                            event_wait.graph_resume = {
+                                "node_id": node_id,
+                                "node_outputs": deepcopy(node_outputs),
+                                "repeat": {
+                                    "loop_index": loop_index,
+                                    "max_iterations": max_iterations,
+                                    "completed_results": deepcopy(results),
+                                    "previous_result": deepcopy(previous_result),
+                                    "child_resume": child_checkpoint,
+                                },
+                            }
+                            raise
+                        except AutomationWaitRequired as wait:
+                            child_checkpoint = deepcopy(
+                                wait.graph_resume
+                                if isinstance(wait.graph_resume, dict)
+                                else {
+                                    "node_id": wait.node_id,
+                                    "node_outputs": wait.node_outputs,
+                                    "wait_completed": True,
+                                    "resume_at": _trace_iso(wait.resume_at),
+                                }
+                            )
+                            wait.workflow_step_index = int(step_index)
+                            wait.node_outputs = deepcopy(node_outputs)
+                            wait.graph_resume = {
+                                "node_id": node_id,
+                                "node_outputs": deepcopy(node_outputs),
+                                "repeat": {
+                                    "loop_index": loop_index,
+                                    "max_iterations": max_iterations,
+                                    "completed_results": deepcopy(results),
+                                    "previous_result": deepcopy(previous_result),
+                                    "child_resume": child_checkpoint,
+                                },
+                            }
+                            raise
+                        except AutomationApprovalRequired as approval:
+                            child_checkpoint = deepcopy(
+                                approval.graph_resume
+                                if isinstance(approval.graph_resume, dict)
+                                else {
+                                    "node_id": approval.node_id,
+                                    "node_outputs": approval.node_outputs,
+                                }
+                            )
+                            approval.workflow_step_index = int(step_index)
+                            approval.node_outputs = deepcopy(node_outputs)
+                            approval.graph_resume = {
+                                "node_id": node_id,
+                                "node_outputs": deepcopy(node_outputs),
+                                "repeat": {
+                                    "loop_index": loop_index,
+                                    "max_iterations": max_iterations,
+                                    "completed_results": deepcopy(results),
+                                    "previous_result": deepcopy(previous_result),
+                                    "child_resume": child_checkpoint,
+                                },
+                            }
+                            raise
+                        except Exception as exc:
+                            raise ValueError(
+                                f"Execution graph repeat node {node_id} failed at iteration {loop_index}: {exc}"
+                            ) from exc
+
+                        results.append(nested_result)
+                        previous_result = deepcopy(nested_result)
+                        child_resume = None
+                        left = extract_data_path(nested_result, until_path)
+                        try:
+                            stopped = compare_values(left, until_operator, until_value)
+                        except Exception as exc:
+                            raise ValueError(
+                                f"Execution graph repeat node {node_id} until comparison failed: {exc}"
+                            ) from exc
+                        if stopped:
+                            break
+
+                    node_outputs[node_id] = {
+                        "iterations": results,
+                        "count": len(results),
+                        "stopped": stopped,
+                        "limit_reached": bool(not stopped and len(results) >= max_iterations),
+                        "last": deepcopy(previous_result),
                     }
                     continue
                 else:
