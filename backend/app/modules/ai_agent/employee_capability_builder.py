@@ -405,7 +405,7 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
             "type": "integration",
             "integration_id": integration_id,
             "operations": operations,
-            "default_operation": default_operation,
+            **({"default_operation": default_operation} if default_operation else {}),
             "validation_required": requirement.get("validation_required") is True,
         },
         "availability": availability,
