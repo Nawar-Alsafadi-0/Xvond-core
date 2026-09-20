@@ -589,7 +589,7 @@ def test_openapi_urlencoded_request_body_becomes_form_contract():
     assert operation["json_fields"] == []
 
 
-def test_openapi_multipart_request_does_not_fall_back_to_json():
+def test_openapi_binary_multipart_uses_owned_file_contract():
     contract = normalize_openapi_document(
         {
             "openapi": "3.0.3",
@@ -623,7 +623,18 @@ def test_openapi_multipart_request_does_not_fall_back_to_json():
         }
     )
 
-    assert set(contract["operations"]) == {"health"}
+    assert set(contract["operations"]) == {"health", "upload_file"}
+    operation = contract["operations"]["upload_file"]
+    assert operation["input_mode"] == "multipart"
+    assert operation["required_form_fields"] == ["file"]
+    assert operation["form_fields"] == [
+        {
+            "key": "file",
+            "required": True,
+            "type": "string",
+            "format": "binary",
+        }
+    ]
 
 
 def test_swagger_formdata_urlencoded_is_supported_and_binary_multipart_is_not():
@@ -676,8 +687,7 @@ def test_swagger_formdata_urlencoded_is_supported_and_binary_multipart_is_not():
                                 "name": "file",
                                 "in": "formData",
                                 "required": True,
-                                "type": "string",
-                                "format": "binary",
+                                "type": "file",
                             }
                         ],
                     }
@@ -685,7 +695,10 @@ def test_swagger_formdata_urlencoded_is_supported_and_binary_multipart_is_not():
             },
         }
     )
-    assert set(multipart["operations"]) == {"health"}
+    assert set(multipart["operations"]) == {"health", "upload"}
+    upload = multipart["operations"]["upload"]
+    assert upload["input_mode"] == "multipart"
+    assert upload["form_fields"][0]["format"] == "binary"
 
 def test_openapi_root_array_json_request_stays_fail_closed():
     contract = normalize_openapi_document(

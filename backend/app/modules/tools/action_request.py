@@ -17,6 +17,7 @@ from backend.app.modules.channels.whatsapp_models import WhatsAppSession
 from backend.app.modules.integrations.catalog import integration_validation_ready
 from backend.app.modules.integrations.capability_discovery import oauth_client_credentials_token
 from backend.app.modules.integrations.models import CompanyIntegration
+from backend.app.modules.files.models import EmployeeFileAsset
 from backend.app.modules.integrations.http_api_auth import apply_http_api_auth
 from backend.app.modules.integrations.oauth_authorization import (
     oauth_access_token_needs_refresh,
@@ -850,6 +851,7 @@ def _integration_call(
                 data={"missing_fields": missing_json_fields},
             )
 
+    multipart_files = None
     if input_mode in {"form", "multipart"}:
         source = request_payload if isinstance(request_payload, dict) else {}
         required_form_fields = [
@@ -887,15 +889,64 @@ def _integration_call(
                 ),
                 data={"missing_fields": missing_form_fields},
             )
+        binary_fields = {
+            str(item.get("key") or "").strip()
+            for item in raw_form_fields
+            if isinstance(item, dict)
+            and str(item.get("format") or "").strip().lower() == "binary"
+            and str(item.get("key") or "").strip()
+        }
+        multipart_files = {}
+        scalar_source = {}
         for key, value in source.items():
             if value is None:
+                continue
+            if input_mode == "multipart" and key in binary_fields:
+                try:
+                    if isinstance(value, bool):
+                        raise ValueError
+                    asset_id = int(value)
+                    if asset_id <= 0:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    return ToolResult(
+                        success=False,
+                        error=f"Multipart file field '{key}' requires an employee file asset id",
+                    )
+                agent_id = int(context.get("agent_id") or 0)
+                if agent_id <= 0:
+                    return ToolResult(
+                        success=False,
+                        error="Employee identity is required for file upload actions",
+                    )
+                asset = (
+                    db.query(EmployeeFileAsset)
+                    .filter(
+                        EmployeeFileAsset.id == asset_id,
+                        EmployeeFileAsset.company_id == context["company_id"],
+                        EmployeeFileAsset.agent_id == agent_id,
+                        EmployeeFileAsset.enabled.is_(True),
+                    )
+                    .first()
+                )
+                if asset is None:
+                    return ToolResult(
+                        success=False,
+                        error=f"Employee file asset for field '{key}' was not found",
+                    )
+                multipart_files[key] = (
+                    asset.filename,
+                    bytes(asset.content),
+                    asset.content_type,
+                )
                 continue
             if not isinstance(value, (str, int, float, bool)):
                 return ToolResult(
                     success=False,
                     error=f"Form field '{key}' must be a scalar value",
                 )
-        request_payload = source
+            scalar_source[key] = value
+        request_payload = scalar_source
         if input_mode == "form":
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         else:
@@ -976,6 +1027,7 @@ def _integration_call(
             json_data=request_payload if input_mode == "json" else None,
             form_data=request_payload if input_mode == "form" else None,
             multipart_data=request_payload if input_mode == "multipart" else None,
+            multipart_files=multipart_files if input_mode == "multipart" else None,
             timeout=float((op_config or {}).get("timeout") or 15),
             max_response_bytes=MAX_STRUCTURED_INTEGRATION_RESPONSE_CHARS,
         )

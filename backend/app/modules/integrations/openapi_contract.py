@@ -207,20 +207,26 @@ def _object_schema_parts(document: dict, schema: dict, *, depth: int = 0) -> tup
     return properties, required
 
 
-def _multipart_scalar_schema_supported(document: dict, schema: dict) -> bool:
+def _multipart_schema_supported(document: dict, schema: dict) -> bool:
     if _schema_kind(document, schema) != "object":
         return False
     properties, _ = _object_schema_parts(document, schema)
     if not properties:
         return False
     allowed_types = {"string", "integer", "number", "boolean"}
+    binary_fields = 0
     for raw in properties.values():
         value = _local_schema_ref(document, raw) or raw
         value_type = str(value.get("type") or "").strip().lower()
         value_format = str(value.get("format") or "").strip().lower()
-        if value_type not in allowed_types:
-            return False
         if value_format == "binary":
+            if value_type != "string":
+                return False
+            binary_fields += 1
+            if binary_fields > 5:
+                return False
+            continue
+        if value_type not in allowed_types:
             return False
     return True
 
@@ -233,8 +239,8 @@ def _request_body_contract(
     """Return one bounded request media contract.
 
     JSON and application/x-www-form-urlencoded are executable. Multipart is
-    executable only for declared scalar fields; binary/file/object/array payloads
-    stay fail-closed until Xvond has a dedicated owned-file upload contract.
+    executable for declared scalar fields and bounded binary fields backed by
+    tenant-owned Xvond file assets. Object/array multipart fields stay fail-closed.
     """
     request_body = operation.get("requestBody")
     if isinstance(request_body, dict):
@@ -268,7 +274,7 @@ def _request_body_contract(
             schema = multipart.get("schema")
             if (
                 isinstance(schema, dict)
-                and _multipart_scalar_schema_supported(document, schema)
+                and _multipart_schema_supported(document, schema)
             ):
                 return "multipart", schema
 
@@ -322,9 +328,12 @@ def _request_body_contract(
                 continue
             field_type = str(parameter.get("type") or "string").strip().lower()[:20]
             fmt = str(parameter.get("format") or "").strip().lower()[:40]
+            if multipart_mode and field_type == "file":
+                field_type = "string"
+                fmt = "binary"
             if multipart_mode and (
                 field_type not in {"string", "integer", "number", "boolean"}
-                or fmt == "binary"
+                or (fmt == "binary" and field_type != "string")
             ):
                 return "unsupported", {}
             field: dict[str, Any] = {"type": field_type}

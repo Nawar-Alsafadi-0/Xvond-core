@@ -327,7 +327,9 @@ def build_external_integration_action_config(*, requirement: dict, spec: dict) -
         field_type = "text"
         value_type = str(raw_type or "").strip().lower()
         value_format = str(raw_format or "").strip().lower()
-        if value_format == "email":
+        if value_format == "binary":
+            field_type = "file"
+        elif value_format == "email":
             field_type = "email"
         elif value_format == "date":
             field_type = "date"
