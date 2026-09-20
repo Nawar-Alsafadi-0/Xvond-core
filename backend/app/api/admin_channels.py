@@ -1,9 +1,11 @@
 from datetime import datetime
+import secrets
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.app.core.ai.provider_policy import runtime_selections
+from backend.app.core.config.settings import settings
 from backend.app.core.config_secrets import (
     configured_secret_fields,
     merge_config,
@@ -48,7 +50,7 @@ class ChannelUpdate(BaseModel):
 
 
 class ManagedChannelConnect(BaseModel):
-    connection_key: str = Field(min_length=1, max_length=200)
+    connection_key: str | None = Field(default=None, max_length=200)
     provider_account_label: str | None = Field(default=None, max_length=200)
     channel_instructions: str | None = Field(default=None, max_length=4000)
     # Optional one-shot provisioning payload. Secrets are forwarded directly to
@@ -400,6 +402,7 @@ def admin_channel_catalog(
                 "runtime_state": item.get("runtime_state"),
                 "runtime_adapter": item.get("runtime_adapter"),
                 "packaged_provider": bool(item.get("packaged_provider")),
+                "provider_setup": item.get("provider_setup"),
             }
             for item in list_channel_definitions()
         ]
@@ -581,25 +584,55 @@ def connect_managed_channel(
             )
 
         capability = _managed_gateway_capability(channel)
-        connection_key = str(data.connection_key or "").strip()
-
-        provision_fields = (
-            data.provider_type,
-            data.provider_url,
-            data.provider_secret,
-            data.provider_config,
+        provider_setup = capability.get("provider_setup") or {}
+        wants_provisioning = data.provider_config is not None or any(
+            value is not None
+            for value in (data.provider_type, data.provider_url, data.provider_secret)
         )
-        wants_provisioning = any(value is not None for value in provision_fields)
+        connection_key = str(data.connection_key or "").strip()
+        if wants_provisioning and not connection_key:
+            connection_key = secrets.token_urlsafe(24)
+        if not connection_key:
+            raise HTTPException(400, "Connection key is required")
+
         if wants_provisioning:
-            if capability.get("packaged_provider") is not True:
+            if capability.get("packaged_provider") is not True or not provider_setup:
                 raise HTTPException(
                     409,
                     "This managed channel does not have a packaged Xvond provider binding yet",
                 )
-            if not all(value is not None for value in provision_fields):
-                raise HTTPException(
-                    400,
-                    "provider_type, provider_url, provider_secret and provider_config are required together",
+            provider_type = str(
+                data.provider_type or provider_setup.get("provider_type") or ""
+            ).strip()
+            provider_path = str(provider_setup.get("provider_path") or "").strip()
+            provider_url = str(data.provider_url or "").strip()
+            if not provider_url:
+                if not settings.WORKFLOW_PUBLIC_URL or not provider_path:
+                    raise HTTPException(
+                        503,
+                        "Xvond workflow public URL is not configured",
+                    )
+                provider_url = settings.WORKFLOW_PUBLIC_URL + provider_path
+            provider_secret = str(data.provider_secret or "").strip() or secrets.token_urlsafe(32)
+            provider_config = dict(data.provider_config or {})
+            for field in provider_setup.get("fields") or []:
+                name = str(field.get("name") or "").strip()
+                if not name:
+                    continue
+                if name not in provider_config and field.get("default") not in (None, ""):
+                    provider_config[name] = field.get("default")
+                if field.get("required") and not str(provider_config.get(name) or "").strip():
+                    raise HTTPException(400, f"{name} is required")
+            inbound_path = str(provider_setup.get("inbound_path") or "").strip()
+            if (
+                canonical_channel_type(channel.channel_type) == "sms"
+                and inbound_path
+                and not str(provider_config.get("inbound_url") or "").strip()
+            ):
+                provider_config["inbound_url"] = (
+                    settings.WORKFLOW_PUBLIC_URL
+                    + inbound_path
+                    + f"?company_id={channel.company_id}&connection_key={connection_key}"
                 )
             try:
                 provisioned = n8n_gateway.provision_channel(
@@ -608,10 +641,10 @@ def connect_managed_channel(
                     channel_id=channel.id,
                     channel_type=canonical_channel_type(channel.channel_type),
                     connection_key=connection_key,
-                    provider_type=str(data.provider_type or "").strip(),
-                    provider_url=str(data.provider_url or "").strip(),
-                    provider_secret=str(data.provider_secret or ""),
-                    provider_config=dict(data.provider_config or {}),
+                    provider_type=provider_type,
+                    provider_url=provider_url,
+                    provider_secret=provider_secret,
+                    provider_config=provider_config,
                     provider_account_label=(
                         str(data.provider_account_label or "").strip() or None
                     ),
