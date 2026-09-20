@@ -581,9 +581,23 @@ def _existing_employee(db, company_id: int) -> AIAgent | None:
             AIAgent.company_id == company_id,
             AgentConfig.agent_type == "employee",
         )
-        .order_by(AIAgent.id.asc())
+        .order_by(AIAgent.id.desc())
         .first()
     )
+
+
+def _employee_for_company(db, company_id: int, agent_id: int | None = None) -> AIAgent | None:
+    query = (
+        db.query(AIAgent)
+        .join(AgentConfig, AgentConfig.agent_id == AIAgent.id)
+        .filter(
+            AIAgent.company_id == company_id,
+            AgentConfig.agent_type == "employee",
+        )
+    )
+    if agent_id is not None:
+        query = query.filter(AIAgent.id == agent_id)
+    return query.order_by(AIAgent.id.desc()).first()
 
 
 def _employee_config_or_404(db, agent: AIAgent) -> AgentConfig:
@@ -2104,11 +2118,54 @@ def _self_service_builder_journey(
     }
 
 
-@router.get("/current")
-def current_employee(current_user: User = Depends(require_customer_manager)):
+@router.get("/employees")
+def list_self_service_employees(
+    current_user: User = Depends(require_customer_manager),
+):
+    """List employee projects in the customer's Replit-style workspace."""
     db = SessionLocal()
     try:
-        agent = _existing_employee(db, current_user.company_id)
+        company = _company_or_404(db, current_user.company_id)
+        rows = (
+            db.query(AIAgent, AgentConfig)
+            .join(AgentConfig, AgentConfig.agent_id == AIAgent.id)
+            .filter(
+                AIAgent.company_id == company.id,
+                AgentConfig.agent_type == "employee",
+            )
+            .order_by(AIAgent.id.desc())
+            .all()
+        )
+        employees = []
+        for agent, config in rows:
+            builder = (config.settings or {}).get("employee_builder") or {}
+            spec = builder.get("compiled_spec") if isinstance(builder, dict) else None
+            employees.append({
+                "agent_id": agent.id,
+                "name": agent.name,
+                "description": agent.description,
+                "enabled": bool(agent.enabled),
+                "lifecycle": "live" if agent.enabled else "draft",
+                "compiled": isinstance(spec, dict),
+                "updated_at": (
+                    str(builder.get("compiled_at") or builder.get("updated_at") or "")
+                    if isinstance(builder, dict)
+                    else ""
+                ),
+            })
+        return {"employees": employees}
+    finally:
+        db.close()
+
+
+@router.get("/current")
+def current_employee(
+    agent_id: int | None = Query(default=None, ge=1),
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        agent = _employee_for_company(db, current_user.company_id, agent_id)
         if agent is None:
             return {"employee": None}
         config = _employee_config_or_404(db, agent)
@@ -2224,11 +2281,11 @@ def create_employee(
             service_limits.entitlement(db, company.id, "ai_agents")
 
         existing = _existing_employee(db, company.id)
-        if existing is not None:
+        if existing is not None and not is_self_service:
             raise HTTPException(
                 409,
                 detail={
-                    "message": "This workspace already has an AI employee",
+                    "message": "This managed workspace already has an AI employee",
                     "agent_id": existing.id,
                 },
             )
@@ -2284,7 +2341,7 @@ def create_employee(
             settings=settings,
             capabilities={item: True for item in blueprint.capabilities},
             customer_controls=dict(DEFAULT_CUSTOMER_CONTROLS),
-            enforce_capacity=has_entitlement,
+            enforce_capacity=(has_entitlement if not is_self_service else False),
         )
 
         db.add(
@@ -2599,8 +2656,7 @@ def refine_self_service_employee(
                 "updated_at": now_iso,
                 "compiled_spec": None,
             }
-            if _has_ai_agents_entitlement(db, company.id):
-                staged = _compile_staged_employee_spec(
+            staged = _compile_staged_employee_spec(
                     db,
                     company_id=company.id,
                     agent=agent,
@@ -2616,8 +2672,8 @@ def refine_self_service_employee(
                         )
                     ),
                 )
-                pending.update(staged)
-                pending["status"] = "built"
+            pending.update(staged)
+            pending["status"] = "built"
 
             settings_value = dict(config.settings or {})
             builder["pending_revision"] = pending
