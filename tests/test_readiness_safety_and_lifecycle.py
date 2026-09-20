@@ -90,3 +90,10 @@ def test_human_handoff_is_not_treated_as_a_missing_business_action():
     source = inspect.getsource(readiness.company_readiness)
     assert 'if tools and not ready_action:' not in source
     assert 'action_request_assigned and not ready_action' in source
+
+
+def test_company_readiness_uses_employee_delivery_mode_not_only_company_source():
+    source = inspect.getsource(readiness.company_readiness)
+    assert "is_self_service_employee(company, agent_config)" in source
+    assert '"self_service" if self_service_agent else "managed"' in source
+    assert "Company profile is incomplete for managed delivery" in source

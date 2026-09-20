@@ -52,18 +52,21 @@ function wsManagedChannelRequests(agentId){
 }
 function wsManagedChannelPresentation(channel){
   const state=String(channel?.config?.provisioning_state||'').toLowerCase();
-  if(channel?.enabled)return {label:'Live',kind:'good'};
+  if(channel?.enabled&&channel?.customer_roundtrip_verified===true)return {label:'Live · Round-trip verified',kind:'good'};
+  if(channel?.enabled)return {label:'Active · Awaiting round-trip',kind:'neutral'};
   if(state==='cancelled')return {label:'Cancelled',kind:'neutral'};
   if(channel?.runtime_state!=='live')return {label:'Adapter required',kind:'bad'};
-  if(state==='connected')return {label:'Ready for launch',kind:'good'};
+  if(state==='connected')return {label:'Provider configured',kind:'neutral'};
   if(state==='requested')return {label:'Requested by Job Brief',kind:'neutral'};
   return {label:'Xvond setup',kind:'neutral'};
 }
 function wsManagedChannelDetail(channel){
   const source=String(channel?.config?.request_source||'').replaceAll('_',' ');
+  const callback=String(channel?.config?.provider_inbound_url||'').trim();
   if(channel?.runtime_state!=='live'){
     return `Requested${source?` via ${source}`:''}. Keep disabled until Xvond ships and validates the runtime adapter.`;
   }
+  if(callback)return `Provider credentials are secured and the Xvond route is configured. Complete the provider callback with: ${callback}`;
   return `Xvond-managed provisioning${source?` requested via ${source}`:''}. Do not activate until provider/runtime verification is complete.`;
 }
 function wsManagedChannelActions(channel){
@@ -71,7 +74,7 @@ function wsManagedChannelActions(channel){
   const state=String(channel?.config?.provisioning_state||'').toLowerCase();
   const agent=(xvondWorkspace.data?.view?.agents||[]).find(item=>+item.id===+channel.agent_id);
   const company=xvondWorkspace.data?.view?.company||{};
-  const setupLabel=state==='connected'?'Verify / Change Route':'Complete Setup';
+  const setupLabel=state==='connected'?'Review / Update Setup':'Complete Setup';
   const activate=(state==='connected'&&company.active===true&&agent?.enabled===true)
     ? `<button class="primary-button" onclick="activateManagedChannel(${Number(channel.id)})">Activate Channel</button>`
     : '';
@@ -80,35 +83,82 @@ function wsManagedChannelActions(channel){
 function renderManagedChannelRequests(agentId){
   const items=wsManagedChannelRequests(agentId);
   if(!items.length)return '';
-  return `<div class="workspace-panel" style="margin-top:14px"><div class="workspace-panel-head"><div><h4>Managed Channel Requests</h4><p>Requested by the employee contract. Xvond verifies the provider route before marking a channel connected.</p></div></div><div class="channel-grid">${items.map(channel=>{
+  return `<div class="workspace-panel" style="margin-top:14px"><div class="workspace-panel-head"><div><h4>Managed Channel Requests</h4><p>Each channel uses its provider-specific secure setup. Configured means the encrypted route exists; Live means it passed all activation checks.</p></div></div><div class="channel-grid">${items.map(channel=>{
     const state=wsManagedChannelPresentation(channel);
     return `<div class="channel-card"><div><span class="channel-name">${f(channel.channel_name||channel.channel_type)}</span>${wsPill(state.label,state.kind)}</div><p>${f(wsManagedChannelDetail(channel))}</p><div class="meta">Runtime: ${f(channel.runtime_state||'unknown')} · Setup: Xvond managed · Local: ${channel.enabled?'Active':'Inactive'}</div>${wsManagedChannelActions(channel)}</div>`;
   }).join('')}</div></div>`;
 }
 
-window.openManagedChannelSetup=function(channelId){
+window.openManagedChannelSetup=async function(channelId){
   const channel=(xvondWorkspace.data?.channels||[]).find(item=>+item.id===+channelId);
   if(!channel){alert('Managed channel request not found.');return}
-  const cfg=channel.config||{};
-  openModal(
-    `Connect ${f(channel.channel_name||channel.channel_type)}`,
-    `<div class="modal-intro"><strong>Verify the provider route</strong><p>Provider credentials stay in the Xvond workflow/provider account. Core stores only the provider-neutral connection key after the gateway confirms it is configured.</p></div>
-      <div class="form-group"><label>Connection Key</label><input id="managed-channel-key" value="${f(cfg.connection_key||'')}" placeholder="Provider/workflow connection key"></div>
-      <div class="form-group"><label>Connected Account Label</label><input id="managed-channel-label" value="${f(cfg.provider_account_label||'')}" placeholder="e.g. Brand Instagram / Support Telegram"></div>
-      <div class="form-group"><label>Channel-only Instructions</label><textarea id="managed-channel-instructions" placeholder="Optional transport/channel rules only">${f(cfg.channel_instructions||'')}</textarea></div>
-      <button class="modal-submit" onclick="saveManagedChannelSetup(${Number(channel.id)})">Verify & Complete Setup</button>`
-  );
+  try{
+    const catalog=await api('/admin/channels/catalog');
+    const definition=(catalog.channels||[]).find(item=>item.type===channel.channel_type)||{};
+    const setup=definition.provider_setup||{};
+    xvondWorkspace.managedProviderSetup={channelId:Number(channel.id),setup};
+    const cfg=channel.config||{};
+    const fields=(setup.fields||[]).map(field=>{
+      const id=`managed-provider-${String(field.name||'').replaceAll('_','-')}`;
+      const type=field.secret?'password':(field.input_type||'text');
+      const placeholder=field.placeholder!=null?String(field.placeholder):(field.default!=null?String(field.default):'');
+      const help=field.help?`<small style="display:block;margin-top:6px;color:var(--muted)">${f(field.help)}</small>`:'';
+      return `<div class="form-group"><label>${f(field.label||field.name)}${field.required?' *':''}</label><input id="${f(id)}" data-provider-field="${f(field.name)}" type="${f(type)}" autocomplete="${field.secret?'new-password':'off'}" placeholder="${f(placeholder)}">${help}</div>`;
+    }).join('');
+    const connected=String(cfg.provisioning_state||'').toLowerCase()==='connected';
+    const callback=String(cfg.provider_inbound_url||'').trim();
+    const callbackBlock=callback
+      ?`<div class="modal-intro"><strong>Provider callback / webhook</strong><p style="overflow-wrap:anywhere">${f(callback)}</p>${setup.callback_note?`<p>${f(setup.callback_note)}</p>`:''}<button type="button" onclick="copyManagedChannelCallback(${Number(channel.id)})">Copy callback URL</button></div>`
+      :'';
+    openModal(
+      `${connected?'Manage':'Connect'} ${f(channel.channel_name||channel.channel_type)}`,
+      `<div class="modal-intro"><strong>${f(setup.provider_name||channel.channel_name||channel.channel_type)}</strong><p>${f(setup.setup_note||'Connect the provider account used for this channel.')}</p><p>Secrets are sent once to the encrypted workflow registry. They are never stored in Core and are not shown again.</p></div>
+        ${callbackBlock}
+        <div class="form-group"><label>Connected Account Label</label><input id="managed-channel-label" value="${f(cfg.provider_account_label||'')}" placeholder="${f(setup.account_label_placeholder||'e.g. Customer Support Account')}"></div>
+        ${fields}
+        <div class="form-group"><label>Channel-only Instructions</label><textarea id="managed-channel-instructions" placeholder="Optional transport/channel rules only">${f(cfg.channel_instructions||'')}</textarea></div>
+        <input id="managed-channel-key" type="hidden" value="${f(cfg.connection_key||'')}">
+        <button class="modal-submit" onclick="saveManagedChannelSetup(${Number(channel.id)})">${connected?'Verify / Save Changes':'Securely Configure Provider'}</button>`
+    );
+  }catch(error){alert(error.message)}
+};
+
+window.copyManagedChannelCallback=async function(channelId){
+  const channel=(xvondWorkspace.data?.channels||[]).find(item=>+item.id===+channelId);
+  const callback=String(channel?.config?.provider_inbound_url||'').trim();
+  if(!callback){alert('No provider callback URL is available yet.');return}
+  try{await navigator.clipboard.writeText(callback)}
+  catch(_error){prompt('Copy the provider callback URL:',callback)}
 };
 
 window.saveManagedChannelSetup=async function(channelId){
   try{
-    const connection_key=String(document.getElementById('managed-channel-key')?.value||'').trim();
-    if(!connection_key)throw new Error('Connection key is required.');
+    const channel=(xvondWorkspace.data?.channels||[]).find(item=>+item.id===+channelId);
+    if(!channel)throw new Error('Managed channel request not found.');
+    const setup=xvondWorkspace.managedProviderSetup?.channelId===Number(channelId)
+      ?(xvondWorkspace.managedProviderSetup.setup||{})
+      :{};
+    const connection_key=String(document.getElementById('managed-channel-key')?.value||'').trim()||null;
     const provider_account_label=String(document.getElementById('managed-channel-label')?.value||'').trim()||null;
     const channel_instructions=String(document.getElementById('managed-channel-instructions')?.value||'').trim()||null;
+    const provider_config={};
+    let hasProviderValue=false;
+    for(const field of setup.fields||[]){
+      const id=`managed-provider-${String(field.name||'').replaceAll('_','-')}`;
+      let value=String(document.getElementById(id)?.value||'').trim();
+      if(!value&&field.default!=null)value=String(field.default);
+      if(value){provider_config[field.name]=value;hasProviderValue=true}
+      if(field.required&&!value&&String(channel?.config?.provisioning_state||'').toLowerCase()!=='connected'){
+        throw new Error(`${field.label||field.name} is required.`);
+      }
+    }
+    const body={connection_key,provider_account_label,channel_instructions};
+    if(hasProviderValue||String(channel?.config?.provisioning_state||'').toLowerCase()!=='connected'){
+      body.provider_config=provider_config;
+    }
     await api(`/admin/channels/${Number(channelId)}/managed-connect`,{
       method:'POST',
-      body:JSON.stringify({connection_key,provider_account_label,channel_instructions})
+      body:JSON.stringify(body)
     });
     closeModal();
     await loadCompanyControlCenter(xvondWorkspace.companyId,'channels');

@@ -29,3 +29,9 @@ def test_managed_templates_do_not_seed_legacy_business_tools():
     assert '"whatsapp": ["human_handoff"]' in source
     assert '"voice": ["human_handoff"]' in source
     assert "canonical Operations Setup" in source
+
+
+def test_admin_template_agents_are_explicitly_managed_delivery():
+    source = inspect.getsource(AgentFactory.create_from_template)
+    assert '"onboarding_source": "managed"' in source
+    assert '"delivery_mode": "managed"' in source

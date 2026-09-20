@@ -13,6 +13,128 @@ N8N_MANAGED_CHANNEL_FIELDS = [
 ]
 
 
+MANAGED_PROVIDER_SETUP = {
+    "telegram": {
+        "provider_name": "Telegram Bot API",
+        "account_label_placeholder": "e.g. Support Bot @company_support",
+        "setup_note": "Create the bot in BotFather, then paste its token and a new webhook secret.",
+        "callback_note": "Xvond registers and verifies the Telegram webhook during provisioning.",
+        "provider_type": "telegram",
+        "provider_path": "/webhook/xvond-telegram-provider",
+        "inbound_path": "/webhook/xvond-telegram-inbound",
+        "fields": [
+            {"name": "bot_token", "label": "Telegram Bot Token", "required": True, "secret": True, "placeholder": "123456789:AA...", "help": "Token issued by BotFather."},
+            {"name": "webhook_secret", "label": "Webhook Secret", "required": True, "secret": True, "placeholder": "Use a long random value", "help": "Used to authenticate Telegram webhook deliveries."},
+        ],
+    },
+    "instagram": {
+        "provider_name": "Meta / Instagram",
+        "account_label_placeholder": "e.g. Brand Instagram @company",
+        "setup_note": "Use a professional Instagram account linked to a Facebook Page and a Meta app with Instagram messaging permissions.",
+        "callback_note": "After saving, add the displayed callback URL to the Meta app and subscribe the Instagram account to messages.",
+        "provider_type": "meta",
+        "provider_path": "/webhook/xvond-meta-messaging-provider",
+        "inbound_path": "/webhook/xvond-meta-messaging",
+        "fields": [
+            {"name": "sender_id", "label": "Instagram Professional Account ID", "required": True, "secret": False, "placeholder": "Numeric Instagram account ID"},
+            {"name": "access_token", "label": "Meta Access Token", "required": True, "secret": True, "placeholder": "Long-lived Page access token"},
+            {"name": "app_secret", "label": "Meta App Secret", "required": True, "secret": True, "placeholder": "Meta app secret"},
+            {"name": "graph_version", "label": "Graph API Version", "required": False, "secret": False, "default": "v26.0"},
+        ],
+    },
+    "messenger": {
+        "provider_name": "Meta / Messenger",
+        "account_label_placeholder": "e.g. Company Facebook Page",
+        "setup_note": "Use a Facebook Page connected to a Meta app with Messenger permissions.",
+        "callback_note": "After saving, add the displayed callback URL to the Meta app and subscribe the Page to messages and messaging_postbacks.",
+        "provider_type": "meta",
+        "provider_path": "/webhook/xvond-meta-messaging-provider",
+        "inbound_path": "/webhook/xvond-meta-messaging",
+        "fields": [
+            {"name": "sender_id", "label": "Facebook Page ID", "required": True, "secret": False},
+            {"name": "access_token", "label": "Page Access Token", "required": True, "secret": True},
+            {"name": "app_secret", "label": "Meta App Secret", "required": True, "secret": True},
+            {"name": "graph_version", "label": "Graph API Version", "required": False, "secret": False, "default": "v26.0"},
+        ],
+    },
+    "slack": {
+        "provider_name": "Slack App",
+        "account_label_placeholder": "e.g. Customer Support Workspace",
+        "setup_note": "Install a Slack app with bot scopes in the target workspace, then provide its bot token and signing secret.",
+        "callback_note": "After saving, use the displayed callback URL for Slack Events and Interactivity, then subscribe to the required message events.",
+        "provider_type": "slack",
+        "provider_path": "/webhook/xvond-slack-provider",
+        "inbound_path": "/webhook/xvond-slack-inbound",
+        "fields": [
+            {"name": "bot_token", "label": "Slack Bot Token", "required": True, "secret": True},
+            {"name": "signing_secret", "label": "Slack Signing Secret", "required": True, "secret": True},
+            {"name": "team_id", "label": "Slack Team ID", "required": False, "secret": False},
+        ],
+    },
+    "sms": {
+        "provider_name": "Twilio Messaging",
+        "account_label_placeholder": "e.g. Support SMS +1 555 0100",
+        "setup_note": "Connect a Twilio phone number or Messaging Service. At least one outbound sender must be supplied.",
+        "callback_note": "After saving, set the displayed callback URL as the incoming-message webhook in Twilio.",
+        "provider_type": "sms",
+        "provider_path": "/webhook/xvond-twilio-sms-provider",
+        "inbound_path": "/webhook/xvond-twilio-sms-inbound",
+        "fields": [
+            {"name": "account_sid", "label": "Twilio Account SID", "required": True, "secret": False},
+            {"name": "auth_token", "label": "Twilio Auth Token", "required": True, "secret": True},
+            {"name": "from_number", "label": "Twilio From Number", "required": False, "secret": False},
+            {"name": "messaging_service_sid", "label": "Messaging Service SID", "required": False, "secret": False},
+        ],
+    },
+    "email": {
+        "provider_name": "Mailgun Email",
+        "account_label_placeholder": "e.g. support@mg.company.com",
+        "setup_note": "Use a verified Mailgun sending domain and an inbound route for the recipient address.",
+        "callback_note": "After saving, point the Mailgun inbound route and event webhook to the displayed callback URL.",
+        "provider_type": "email",
+        "provider_path": "/webhook/xvond-mailgun-email-provider",
+        "inbound_path": "/webhook/xvond-mailgun-email-inbound",
+        "fields": [
+            {"name": "domain", "label": "Mailgun Domain", "required": True, "secret": False},
+            {"name": "api_key", "label": "Mailgun API Key", "required": True, "secret": True},
+            {"name": "webhook_signing_key", "label": "Mailgun Webhook Signing Key", "required": True, "secret": True},
+            {"name": "from_address", "label": "From Address", "required": True, "secret": False},
+            {"name": "recipient", "label": "Inbound Recipient", "required": False, "secret": False},
+            {"name": "region", "label": "Mailgun Region", "required": False, "secret": False, "default": "us"},
+        ],
+    },
+    "teams": {
+        "provider_name": "Microsoft Bot Framework",
+        "account_label_placeholder": "e.g. Company Support Teams Bot",
+        "setup_note": "Use a Microsoft Bot registration installed in the target Teams tenant.",
+        "callback_note": "After saving, configure the bot messaging endpoint with the displayed callback URL and install the Teams app package.",
+        "provider_type": "teams",
+        "provider_path": "/webhook/xvond-microsoft-teams-provider",
+        "inbound_path": "/webhook/xvond-microsoft-teams-inbound",
+        "fields": [
+            {"name": "microsoft_app_id", "label": "Microsoft App ID", "required": True, "secret": False},
+            {"name": "microsoft_app_password", "label": "Microsoft App Password", "required": True, "secret": True},
+            {"name": "microsoft_tenant_id", "label": "Microsoft Tenant ID", "required": False, "secret": False, "default": "botframework.com"},
+            {"name": "service_url", "label": "Bot Framework Service URL", "required": True, "secret": False},
+        ],
+    },
+    "custom": {
+        "provider_name": "Signed HTTPS Webhook",
+        "account_label_placeholder": "e.g. Partner Support Channel",
+        "setup_note": "Xvond sends signed outbound events to your HTTPS endpoint and verifies signed inbound events.",
+        "callback_note": "After saving, send inbound events to the displayed callback URL using the configured signing secret.",
+        "provider_type": "custom",
+        "provider_path": "/webhook/xvond-custom-channel-provider",
+        "inbound_path": "/webhook/xvond-custom-channel-inbound",
+        "fields": [
+            {"name": "outbound_url", "label": "Outbound HTTPS URL", "required": True, "secret": False},
+            {"name": "inbound_secret", "label": "Inbound Signing Secret", "required": True, "secret": True},
+            {"name": "outbound_secret", "label": "Outbound Shared Secret", "required": True, "secret": True},
+        ],
+    },
+}
+
+
 CHANNEL_ALIASES = {
     "instagram_dm": "instagram",
     "instagram_dms": "instagram",
@@ -107,6 +229,7 @@ CHANNEL_CATALOG = {
         "customer_selectable": True,
         "channel_slot": True,
         "packaged_provider": True,
+        "provider_setup": MANAGED_PROVIDER_SETUP["telegram"],
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "instagram": {
@@ -118,6 +241,7 @@ CHANNEL_CATALOG = {
         "customer_selectable": True,
         "channel_slot": True,
         "packaged_provider": True,
+        "provider_setup": MANAGED_PROVIDER_SETUP["instagram"],
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "messenger": {
@@ -129,6 +253,7 @@ CHANNEL_CATALOG = {
         "customer_selectable": True,
         "channel_slot": True,
         "packaged_provider": True,
+        "provider_setup": MANAGED_PROVIDER_SETUP["messenger"],
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "email": {
@@ -140,6 +265,7 @@ CHANNEL_CATALOG = {
         "customer_selectable": True,
         "channel_slot": True,
         "packaged_provider": True,
+        "provider_setup": MANAGED_PROVIDER_SETUP["email"],
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "sms": {
@@ -151,6 +277,7 @@ CHANNEL_CATALOG = {
         "customer_selectable": True,
         "channel_slot": True,
         "packaged_provider": True,
+        "provider_setup": MANAGED_PROVIDER_SETUP["sms"],
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "slack": {
@@ -162,6 +289,7 @@ CHANNEL_CATALOG = {
         "customer_selectable": True,
         "channel_slot": True,
         "packaged_provider": True,
+        "provider_setup": MANAGED_PROVIDER_SETUP["slack"],
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "teams": {
@@ -173,6 +301,7 @@ CHANNEL_CATALOG = {
         "customer_selectable": True,
         "channel_slot": True,
         "packaged_provider": True,
+        "provider_setup": MANAGED_PROVIDER_SETUP["teams"],
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "custom": {
@@ -184,6 +313,7 @@ CHANNEL_CATALOG = {
         "customer_selectable": True,
         "channel_slot": True,
         "packaged_provider": True,
+        "provider_setup": MANAGED_PROVIDER_SETUP["custom"],
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
 }
