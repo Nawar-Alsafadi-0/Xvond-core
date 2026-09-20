@@ -231,7 +231,7 @@ def test_managed_connect_rejects_native_or_non_gateway_channels(
 
 def test_admin_ui_can_complete_managed_requests_without_exposing_provider_credentials():
     assert "Complete Setup" in ADMIN_UI
-    assert "Verify & Complete Setup" in ADMIN_UI
+    assert "Provision & Verify" in ADMIN_UI
     assert "/managed-connect" in ADMIN_UI
     assert "connection_key" in ADMIN_UI
     assert "xvondSupportMode()" in ADMIN_UI

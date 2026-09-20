@@ -13,6 +13,96 @@ N8N_MANAGED_CHANNEL_FIELDS = [
 ]
 
 
+MANAGED_PROVIDER_SETUP = {
+    "telegram": {
+        "provider_type": "telegram",
+        "provider_path": "/webhook/xvond-telegram-provider",
+        "inbound_path": "/webhook/xvond-telegram-inbound",
+        "fields": [
+            {"name": "bot_token", "label": "Telegram Bot Token", "required": True, "secret": True},
+            {"name": "webhook_secret", "label": "Telegram Webhook Secret", "required": True, "secret": True},
+        ],
+    },
+    "instagram": {
+        "provider_type": "meta",
+        "provider_path": "/webhook/xvond-meta-messaging-provider",
+        "inbound_path": "/webhook/xvond-meta-messaging",
+        "fields": [
+            {"name": "sender_id", "label": "Instagram Account ID", "required": True, "secret": False},
+            {"name": "access_token", "label": "Meta Access Token", "required": True, "secret": True},
+            {"name": "app_secret", "label": "Meta App Secret", "required": True, "secret": True},
+            {"name": "graph_version", "label": "Graph API Version", "required": False, "secret": False, "default": "v26.0"},
+        ],
+    },
+    "messenger": {
+        "provider_type": "meta",
+        "provider_path": "/webhook/xvond-meta-messaging-provider",
+        "inbound_path": "/webhook/xvond-meta-messaging",
+        "fields": [
+            {"name": "sender_id", "label": "Facebook Page ID", "required": True, "secret": False},
+            {"name": "access_token", "label": "Page Access Token", "required": True, "secret": True},
+            {"name": "app_secret", "label": "Meta App Secret", "required": True, "secret": True},
+            {"name": "graph_version", "label": "Graph API Version", "required": False, "secret": False, "default": "v26.0"},
+        ],
+    },
+    "slack": {
+        "provider_type": "slack",
+        "provider_path": "/webhook/xvond-slack-provider",
+        "inbound_path": "/webhook/xvond-slack-inbound",
+        "fields": [
+            {"name": "bot_token", "label": "Slack Bot Token", "required": True, "secret": True},
+            {"name": "signing_secret", "label": "Slack Signing Secret", "required": True, "secret": True},
+            {"name": "team_id", "label": "Slack Team ID", "required": False, "secret": False},
+        ],
+    },
+    "sms": {
+        "provider_type": "sms",
+        "provider_path": "/webhook/xvond-twilio-sms-provider",
+        "inbound_path": "/webhook/xvond-twilio-sms-inbound",
+        "fields": [
+            {"name": "account_sid", "label": "Twilio Account SID", "required": True, "secret": False},
+            {"name": "auth_token", "label": "Twilio Auth Token", "required": True, "secret": True},
+            {"name": "from_number", "label": "Twilio From Number", "required": False, "secret": False},
+            {"name": "messaging_service_sid", "label": "Messaging Service SID", "required": False, "secret": False},
+        ],
+    },
+    "email": {
+        "provider_type": "email",
+        "provider_path": "/webhook/xvond-mailgun-email-provider",
+        "inbound_path": "/webhook/xvond-mailgun-email-inbound",
+        "fields": [
+            {"name": "domain", "label": "Mailgun Domain", "required": True, "secret": False},
+            {"name": "api_key", "label": "Mailgun API Key", "required": True, "secret": True},
+            {"name": "webhook_signing_key", "label": "Mailgun Webhook Signing Key", "required": True, "secret": True},
+            {"name": "from_address", "label": "From Address", "required": True, "secret": False},
+            {"name": "recipient", "label": "Inbound Recipient", "required": False, "secret": False},
+            {"name": "region", "label": "Mailgun Region", "required": False, "secret": False, "default": "us"},
+        ],
+    },
+    "teams": {
+        "provider_type": "teams",
+        "provider_path": "/webhook/xvond-microsoft-teams-provider",
+        "inbound_path": "/webhook/xvond-microsoft-teams-inbound",
+        "fields": [
+            {"name": "microsoft_app_id", "label": "Microsoft App ID", "required": True, "secret": False},
+            {"name": "microsoft_app_password", "label": "Microsoft App Password", "required": True, "secret": True},
+            {"name": "microsoft_tenant_id", "label": "Microsoft Tenant ID", "required": False, "secret": False, "default": "botframework.com"},
+            {"name": "service_url", "label": "Bot Framework Service URL", "required": True, "secret": False},
+        ],
+    },
+    "custom": {
+        "provider_type": "custom",
+        "provider_path": "/webhook/xvond-custom-channel-provider",
+        "inbound_path": "/webhook/xvond-custom-channel-inbound",
+        "fields": [
+            {"name": "outbound_url", "label": "Outbound HTTPS URL", "required": True, "secret": False},
+            {"name": "inbound_secret", "label": "Inbound Signing Secret", "required": True, "secret": True},
+            {"name": "outbound_secret", "label": "Outbound Shared Secret", "required": True, "secret": True},
+        ],
+    },
+}
+
+
 CHANNEL_ALIASES = {
     "instagram_dm": "instagram",
     "instagram_dms": "instagram",
@@ -107,6 +197,14 @@ CHANNEL_CATALOG = {
         "customer_selectable": True,
         "channel_slot": True,
         "packaged_provider": True,
+        "provider_setup": MANAGED_PROVIDER_SETUP["telegram"],
+        "provider_setup": MANAGED_PROVIDER_SETUP["instagram"],
+        "provider_setup": MANAGED_PROVIDER_SETUP["messenger"],
+        "provider_setup": MANAGED_PROVIDER_SETUP["email"],
+        "provider_setup": MANAGED_PROVIDER_SETUP["sms"],
+        "provider_setup": MANAGED_PROVIDER_SETUP["slack"],
+        "provider_setup": MANAGED_PROVIDER_SETUP["teams"],
+        "provider_setup": MANAGED_PROVIDER_SETUP["custom"],
         "config_fields": list(N8N_MANAGED_CHANNEL_FIELDS),
     },
     "instagram": {
