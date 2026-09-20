@@ -247,6 +247,7 @@ for r in [
     customer_business_router,
     customer_inbox_router,
     customer_meta_whatsapp_router,
+    customer_meta_channels_router,
     customer_operations_router,
     customer_portal_router,
     customer_subscription_router,
