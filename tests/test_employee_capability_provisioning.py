@@ -4479,3 +4479,42 @@ def test_graph_can_feed_connected_api_response_into_later_action(database, monke
         result["graph_outputs"]["read_vendor"]["scheduled_action_result"]["response"]
         == {"id": "rec-99", "state": "ready"}
     )
+
+def test_external_action_exposes_declared_form_fields():
+    action = build_managed_action_config(
+        requirement={
+            "key": "vendor_session",
+            "kind": "integration",
+            "purpose": "Create vendor session",
+            "fulfillment_mode": "external_connection",
+            "integration_id": 96,
+            "validation_required": True,
+            "integration_operations": {
+                "execute": {
+                    "method": "POST",
+                    "endpoint": "/session",
+                    "input_mode": "form",
+                    "required_form_fields": ["username"],
+                    "form_fields": [
+                        {
+                            "key": "username",
+                            "required": True,
+                            "type": "string",
+                        },
+                        {
+                            "key": "remember",
+                            "required": False,
+                            "type": "boolean",
+                        },
+                    ],
+                }
+            },
+        },
+        spec={"permissions": []},
+    )
+
+    fields = {item["key"]: item for item in action["fields"]}
+    assert fields["username"]["required"] is True
+    assert fields["username"]["type"] == "text"
+    assert fields["remember"]["required"] is False
+    assert fields["remember"]["type"] == "boolean"
