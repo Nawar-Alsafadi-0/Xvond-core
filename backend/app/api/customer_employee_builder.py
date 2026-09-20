@@ -2705,15 +2705,14 @@ def refine_self_service_employee(
         EmployeeBuilderReviseRequest(description=revised),
         current_user,
     )
-    if _has_ai_agents_entitlement_for_user(current_user):
-        try:
-            compile_employee(agent_id, current_user)
-            result["compiled"] = True
-            result["status"] = "refined_and_rebuilt"
-        except HTTPException:
-            # The refinement itself is durable. The normal journey will surface
-            # the build blocker rather than losing the owner's instruction.
-            result["status"] = "refined"
+    try:
+        compile_employee(agent_id, current_user)
+        result["compiled"] = True
+        result["status"] = "refined_and_rebuilt"
+    except HTTPException:
+        # The refinement itself is durable. The normal journey will surface
+        # the build blocker rather than losing the owner's instruction.
+        result["status"] = "refined"
     return result
 
 
