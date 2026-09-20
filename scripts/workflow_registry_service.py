@@ -24,6 +24,8 @@ PROVIDER_CHANNELS = {
     "meta": {"instagram", "messenger"},
     "slack": {"slack"},
     "sms": {"sms"},
+    "email": {"email"},
+    "teams": {"teams"},
     "custom": {"custom"},
 }
 
@@ -246,6 +248,70 @@ def lookup(company_id: int, connection_key: str, x_xvond_registry_secret: str | 
             "provider_account_label": row[7],
         },
     }
+
+
+
+@app.get("/v1/routes/resolve/meta/{sender_id}")
+def resolve_meta_route(
+    sender_id: str,
+    x_xvond_registry_secret: str | None = Header(default=None),
+):
+    """Resolve one Meta sender to its encrypted tenant route.
+
+    Meta uses one app-level callback URL for multiple Page/Instagram accounts, so
+    inbound events cannot carry a tenant connection key. Resolution stays inside
+    the private registry and fails closed if a sender is missing or ambiguous.
+    """
+    _auth(x_xvond_registry_secret)
+    clean_sender = str(sender_id or "").strip()
+    if not clean_sender or len(clean_sender) > 200:
+        raise HTTPException(status_code=400, detail="invalid_sender_id")
+
+    matches = []
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT company_id,connection_key,channel_id,agent_id,channel_type,provider_type,
+                      provider_url,provider_secret_enc,provider_config_enc,provider_account_label
+               FROM xvond_managed_channel_routes
+               WHERE active=TRUE
+                 AND provider_type IN ('meta','instagram','messenger')
+                 AND channel_type IN ('instagram','messenger')
+                 AND provider_secret_enc IS NOT NULL
+                 AND provider_config_enc IS NOT NULL"""
+        )
+        rows = cur.fetchall()
+
+    for row in rows:
+        company_id = int(row[0])
+        connection_key = str(row[1])
+        aad = _aad(company_id, connection_key)
+        try:
+            provider_config = _open(row[8], aad)
+            provider_secret = _open(row[7], aad)
+        except Exception:
+            continue
+        if str((provider_config or {}).get("sender_id") or "").strip() != clean_sender:
+            continue
+        matches.append(
+            {
+                "company_id": company_id,
+                "connection_key": connection_key,
+                "channel_id": row[2],
+                "agent_id": row[3],
+                "channel_type": row[4],
+                "provider_type": row[5],
+                "provider_url": row[6],
+                "provider_secret": provider_secret,
+                "provider_config": provider_config,
+                "provider_account_label": row[9],
+            }
+        )
+
+    if not matches:
+        raise HTTPException(status_code=404, detail="route_not_found")
+    if len(matches) != 1:
+        raise HTTPException(status_code=409, detail="ambiguous_sender_id")
+    return {"success": True, "route": matches[0]}
 
 
 @app.delete("/v1/routes/{company_id}/{connection_key}")
