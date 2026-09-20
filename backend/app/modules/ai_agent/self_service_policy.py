@@ -64,6 +64,30 @@ def is_self_service_company(company: Company | None) -> bool:
     )
 
 
+def is_self_service_employee(
+    company: Company | None,
+    config: AgentConfig | None,
+) -> bool:
+    """Decide delivery mode from the employee itself, not the whole company.
+
+    A managed customer can also create Replit-style Self-Service projects.
+    Legacy agents without an explicit delivery_mode keep the company default.
+    """
+    builder = (
+        dict(config.settings or {}).get("employee_builder")
+        if config is not None
+        else None
+    )
+    if isinstance(builder, dict):
+        mode = str(builder.get("delivery_mode") or "").strip().lower()
+        if mode:
+            return mode == SELF_SERVICE_SOURCE
+        source = str(builder.get("onboarding_source") or "").strip().lower()
+        if source:
+            return source == SELF_SERVICE_SOURCE
+    return is_self_service_company(company)
+
+
 def communication_channels(values: Any) -> list[str]:
     result: list[str] = []
     for item in values or []:
@@ -102,14 +126,14 @@ def assert_self_service_channel_selected(
 ) -> None:
     """Fail closed when customer setup targets a channel outside the current job."""
 
-    if not is_self_service_company(company):
-        return
-
     config = (
         db.query(AgentConfig)
         .filter(AgentConfig.agent_id == agent.id)
         .first()
     )
+    if not is_self_service_employee(company, config):
+        return
+
     builder = (
         dict(config.settings or {}).get("employee_builder")
         if config is not None
@@ -746,19 +770,13 @@ def self_service_readiness(
     agent: AIAgent,
     config: AgentConfig,
 ) -> dict:
-    if not is_self_service_company(company):
+    if not is_self_service_employee(company, config):
         raise HTTPException(
             409,
             "This employee belongs to Xvond Managed delivery and must use the managed launch flow",
         )
 
     builder = dict((config.settings or {}).get("employee_builder") or {})
-    source = str(builder.get("onboarding_source") or company.onboarding_source or "").strip().lower()
-    if source != SELF_SERVICE_SOURCE:
-        raise HTTPException(
-            409,
-            "This employee is not a self-service employee",
-        )
 
     spec = self_service_spec_view(builder.get("compiled_spec"))
     provisioned = bool(
