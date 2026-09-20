@@ -700,14 +700,11 @@ def test_swagger_formdata_urlencoded_is_supported_and_binary_multipart_is_not():
     assert upload["input_mode"] == "multipart"
     assert upload["form_fields"][0]["format"] == "binary"
 
-def test_openapi_root_array_json_request_stays_fail_closed():
+def test_openapi_root_array_json_request_becomes_bounded_array_contract():
     contract = normalize_openapi_document(
         {
             "openapi": "3.0.3",
             "paths": {
-                "/health": {
-                    "get": {"operationId": "health"}
-                },
                 "/batch": {
                     "post": {
                         "operationId": "batchCreate",
@@ -717,7 +714,14 @@ def test_openapi_root_array_json_request_stays_fail_closed():
                                 "application/json": {
                                     "schema": {
                                         "type": "array",
-                                        "items": {"type": "object"},
+                                        "items": {
+                                            "type": "object",
+                                            "required": ["sku"],
+                                            "properties": {
+                                                "sku": {"type": "string"},
+                                                "quantity": {"type": "integer"},
+                                            },
+                                        },
                                     }
                                 }
                             },
@@ -728,7 +732,14 @@ def test_openapi_root_array_json_request_stays_fail_closed():
         }
     )
 
-    assert set(contract["operations"]) == {"health"}
+    operation = contract["operations"]["batch_create"]
+    assert operation["input_mode"] == "json_array"
+    assert operation["array_item_kind"] == "object"
+    assert operation["array_max_items"] == 100
+    assert operation["required_array_item_fields"] == ["sku"]
+    fields = {item["key"]: item for item in operation["array_item_fields"]}
+    assert fields["sku"]["required"] is True
+    assert fields["quantity"]["type"] == "integer"
 
 def test_openapi_scalar_multipart_request_is_supported_without_binary_fields():
     contract = normalize_openapi_document(
@@ -803,3 +814,56 @@ def test_swagger_scalar_multipart_formdata_is_supported():
     assert operation["input_mode"] == "multipart"
     assert operation["required_form_fields"] == ["title"]
     assert [item["key"] for item in operation["form_fields"]] == ["title", "count"]
+
+def test_openapi_root_scalar_array_is_supported_but_nested_arrays_are_not():
+    strings = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "paths": {
+                "/tags": {
+                    "post": {
+                        "operationId": "replaceTags",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    }
+                                }
+                            },
+                        },
+                    }
+                }
+            },
+        }
+    )
+    assert strings["operations"]["replace_tags"]["array_item_kind"] == "string"
+
+    nested = normalize_openapi_document(
+        {
+            "openapi": "3.0.3",
+            "paths": {
+                "/health": {"get": {"operationId": "health"}},
+                "/matrix": {
+                    "post": {
+                        "operationId": "matrix",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "array",
+                                            "items": {"type": "number"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                    }
+                },
+            },
+        }
+    )
+    assert set(nested["operations"]) == {"health"}
