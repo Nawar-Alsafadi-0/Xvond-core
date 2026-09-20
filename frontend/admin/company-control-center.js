@@ -86,29 +86,62 @@ function renderManagedChannelRequests(agentId){
   }).join('')}</div></div>`;
 }
 
-window.openManagedChannelSetup=function(channelId){
+window.openManagedChannelSetup=async function(channelId){
   const channel=(xvondWorkspace.data?.channels||[]).find(item=>+item.id===+channelId);
   if(!channel){alert('Managed channel request not found.');return}
-  const cfg=channel.config||{};
-  openModal(
-    `Connect ${f(channel.channel_name||channel.channel_type)}`,
-    `<div class="modal-intro"><strong>Verify the provider route</strong><p>Provider credentials stay in the Xvond workflow/provider account. Core stores only the provider-neutral connection key after the gateway confirms it is configured.</p></div>
-      <div class="form-group"><label>Connection Key</label><input id="managed-channel-key" value="${f(cfg.connection_key||'')}" placeholder="Provider/workflow connection key"></div>
-      <div class="form-group"><label>Connected Account Label</label><input id="managed-channel-label" value="${f(cfg.provider_account_label||'')}" placeholder="e.g. Brand Instagram / Support Telegram"></div>
-      <div class="form-group"><label>Channel-only Instructions</label><textarea id="managed-channel-instructions" placeholder="Optional transport/channel rules only">${f(cfg.channel_instructions||'')}</textarea></div>
-      <button class="modal-submit" onclick="saveManagedChannelSetup(${Number(channel.id)})">Verify & Complete Setup</button>`
-  );
+  try{
+    const catalog=await api('/admin/channels/catalog');
+    const definition=(catalog.channels||[]).find(item=>item.type===channel.channel_type)||{};
+    const setup=definition.provider_setup||{};
+    xvondWorkspace.managedProviderSetup={channelId:Number(channel.id),setup};
+    const cfg=channel.config||{};
+    const fields=(setup.fields||[]).map(field=>{
+      const id=`managed-provider-${String(field.name||'').replaceAll('_','-')}`;
+      const type=field.secret?'password':'text';
+      const placeholder=field.default!=null?String(field.default):'';
+      return `<div class="form-group"><label>${f(field.label||field.name)}${field.required?' *':''}</label><input id="${f(id)}" data-provider-field="${f(field.name)}" type="${type}" autocomplete="off" placeholder="${f(placeholder)}"></div>`;
+    }).join('');
+    const connected=String(cfg.provisioning_state||'').toLowerCase()==='connected';
+    openModal(
+      `Connect ${f(channel.channel_name||channel.channel_type)}`,
+      `<div class="modal-intro"><strong>${connected?'Provider route connected':'Connect the real provider account'}</strong><p>Xvond sends these credentials once to the encrypted workflow registry. They are not stored in Core or shown again.</p></div>
+        <div class="form-group"><label>Connected Account Label</label><input id="managed-channel-label" value="${f(cfg.provider_account_label||'')}" placeholder="e.g. Brand Instagram / Support Telegram"></div>
+        ${fields}
+        <div class="form-group"><label>Channel-only Instructions</label><textarea id="managed-channel-instructions" placeholder="Optional transport/channel rules only">${f(cfg.channel_instructions||'')}</textarea></div>
+        <input id="managed-channel-key" type="hidden" value="${f(cfg.connection_key||'')}">
+        <button class="modal-submit" onclick="saveManagedChannelSetup(${Number(channel.id)})">${connected?'Verify Existing Route':'Provision & Verify'}</button>`
+    );
+  }catch(error){alert(error.message)}
 };
 
 window.saveManagedChannelSetup=async function(channelId){
   try{
-    const connection_key=String(document.getElementById('managed-channel-key')?.value||'').trim();
-    if(!connection_key)throw new Error('Connection key is required.');
+    const channel=(xvondWorkspace.data?.channels||[]).find(item=>+item.id===+channelId);
+    if(!channel)throw new Error('Managed channel request not found.');
+    const setup=xvondWorkspace.managedProviderSetup?.channelId===Number(channelId)
+      ?(xvondWorkspace.managedProviderSetup.setup||{})
+      :{};
+    const connection_key=String(document.getElementById('managed-channel-key')?.value||'').trim()||null;
     const provider_account_label=String(document.getElementById('managed-channel-label')?.value||'').trim()||null;
     const channel_instructions=String(document.getElementById('managed-channel-instructions')?.value||'').trim()||null;
+    const provider_config={};
+    let hasProviderValue=false;
+    for(const field of setup.fields||[]){
+      const id=`managed-provider-${String(field.name||'').replaceAll('_','-')}`;
+      let value=String(document.getElementById(id)?.value||'').trim();
+      if(!value&&field.default!=null)value=String(field.default);
+      if(value){provider_config[field.name]=value;hasProviderValue=true}
+      if(field.required&&!value&&String(channel?.config?.provisioning_state||'').toLowerCase()!=='connected'){
+        throw new Error(`${field.label||field.name} is required.`);
+      }
+    }
+    const body={connection_key,provider_account_label,channel_instructions};
+    if(hasProviderValue||String(channel?.config?.provisioning_state||'').toLowerCase()!=='connected'){
+      body.provider_config=provider_config;
+    }
     await api(`/admin/channels/${Number(channelId)}/managed-connect`,{
       method:'POST',
-      body:JSON.stringify({connection_key,provider_account_label,channel_instructions})
+      body:JSON.stringify(body)
     });
     closeModal();
     await loadCompanyControlCenter(xvondWorkspace.companyId,'channels');
