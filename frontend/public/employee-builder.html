@@ -35,8 +35,8 @@
     </section>
 
     <section id="auth-card" class="card hidden">
-      <h2>سجّل دخول حتى نحفظ طلب الموظف</h2>
-      <p class="muted">الوصف والاختيارات محفوظة. ما رح تعيد شي بعد تسجيل الدخول.</p>
+      <h2>سجّل دخول حتى نبدأ البناء</h2>
+      <p class="muted">طلبك محفوظ. بعد تسجيل الدخول Xvond يبدأ البناء مباشرة.</p>
       <div class="auth-tabs">
         <button id="login-tab" class="active">تسجيل دخول</button>
         <button id="signup-tab">إنشاء حساب</button>
@@ -77,6 +77,17 @@
 
 <script>
 (() => {
+  const $ = id => document.getElementById(id);
+  const show = (id, yes=true) => $(id).classList.toggle("hidden", !yes);
+  const detail = async response => {
+    try {
+      const data = await response.json();
+      return typeof data.detail === "string" ? data.detail : (data.detail?.message || "حدث خطأ");
+    } catch {
+      return "حدث خطأ";
+    }
+  };
+
   const saveDraft = () => sessionStorage.setItem("xvond_employee_draft", JSON.stringify({
     description: $("description").value.trim()
   }));
