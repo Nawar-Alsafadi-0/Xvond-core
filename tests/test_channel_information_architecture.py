@@ -99,3 +99,15 @@ def test_customer_channel_management_stays_on_dedicated_channels_page():
     assert "openCustomerMetaWhatsAppConnect" in center
     assert 'document.getElementById("page-channels")' in center
 
+def test_customer_employee_manager_includes_channels_and_systems():
+    manager = read("frontend/customer/manager-knowledge-controls.js")
+    assert 'managerTabButton("Overview", "overview")' in manager
+    assert 'managerTabButton("Behavior", "behavior")' in manager
+    assert 'managerTabButton("Knowledge", "knowledge")' in manager
+    assert 'managerTabButton("Channels", "channels")' in manager
+    assert 'managerTabButton("Connected Systems", "systems")' in manager
+    assert "renderCustomerChannelsTab" in manager
+    assert "xvondChannelCenterCard" in manager
+    assert "renderCustomerSystemsTab" in manager
+    assert "/customer/agents/manage/integrations" in manager
+
