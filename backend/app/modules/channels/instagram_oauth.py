@@ -168,11 +168,28 @@ def exchange_instagram_code(*, code: str) -> dict:
             "access_token": short_token,
         }
     )
+    token_type = "long_lived"
     try:
         long = _request_json("GET", long_url)
+        access_token = str(long.get("access_token") or "").strip() or short_token
+        expires_in = long.get("expires_in")
     except InstagramOAuthError as exc:
-        raise InstagramOAuthError(f"Instagram long-lived token exchange failed: {exc}") from exc
-    access_token = str(long.get("access_token") or "").strip() or short_token
+        detail = str(exc)
+        known_meta_method_rejection = (
+            "Unsupported request - method type: get" in detail
+            and "IGApiException" in detail
+            and ('"code":100' in detail or '"code": 100' in detail)
+        )
+        if not known_meta_method_rejection:
+            raise InstagramOAuthError(f"Instagram long-lived token exchange failed: {exc}") from exc
+        # Meta has intermittently rejected the documented long-lived-token GET
+        # with IGApiException code 100. Keep the successful short-lived token so
+        # the connection can be verified end-to-end, but expose the degraded
+        # token type to callers. The token is never returned to the browser.
+        long = {}
+        access_token = short_token
+        expires_in = short.get("expires_in")
+        token_type = "short_lived_fallback"
 
     profile_url = (
         f"https://graph.instagram.com/{version}/me?"
@@ -191,7 +208,8 @@ def exchange_instagram_code(*, code: str) -> dict:
         "access_token": access_token,
         "user_id": user_id,
         "username": username,
-        "expires_in": long.get("expires_in"),
+        "expires_in": expires_in,
+        "token_type": token_type,
     }
 
 
