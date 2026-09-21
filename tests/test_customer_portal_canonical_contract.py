@@ -36,3 +36,11 @@ def test_canonical_portal_layer_does_not_store_bearer_tokens():
     assert "Authorization" not in script
     assert 'api("/customer/overview")' in script
     assert 'api(`/customer/agents/${customerManagedAgentId}`)' in script
+
+def test_customer_portal_enhanced_navigation_loads_channels():
+    script = (ROOT / "frontend/customer/portal-enhancements.js").read_text(encoding="utf-8")
+    html = (ROOT / "frontend/customer/index.html").read_text(encoding="utf-8")
+    assert 'loader === "channels"' in script
+    assert "renderXvondChannelCenter()" in script
+    assert "portal-enhancements.js?v=20260921-channels1" in html
+
