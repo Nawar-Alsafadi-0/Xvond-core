@@ -118,8 +118,7 @@ def customer_voice_settings(
             "channel_type": "voice",
             "phone_number": config.get("phone_number"),
             "connected": bool(
-                str(config.get("provider") or "").lower() == "vapi"
-                and config.get("vapi_assistant_id")
+                config.get("vapi_assistant_id")
                 and config.get("vapi_phone_number_id")
             ),
             "settings": {
