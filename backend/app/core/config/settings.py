@@ -69,6 +69,11 @@ class Settings:
     N8N_TIMEOUT_SECONDS = max(1.0, float(os.getenv("N8N_TIMEOUT_SECONDS", "15")))
     N8N_MAX_RETRIES = min(3, max(0, int(os.getenv("N8N_MAX_RETRIES", "1"))))
     BILLING_PROVIDER = os.getenv("BILLING_PROVIDER", "none").strip().lower()
+    # Keep the self-service builder implementation available behind a product
+    # flag, but do not expose it in the current managed-customer experience.
+    SELF_SERVICE_PRODUCT_ENABLED = os.getenv(
+        "SELF_SERVICE_PRODUCT_ENABLED", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
     SELF_SERVICE_REQUIRE_SUBSCRIPTION = os.getenv(
         "SELF_SERVICE_REQUIRE_SUBSCRIPTION", "false"
     ).strip().lower() in {"1", "true", "yes", "on"}
