@@ -92,12 +92,17 @@ def test_admin_is_not_a_customer_conversation_control_plane():
     assert "conversations: []" in privacy
     assert "handoffs: []" in privacy
 
-def test_customer_channel_management_stays_on_dedicated_channels_page():
+def test_customer_channel_management_has_dedicated_center_and_employee_shortcuts():
     whatsapp = read("frontend/customer/meta-whatsapp.js")
     center = read("frontend/customer/channel-center.js")
-    assert "xvondDecorateCustomerAgentsWithWhatsApp" not in whatsapp
+    manager = read("frontend/customer/manager-knowledge-controls.js")
     assert "openCustomerMetaWhatsAppConnect" in center
     assert 'document.getElementById("page-channels")' in center
+    assert "xvondDecorateCustomerAgentsWithWhatsApp" in whatsapp
+    assert 'selfService && !slots.includes("whatsapp")' in whatsapp
+    assert "(config.ready && config.can_edit !== false)" in whatsapp
+    assert "renderCustomerChannelsTab" in manager
+    assert "xvondChannelCenterCard" in manager
 
 def test_customer_employee_manager_includes_channels_and_systems():
     manager = read("frontend/customer/manager-knowledge-controls.js")
