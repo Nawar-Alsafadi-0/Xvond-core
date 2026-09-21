@@ -114,3 +114,20 @@ def test_current_admin_loads_voice_controls_without_replacing_workspace():
     assert "/vapi/provision" in voice
     assert "deleteWorkspaceChannel(${Number(ch.id)})" in voice
     assert "Delete Channel" in voice
+
+
+def test_customer_voice_channel_settings_are_real_and_provider_synced():
+    root = Path(__file__).resolve().parents[1]
+    backend = (root / "backend" / "app" / "api" / "customer_agents.py").read_text(encoding="utf-8")
+    frontend = (root / "frontend" / "customer" / "channel-center.js").read_text(encoding="utf-8")
+
+    assert '@router.get("/voice/{agent_id}/settings")' in backend
+    assert '@router.put("/voice/{agent_id}/settings")' in backend
+    assert "build_vapi_assistant_payload" in backend
+    assert "update_assistant(assistant_id, payload)" in backend
+    assert '"greeting_message"' in backend
+    assert '"allow_interruption"' in backend
+    assert "openCustomerVoiceChannelSettings" in frontend
+    assert "Call greeting" in frontend
+    assert "Allow caller interruption" in frontend
+    assert "Live call transfer is not exposed here" in frontend
