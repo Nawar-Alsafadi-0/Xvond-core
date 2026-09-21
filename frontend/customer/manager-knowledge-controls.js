@@ -29,7 +29,7 @@ openCustomerAgentSettings = async function(agentId) {
                     ${managerTabButton("Knowledge", "knowledge")}
                     ${managerTabButton("Channels", "channels")}
                     ${managerTabButton("Connected Systems", "systems")}
-                    ${managerTabButton("Business Profile", "business")}
+                    ${managerTabButton("Business Information", "business")}
                 </div>
                 <div id="customer-manager-tab"></div>
             </div>
