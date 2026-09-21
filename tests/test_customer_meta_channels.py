@@ -121,3 +121,21 @@ def test_meta_channel_frontend_fallback_does_not_force_cors_and_is_retryable():
     assert 'crossOrigin = "anonymous"' not in source
     assert "xvondMetaChannelSdkPromise = null" in source
     assert 'script.onerror = fail' in source
+
+
+def test_meta_channel_settings_contract_is_channel_scoped():
+    from pathlib import Path
+
+    backend = Path("backend/app/api/customer_meta_channels.py").read_text(encoding="utf-8")
+    frontend = Path("frontend/customer/meta-channels.js").read_text(encoding="utf-8")
+    center = Path("frontend/customer/channel-center.js").read_text(encoding="utf-8")
+
+    assert '@router.get("/settings")' in backend
+    assert '@router.put("/settings")' in backend
+    assert "channel.meta_customer_settings_updated" in backend
+    assert '"tone": current.get("tone")' in backend
+    assert '"response_style": current.get("response_style")' in backend
+    assert '"response_length": current.get("response_length")' in backend
+    assert "openCustomerMetaChannelSettings" in frontend
+    assert "Channel-only instructions" in frontend
+    assert "Channel settings" in center
