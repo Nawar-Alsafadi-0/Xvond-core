@@ -93,8 +93,7 @@ def build_instagram_authorization_url(*, state: str) -> str:
             "response_type": "code",
             "scope": ",".join(INSTAGRAM_SCOPES),
             "state": state,
-            "enable_fb_login": "0",
-            "force_authentication": "1",
+            "force_reauth": "true",
         }
     )
     return f"https://www.instagram.com/oauth/authorize?{query}"
