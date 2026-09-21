@@ -197,3 +197,101 @@ if (typeof loadAgents === "function") {
         return result;
     };
 }
+
+
+window.openCustomerMetaChannelSettings = async function(agentId, channelType) {
+    const type = String(channelType || "").toLowerCase();
+    if (!["instagram", "messenger"].includes(type)) return;
+    const agent = (agents || []).find(item => Number(item.id) === Number(agentId));
+    try {
+        const result = await api(`/customer/meta/channels/settings?agent_id=${Number(agentId)}&channel_type=${encodeURIComponent(type)}`);
+        const settings = result.settings || {};
+        const overlay = document.createElement("div");
+        overlay.style.cssText = "position:fixed;inset:0;z-index:10000;background:rgba(15,23,42,.66);display:flex;align-items:flex-start;justify-content:center;padding:28px 16px;overflow:auto";
+        overlay.innerHTML = `
+            <div class="panel" style="width:min(680px,100%);margin:auto">
+                <div class="service-card-head">
+                    <div>
+                        <h2 style="margin:0">${safe(xvondMetaChannelName(type))} Settings · ${safe(agent?.name || "AI Employee")}</h2>
+                        <p class="muted" style="margin:6px 0 0">These settings adapt this channel only. The employee's core knowledge, identity and business rules remain shared.</p>
+                    </div>
+                    <button type="button" data-xvond-meta-settings-close>Close</button>
+                </div>
+                <form data-xvond-meta-settings-form style="display:grid;gap:12px;margin-top:16px">
+                    <div>
+                        <label>Tone</label>
+                        <select data-field="tone">
+                            <option value="professional_friendly" ${settings.tone === "professional_friendly" ? "selected" : ""}>Professional & friendly</option>
+                            <option value="formal" ${settings.tone === "formal" ? "selected" : ""}>Formal</option>
+                            <option value="warm" ${settings.tone === "warm" ? "selected" : ""}>Warm</option>
+                            <option value="direct" ${settings.tone === "direct" ? "selected" : ""}>Direct</option>
+                        </select>
+                    </div>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+                        <div>
+                            <label>Response style</label>
+                            <select data-field="response_style">
+                                <option value="conversational" ${settings.response_style === "conversational" ? "selected" : ""}>Conversational</option>
+                                <option value="structured" ${settings.response_style === "structured" ? "selected" : ""}>Structured</option>
+                                <option value="sales" ${settings.response_style === "sales" ? "selected" : ""}>Sales-oriented</option>
+                                <option value="support" ${settings.response_style === "support" ? "selected" : ""}>Support-oriented</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label>Response length</label>
+                            <select data-field="response_length">
+                                <option value="concise" ${settings.response_length === "concise" ? "selected" : ""}>Concise</option>
+                                <option value="balanced" ${settings.response_length === "balanced" ? "selected" : ""}>Balanced</option>
+                                <option value="detailed" ${settings.response_length === "detailed" ? "selected" : ""}>Detailed</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div>
+                        <label>Channel-only instructions</label>
+                        <textarea data-field="channel_instructions" rows="5" placeholder="Example: Keep Instagram replies short and ask for the customer's preferred appointment time before collecting contact details.">${safe(settings.channel_instructions || "")}</textarea>
+                        <p class="muted">Use this only for behavior unique to ${safe(xvondMetaChannelName(type))}. Company facts belong in Business Profile and employee knowledge.</p>
+                    </div>
+                    <div class="error" data-xvond-meta-settings-error></div>
+                    <button type="submit">Save channel settings</button>
+                </form>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+        const close = () => overlay.remove();
+        overlay.querySelector("[data-xvond-meta-settings-close]")?.addEventListener("click", close);
+        overlay.addEventListener("click", event => {
+            if (event.target === overlay) close();
+        });
+        const form = overlay.querySelector("[data-xvond-meta-settings-form]");
+        form?.addEventListener("submit", async event => {
+            event.preventDefault();
+            const value = key => form.querySelector(`[data-field="${key}"]`)?.value || "";
+            const error = form.querySelector("[data-xvond-meta-settings-error]");
+            const submit = form.querySelector('button[type="submit"]');
+            if (submit) submit.disabled = true;
+            if (error) error.textContent = "";
+            try {
+                await api("/customer/meta/channels/settings", {
+                    method: "PUT",
+                    body: JSON.stringify({
+                        agent_id: Number(agentId),
+                        channel_type: type,
+                        tone: value("tone"),
+                        response_style: value("response_style"),
+                        response_length: value("response_length"),
+                        channel_instructions: value("channel_instructions"),
+                    }),
+                });
+                await xvondRefreshCustomerOverview();
+                if (typeof renderXvondChannelCenter === "function") await renderXvondChannelCenter();
+                close();
+            } catch (err) {
+                if (error) error.textContent = err?.message || "Could not save channel settings.";
+            } finally {
+                if (submit) submit.disabled = false;
+            }
+        });
+    } catch (error) {
+        alert(error.message || "Channel settings are unavailable.");
+    }
+};
