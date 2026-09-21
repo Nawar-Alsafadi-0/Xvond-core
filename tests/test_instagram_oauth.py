@@ -47,7 +47,9 @@ def test_instagram_authorization_url_uses_direct_business_login(monkeypatch):
     assert query["response_type"] == ["code"]
     assert query["state"] == ["signed-state"]
     assert set(query["scope"][0].split(",")) == set(INSTAGRAM_SCOPES)
-    assert query["enable_fb_login"] == ["0"]
+    assert query["force_reauth"] == ["true"]
+    assert "force_authentication" not in query
+    assert "enable_fb_login" not in query
 
 
 def test_customer_portal_starts_direct_instagram_oauth():
