@@ -18,6 +18,8 @@ from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
 from backend.app.modules.channels.catalog import get_channel_capability
 from backend.app.modules.channels.models import AgentChannel
+from backend.app.modules.channels.vapi import build_vapi_assistant_payload
+from backend.app.modules.channels.vapi_api import update_assistant
 
 
 router = APIRouter(prefix="/customer/agents", tags=["Customer Agent Controls"])
@@ -28,6 +30,14 @@ class CustomerChannelBehaviorUpdate(BaseModel):
     response_style: str | None = None
     response_length: str | None = None
     channel_instructions: str | None = None
+
+
+class CustomerVoiceSettingsUpdate(BaseModel):
+    tone: str | None = None
+    response_length: str | None = None
+    greeting_message: str | None = None
+    channel_instructions: str | None = None
+    allow_interruption: bool | None = None
 
 
 class AgentCustomerUpdate(BaseModel):
@@ -75,6 +85,116 @@ def _current_profile(db, company: Company, agent: AIAgent):
 
 
 _GENERIC_CUSTOMER_BEHAVIOR_CHANNELS = {"telegram", "email", "sms", "slack", "teams", "custom"}
+
+
+def _customer_voice_channel(db, user: User, agent_id: int) -> tuple[AIAgent, AgentChannel]:
+    agent = get_customer_agent(db, user, agent_id)
+    channel = (
+        db.query(AgentChannel)
+        .filter(
+            AgentChannel.company_id == user.company_id,
+            AgentChannel.agent_id == agent.id,
+            AgentChannel.channel_type == "voice",
+        )
+        .first()
+    )
+    if channel is None:
+        raise HTTPException(404, "Voice channel is not assigned to this AI Employee")
+    return agent, channel
+
+
+@router.get("/voice/{agent_id}/settings")
+def customer_voice_settings(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        agent, channel = _customer_voice_channel(db, current_user, agent_id)
+        config = reveal_config(channel.config) or {}
+        return {
+            "agent_id": agent.id,
+            "channel_id": channel.id,
+            "channel_type": "voice",
+            "phone_number": config.get("phone_number"),
+            "connected": bool(
+                str(config.get("provider") or "").lower() == "vapi"
+                and config.get("vapi_assistant_id")
+                and config.get("vapi_phone_number_id")
+            ),
+            "settings": {
+                "tone": str(config.get("tone") or "professional_friendly"),
+                "response_length": str(config.get("response_length") or "concise"),
+                "greeting_message": str(config.get("greeting_message") or ""),
+                "channel_instructions": str(config.get("channel_instructions") or ""),
+                "allow_interruption": bool(config.get("allow_interruption", True)),
+            },
+        }
+    finally:
+        db.close()
+
+
+@router.put("/voice/{agent_id}/settings")
+def update_customer_voice_settings(
+    agent_id: int,
+    data: CustomerVoiceSettingsUpdate,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        agent, channel = _customer_voice_channel(db, current_user, agent_id)
+        channel = (
+            db.query(AgentChannel)
+            .filter(AgentChannel.id == channel.id)
+            .with_for_update()
+            .first()
+        )
+        current = reveal_config(channel.config) or {}
+        updates = {
+            "tone": str(data.tone or current.get("tone") or "professional_friendly").strip()[:80],
+            "response_length": str(data.response_length or current.get("response_length") or "concise").strip()[:80],
+            "greeting_message": str(data.greeting_message or "").strip()[:1000] or None,
+            "channel_instructions": str(data.channel_instructions or "").strip()[:4000] or None,
+            "allow_interruption": (
+                bool(data.allow_interruption)
+                if data.allow_interruption is not None
+                else bool(current.get("allow_interruption", True))
+            ),
+        }
+        merged = {**current, **updates}
+
+        assistant_id = str(current.get("vapi_assistant_id") or "").strip()
+        credential_id = str(current.get("vapi_llm_credential_id") or "").strip()
+        model_url = str(current.get("vapi_model_url") or "").strip()
+        if assistant_id and credential_id and model_url:
+            payload = build_vapi_assistant_payload(
+                assistant_name=(str(agent.name or "Xvond Voice Agent").strip()[:40] or "Xvond Voice Agent"),
+                model_url=model_url,
+                channel_config=merged,
+                credential_id=credential_id,
+            )
+            update_assistant(assistant_id, payload)
+
+        channel.config = merge_config(channel.config, updates)
+        db.commit()
+        return {
+            "status": "updated",
+            "agent_id": agent.id,
+            "channel_id": channel.id,
+            "channel_type": "voice",
+            "provider_synced": bool(assistant_id and credential_id and model_url),
+            "settings": updates,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 
 
 def _customer_behavior_channel(db, user: User, agent_id: int, channel_type: str) -> AgentChannel:
