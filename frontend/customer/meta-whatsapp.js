@@ -310,3 +310,107 @@ if (typeof loadAgents === "function") {
     };
 }
 
+
+
+window.openCustomerWhatsAppChannelSettings = async function(agentId) {
+    const agent = (agents || []).find(item => Number(item.id) === Number(agentId));
+    try {
+        const result = await api(`/customer/meta/whatsapp/settings?agent_id=${Number(agentId)}`);
+        const settings = result.settings || {};
+        const overlay = document.createElement("div");
+        overlay.style.cssText = "position:fixed;inset:0;z-index:10000;background:rgba(15,23,42,.66);display:flex;align-items:flex-start;justify-content:center;padding:28px 16px;overflow:auto";
+        overlay.innerHTML = `
+            <div class="panel" style="width:min(700px,100%);margin:auto">
+                <div class="service-card-head">
+                    <div>
+                        <h2 style="margin:0">WhatsApp Settings · ${safe(agent?.name || "AI Employee")}</h2>
+                        <p class="muted" style="margin:6px 0 0">These settings change only WhatsApp presentation. Core employee identity, knowledge and business rules remain shared.</p>
+                    </div>
+                    <button type="button" data-xvond-wa-settings-close>Close</button>
+                </div>
+                <form data-xvond-wa-settings-form style="display:grid;gap:12px;margin-top:16px">
+                    <div>
+                        <label>Tone</label>
+                        <select data-field="tone">
+                            <option value="professional_friendly" ${settings.tone === "professional_friendly" ? "selected" : ""}>Professional & friendly</option>
+                            <option value="formal" ${settings.tone === "formal" ? "selected" : ""}>Formal</option>
+                            <option value="warm" ${settings.tone === "warm" ? "selected" : ""}>Warm</option>
+                            <option value="direct" ${settings.tone === "direct" ? "selected" : ""}>Direct</option>
+                        </select>
+                    </div>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+                        <div>
+                            <label>Response style</label>
+                            <select data-field="response_style">
+                                <option value="conversational" ${settings.response_style === "conversational" ? "selected" : ""}>Conversational</option>
+                                <option value="structured" ${settings.response_style === "structured" ? "selected" : ""}>Structured</option>
+                                <option value="sales" ${settings.response_style === "sales" ? "selected" : ""}>Sales-oriented</option>
+                                <option value="support" ${settings.response_style === "support" ? "selected" : ""}>Support-oriented</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label>Response length</label>
+                            <select data-field="response_length">
+                                <option value="concise" ${settings.response_length === "concise" ? "selected" : ""}>Concise</option>
+                                <option value="balanced" ${settings.response_length === "balanced" ? "selected" : ""}>Balanced</option>
+                                <option value="detailed" ${settings.response_length === "detailed" ? "selected" : ""}>Detailed</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div>
+                        <label>Emoji style</label>
+                        <select data-field="emoji_style">
+                            <option value="minimal" ${settings.emoji_style === "minimal" ? "selected" : ""}>Minimal</option>
+                            <option value="none" ${settings.emoji_style === "none" ? "selected" : ""}>None</option>
+                            <option value="friendly" ${settings.emoji_style === "friendly" ? "selected" : ""}>Friendly</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>WhatsApp-only instructions</label>
+                        <textarea data-field="channel_instructions" rows="5" placeholder="Example: Keep replies short. Ask one question at a time.">${safe(settings.channel_instructions || "")}</textarea>
+                        <p class="muted">Use this only for WhatsApp-specific behavior. Company facts belong in Business Profile and employee knowledge.</p>
+                    </div>
+                    <div class="error" data-xvond-wa-settings-error></div>
+                    <button type="submit">Save channel settings</button>
+                </form>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+        const close = () => overlay.remove();
+        overlay.querySelector("[data-xvond-wa-settings-close]")?.addEventListener("click", close);
+        overlay.addEventListener("click", event => {
+            if (event.target === overlay) close();
+        });
+        const form = overlay.querySelector("[data-xvond-wa-settings-form]");
+        form?.addEventListener("submit", async event => {
+            event.preventDefault();
+            const value = key => form.querySelector(`[data-field="${key}"]`)?.value || "";
+            const error = form.querySelector("[data-xvond-wa-settings-error]");
+            const submit = form.querySelector('button[type="submit"]');
+            if (submit) submit.disabled = true;
+            if (error) error.textContent = "";
+            try {
+                await api("/customer/meta/whatsapp/settings", {
+                    method: "PUT",
+                    body: JSON.stringify({
+                        agent_id: Number(agentId),
+                        tone: value("tone"),
+                        response_style: value("response_style"),
+                        response_length: value("response_length"),
+                        emoji_style: value("emoji_style"),
+                        channel_instructions: value("channel_instructions"),
+                    }),
+                });
+                portalOverview = await api("/customer/overview");
+                if (typeof renderXvondChannelCenter === "function") await renderXvondChannelCenter();
+                close();
+            } catch (err) {
+                if (error) error.textContent = err?.message || "Could not save WhatsApp settings.";
+            } finally {
+                if (submit) submit.disabled = false;
+            }
+        });
+    } catch (error) {
+        alert(error.message || "WhatsApp settings are unavailable.");
+    }
+};
