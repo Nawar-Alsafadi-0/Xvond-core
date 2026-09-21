@@ -241,11 +241,3 @@ async function xvondDecorateCustomerAgentsWithWebsite() {
     });
 }
 
-if (typeof loadAgents === "function") {
-    const xvondWebsiteOriginalLoadAgents = loadAgents;
-    loadAgents = async function (...args) {
-        const result = await xvondWebsiteOriginalLoadAgents(...args);
-        await xvondDecorateCustomerAgentsWithWebsite();
-        return result;
-    };
-}
