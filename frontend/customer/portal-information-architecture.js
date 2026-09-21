@@ -173,6 +173,62 @@
             <div class="billing-row"><span>Failed AI requests · last 24h</span><strong>${safe(failed)}</strong></div>
             <div class="billing-row"><span>Service limits reached</span><strong>${safe(limits)}</strong></div>
         `;
+
+        let quick = document.getElementById("dashboard-quick-actions");
+        if (!quick) {
+            quick = document.createElement("div");
+            quick.id = "dashboard-quick-actions";
+            quick.className = "panel";
+            quick.style.marginBottom = "22px";
+            dashboard.insertBefore(quick, health);
+        }
+        const navIds = new Set((portalNavigation || []).map(item => item.id));
+        const action = (page, label) => navIds.has(page)
+            ? `<button type="button" onclick="openPage('${page}', [...document.querySelectorAll('#portal-nav .nav-item')].find(x=>x.dataset.page==='${page}')||null)">${safe(label)}</button>`
+            : "";
+        quick.innerHTML = `
+            <div class="service-card-head">
+                <div>
+                    <h2>Quick Actions</h2>
+                    <p>Everything a manager uses regularly, from one workspace.</p>
+                </div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+                ${action("agents", "Manage AI Employees")}
+                ${action("channels", "Manage Channels")}
+                ${action("conversations", "Open Inbox")}
+                ${action("customers", "Customers")}
+                ${action("business-profile", "Business Profile")}
+                ${action("integrations", "Connected Systems")}
+                ${action("users", "Team & Access")}
+                ${action("billing", "Billing")}
+            </div>
+        `;
+
+        let workspace = document.getElementById("dashboard-workspace-map");
+        if (!workspace) {
+            workspace = document.createElement("div");
+            workspace.id = "dashboard-workspace-map";
+            workspace.className = "panel";
+            workspace.style.marginBottom = "22px";
+            const servicesPanel = document.getElementById("dashboard-services")?.closest(".panel");
+            if (servicesPanel) dashboard.insertBefore(workspace, servicesPanel);
+            else dashboard.appendChild(workspace);
+        }
+        workspace.innerHTML = `
+            <div class="service-card-head">
+                <div>
+                    <h2>Customer Control Center</h2>
+                    <p>Your company configuration is separated clearly so each setting has one owner.</p>
+                </div>
+            </div>
+            <div class="service-grid" style="margin-top:12px">
+                <div class="agent"><strong>AI Workforce</strong><p class="muted">Employees, behavior, knowledge, channels and testing.</p></div>
+                <div class="agent"><strong>Operations</strong><p class="muted">Inbox, customers, bookings, orders, leads, support requests and notifications.</p></div>
+                <div class="agent"><strong>Systems & Data</strong><p class="muted">Connected systems, automation, analytics, usage and operational health.</p></div>
+                <div class="agent"><strong>Company & Account</strong><p class="muted">Business profile, team access, security, plan and billing.</p></div>
+            </div>
+        `;
     }
 
     const baseRenderDashboard = window.renderDashboard;

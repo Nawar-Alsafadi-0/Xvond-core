@@ -118,3 +118,55 @@ test('Coexistence transport and human takeover verification are presented separa
     assert.match(setupRequired.title, /إعداد التعايش غير مكتمل/);
     assert.match(setupRequired.detail, /Meta/);
 });
+
+test('Meta SDK loader does not force CORS mode and resets after provider load failure', async () => {
+    const scripts = [];
+    const alerts = [];
+    let attempt = 0;
+    const FB = {
+        init() {},
+        login() {}
+    };
+    const window = {addEventListener() {}};
+    const document = {
+        currentScript: null,
+        getElementById: () => null,
+        createElement: () => ({remove() {}}),
+        head: {
+            appendChild(script) {
+                scripts.push(script);
+                attempt += 1;
+                if (attempt === 1) {
+                    script.onerror();
+                    return;
+                }
+                window.FB = context.FB = FB;
+                window.fbAsyncInit();
+            }
+        }
+    };
+    const context = vm.createContext({
+        window, document, URL,
+        api: async () => ({
+            ready: true,
+            can_edit: true,
+            app_id: '12345',
+            config_id: '67890',
+            graph_api_version: 'v26.0',
+            feature_type: null,
+            session_info_version: null
+        }),
+        alert(message) { alerts.push(message); }
+    });
+    vm.runInContext(source, context);
+
+    await window.openCustomerMetaWhatsAppConnect(7);
+    assert.equal(scripts.length, 1);
+    assert.equal(scripts[0].crossOrigin, undefined);
+    assert.match(alerts[0], /Meta/);
+
+    await window.openCustomerMetaWhatsAppConnect(7);
+    assert.equal(scripts.length, 2, 'a failed Meta SDK load must be retryable');
+    assert.equal(scripts[1].crossOrigin, undefined);
+});
+

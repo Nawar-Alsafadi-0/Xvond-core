@@ -306,7 +306,7 @@ def overview(current_user: User = Depends(require_customer_user)):
             max(len(navigation) - 1, 1),
             {
                 "id": "users",
-                "label": "Users",
+                "label": "Team & Access",
                 "loader": "users",
                 "group": "Account",
             },

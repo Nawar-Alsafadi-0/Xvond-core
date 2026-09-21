@@ -15,29 +15,58 @@ function xvondCustomerTrustedMetaOrigin(origin) {
 function xvondCustomerLoadMetaSdk(appId, graphVersion) {
     // WhatsApp Embedded Signup needs provider-side identifiers and a code
     // response, but those implementation details stay hidden from customers.
-    if (window.FB) {
+    const initialize = () => {
         FB.init({appId, cookie: true, xfbml: false, version: graphVersion || "v26.0", fedCM: false});
+    };
+    if (window.FB) {
+        initialize();
         return Promise.resolve();
     }
     if (xvondCustomerMetaSdkPromise) return xvondCustomerMetaSdkPromise;
-    xvondCustomerMetaSdkPromise = new Promise((resolve, reject) => {
-        window.fbAsyncInit = function () {
-            FB.init({appId, cookie: true, xfbml: false, version: graphVersion || "v26.0", fedCM: false});
+
+    const sdkPromise = new Promise((resolve, reject) => {
+        let settled = false;
+        const fail = () => {
+            if (settled) return;
+            settled = true;
+            const script = document.getElementById("facebook-jssdk");
+            if (script && !window.FB) script.remove?.();
+            reject(new Error("تعذر تحميل خدمة ربط واتساب من Meta. تحقق من حظر النوافذ/الإضافات ثم حاول مرة أخرى."));
+        };
+        const ready = () => {
+            if (settled) return;
+            if (!window.FB) {
+                fail();
+                return;
+            }
+            settled = true;
+            initialize();
             resolve();
         };
+
+        window.fbAsyncInit = ready;
         const existing = document.getElementById("facebook-jssdk");
         if (existing) {
-            existing.addEventListener("load", () => resolve(), {once: true});
+            existing.addEventListener("load", ready, {once: true});
+            existing.addEventListener("error", fail, {once: true});
             return;
         }
+
         const script = document.createElement("script");
         script.id = "facebook-jssdk";
         script.async = true;
         script.defer = true;
-        script.crossOrigin = "anonymous";
+        // Meta's documented browser SDK snippet loads this as a normal classic script.
+        // Do not force CORS mode here; it can make the provider script fail before FB.login.
         script.src = "https://connect.facebook.net/en_US/sdk.js";
-        script.onerror = () => reject(new Error("تعذر فتح نافذة ربط واتساب. حاول مرة أخرى."));
+        script.onerror = fail;
         document.head.appendChild(script);
+    });
+
+    xvondCustomerMetaSdkPromise = sdkPromise.catch(error => {
+        // A failed provider-script load must be retryable on the next user click.
+        xvondCustomerMetaSdkPromise = null;
+        throw error;
     });
     return xvondCustomerMetaSdkPromise;
 }
@@ -280,3 +309,4 @@ if (typeof loadAgents === "function") {
         return result;
     };
 }
+
