@@ -78,7 +78,7 @@ def test_multiple_capabilities_create_separate_operation_pages():
     assert "business" not in ids
     for item in navigation:
         if item["id"].startswith("requests-"):
-            assert item["group"] == "Operations"
+            assert item["group"] == "Customer Operations"
 
 
 def test_portal_separates_active_services_and_keeps_account_core():
