@@ -31,7 +31,7 @@ def test_ai_agents_portal_is_capability_aware():
     assert next(item for item in basic if item["id"] == "business-profile")["group"] == "Company"
     assert next(item for item in basic if item["id"] == "agents")["group"] == "AI Workforce"
     assert next(item for item in basic if item["id"] == "channels")["loader"] == "channels"
-    assert next(item for item in basic if item["id"] == "conversations")["group"] == "Customer Operations"
+    assert next(item for item in basic if item["id"] == "conversations")["group"] == "Operations"
     assert next(item for item in basic if item["id"] == "conversations")["label"] == "Inbox"
     assert next(item for item in basic if item["id"] == "customers")["loader"] == "customers"
     assert next(item for item in basic if item["id"] == "business-analytics")["loader"] == "customer-analytics"
@@ -78,7 +78,7 @@ def test_multiple_capabilities_create_separate_operation_pages():
     assert "business" not in ids
     for item in navigation:
         if item["id"].startswith("requests-"):
-            assert item["group"] == "Customer Operations"
+            assert item["group"] == "Operations"
 
 
 def test_portal_separates_active_services_and_keeps_account_core():
@@ -157,3 +157,13 @@ def test_customer_ui_renders_backend_navigation_and_unified_inbox():
     assert "capabilityModule" in js
     assert "module=${encodeURIComponent(capabilityModule)}" in js
     assert '"online_payments_enabled": False' in api_source
+
+def test_customer_portal_groups_management_areas_professionally():
+    navigation = build_customer_portal_navigation(["ai_agents"], ["booking", "orders"])
+    assert next(item for item in navigation if item["id"] == "agents")["group"] == "AI Workforce"
+    assert next(item for item in navigation if item["id"] == "channels")["group"] == "AI Workforce"
+    assert next(item for item in navigation if item["id"] == "usage")["group"] == "Insights"
+    assert next(item for item in navigation if item["id"] == "conversations")["group"] == "Operations"
+    assert next(item for item in navigation if item["id"] == "business-analytics")["group"] == "Insights"
+    assert next(item for item in navigation if item["id"] == "notifications")["group"] == "Operations"
+
