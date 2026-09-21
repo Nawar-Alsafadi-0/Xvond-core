@@ -178,3 +178,18 @@ def test_customer_workspace_does_not_expose_legacy_employee_builder_navigation()
     assert 'selfServiceDraft' not in app_source
     assert '/static/customer/employee-builder.js' in html
     assert '/static/customer/employee-builder.css' in html
+
+
+def test_customer_channel_ui_does_not_wrap_agent_loading_with_network_decorators():
+    root = Path(__file__).resolve().parents[1]
+    whatsapp = (root / "frontend" / "customer" / "meta-whatsapp.js").read_text(encoding="utf-8")
+    meta = (root / "frontend" / "customer" / "meta-channels.js").read_text(encoding="utf-8")
+    website = (root / "frontend" / "customer" / "website-channel.js").read_text(encoding="utf-8")
+    center = (root / "frontend" / "customer" / "channel-center.js").read_text(encoding="utf-8")
+
+    assert "xvondOriginalCustomerLoadAgents" not in whatsapp
+    assert "xvondMetaChannelsOriginalLoadAgents" not in meta
+    assert "xvondWebsiteOriginalLoadAgents" not in website
+    assert "Promise.all([" in center
+    assert 'api("/customer/overview")' in center
+    assert "loadAgents()" in center

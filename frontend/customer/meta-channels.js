@@ -189,14 +189,6 @@ function xvondDecorateAgentsWithMetaChannels() {
     });
 }
 
-if (typeof loadAgents === "function") {
-    const xvondMetaChannelsOriginalLoadAgents = loadAgents;
-    loadAgents = async function (...args) {
-        const result = await xvondMetaChannelsOriginalLoadAgents(...args);
-        xvondDecorateAgentsWithMetaChannels();
-        return result;
-    };
-}
 
 
 window.openCustomerMetaChannelSettings = async function(agentId, channelType) {
