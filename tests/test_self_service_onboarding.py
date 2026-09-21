@@ -130,7 +130,7 @@ def test_self_service_portal_visibility_does_not_fake_paid_entitlement():
     assert '"active_services": active_service_codes' in source
 
 
-def test_self_service_builder_is_a_first_class_portal_route():
+def test_self_service_builder_code_is_preserved_but_not_exposed_in_customer_workspace():
     portal = (ROOT / "backend" / "app" / "api" / "customer_portal.py").read_text(
         encoding="utf-8"
     )
@@ -140,15 +140,20 @@ def test_self_service_builder_is_a_first_class_portal_route():
     session = (ROOT / "frontend" / "customer" / "session-security.js").read_text(
         encoding="utf-8"
     )
+    html = (ROOT / "frontend" / "customer" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    builder = (ROOT / "frontend" / "customer" / "employee-builder.js").read_text(
+        encoding="utf-8"
+    )
 
-    assert '"id": "employee-builder"' in portal
-    assert '"loader": "employee-builder"' in portal
+    assert '"id": "employee-builder"' not in portal
+    assert '"loader": "employee-builder"' not in portal
     assert "is_self_service_workspace = company.onboarding_source == \"self_service\"" in portal
     assert "if is_self_service_workspace:" in portal
     assert "async function openInitialPortalPage()" in app
-    assert 'requestedPage' in app
-    assert 'selfServiceDraft' in app
-    draft_block = app.split("const selfServiceDraft =", 1)[1].split(");", 1)[0]
-    assert "summary?.agents" not in draft_block
-    assert '"employee-builder"' in app
+    assert "requestedPage" in app
+    assert "selfServiceDraft" not in app
     assert "await openInitialPortalPage()" in session
+    assert "/static/customer/employee-builder.js" in html
+    assert "loadEmployeeBuilder" in builder

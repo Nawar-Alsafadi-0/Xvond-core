@@ -167,3 +167,14 @@ def test_customer_portal_groups_management_areas_professionally():
     assert next(item for item in navigation if item["id"] == "business-analytics")["group"] == "Insights"
     assert next(item for item in navigation if item["id"] == "notifications")["group"] == "Operations"
 
+
+
+def test_customer_workspace_does_not_expose_legacy_employee_builder_navigation():
+    api_source = (ROOT / "backend" / "app" / "api" / "customer_portal.py").read_text(encoding="utf-8")
+    app_source = (ROOT / "frontend" / "customer" / "app.js").read_text(encoding="utf-8")
+    html = (ROOT / "frontend" / "customer" / "index.html").read_text(encoding="utf-8")
+
+    assert '"id": "employee-builder"' not in api_source
+    assert 'selfServiceDraft' not in app_source
+    assert '/static/customer/employee-builder.js' in html
+    assert '/static/customer/employee-builder.css' in html

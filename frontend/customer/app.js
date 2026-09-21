@@ -180,12 +180,7 @@ async function openInitialPortalPage() {
     const validRequestedPage = portalNavigation.some(item => item.id === requestedPage)
         ? requestedPage
         : null;
-    const selfServiceDraft = (
-        portalOverview?.company?.onboarding_source === "self_service"
-        && Number(portalOverview?.summary?.active_agents || 0) === 0
-        && portalNavigation.some(item => item.id === "employee-builder")
-    );
-    const initialPage = validRequestedPage || (selfServiceDraft ? "employee-builder" : null);
+    const initialPage = validRequestedPage;
     if (!initialPage) return;
 
     const initialButton = [...document.querySelectorAll("#portal-nav .nav-item")]
