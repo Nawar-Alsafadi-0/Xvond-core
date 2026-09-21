@@ -47,6 +47,7 @@ function xvondChannelCenterCard(agent, channel) {
             ${account ? `<div class="muted">Connected account: <strong>${safe(account)}</strong></div>` : ""}
             <div style="display:flex;gap:8px;flex-wrap:wrap">
                 ${xvondChannelCenterAction(agent, channel)}
+                ${["instagram","messenger"].includes(type) ? `<button type="button" onclick="openCustomerMetaChannelSettings(${Number(agent.id)},'${type}')">Channel settings</button>` : ""}
                 ${["whatsapp","instagram","messenger"].includes(type) && (String(channel?.provisioning_state||"").toLowerCase()==="connected" || channel?.enabled || type==="whatsapp") ? `<button type="button" onclick="xvondTestChannelConnection(${Number(agent.id)},'${type}')">Test connection</button>` : ""}
                 ${["whatsapp","instagram","messenger"].includes(type) && (String(channel?.provisioning_state||"").toLowerCase()==="connected" || channel?.enabled || (type==="whatsapp" && channel?.config?.phone_number_id)) ? `<button type="button" onclick="xvondDisconnectCustomerChannel(${Number(agent.id)},'${type}')">Disconnect</button>` : ""}
                 <button type="button" onclick="xvondRefreshChannelCenter()">Refresh status</button>
