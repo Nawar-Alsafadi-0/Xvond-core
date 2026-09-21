@@ -112,3 +112,12 @@ def test_messenger_discovery_uses_channel_specific_connect_settings(monkeypatch)
 
     assert requested == ["messenger"]
     assert result == {"channel_type": "messenger", "assets": []}
+
+
+def test_meta_channel_frontend_fallback_does_not_force_cors_and_is_retryable():
+    from pathlib import Path
+
+    source = Path("frontend/customer/meta-channels.js").read_text(encoding="utf-8")
+    assert 'crossOrigin = "anonymous"' not in source
+    assert "xvondMetaChannelSdkPromise = null" in source
+    assert 'script.onerror = fail' in source
