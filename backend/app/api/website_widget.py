@@ -257,14 +257,13 @@ def _customer_self_service_agent(
     if agent is None:
         raise HTTPException(404, "AI employee not found")
     company = db.query(Company).filter(Company.id == current_user.company_id).first()
-    if not is_self_service_company(company):
-        raise HTTPException(409, "Website Self-Service setup is only available to Self-Service workspaces")
-    assert_self_service_channel_selected(
-        db,
-        company=company,
-        agent=agent,
-        channel_type="website",
-    )
+    if is_self_service_company(company):
+        assert_self_service_channel_selected(
+            db,
+            company=company,
+            agent=agent,
+            channel_type="website",
+        )
     return company, agent
 
 
@@ -302,7 +301,7 @@ def customer_get_website_config(
 ):
     db = SessionLocal()
     try:
-        _company, agent = _customer_self_service_agent(
+        company, agent = _customer_self_service_agent(
             db,
             current_user=current_user,
             agent_id=agent_id,
@@ -317,6 +316,8 @@ def customer_get_website_config(
             .first()
         )
         if channel is None:
+            if not is_self_service_company(company):
+                raise HTTPException(404, "Website Chat is not assigned to this AI employee")
             return {
                 "agent_id": agent.id,
                 "configured": False,
@@ -350,7 +351,7 @@ def customer_configure_website(
 ):
     db = SessionLocal()
     try:
-        _company, agent = _customer_self_service_agent(
+        company, agent = _customer_self_service_agent(
             db,
             current_user=current_user,
             agent_id=agent_id,
@@ -371,6 +372,8 @@ def customer_configure_website(
             .with_for_update()
             .first()
         )
+        if channel is None and not is_self_service_company(company):
+            raise HTTPException(404, "Website Chat is not assigned to this AI employee")
         old = reveal_config(channel.config) if channel is not None else {}
         config = _website_config_from_setup(
             agent=agent,
