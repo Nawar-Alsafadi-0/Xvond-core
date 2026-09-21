@@ -142,17 +142,20 @@ def _request_json(
 
 def exchange_instagram_code(*, code: str) -> dict:
     redirect_uri = _redirect_uri()
-    short = _request_json(
-        "POST",
-        "https://api.instagram.com/oauth/access_token",
-        form={
-            "client_id": settings.META_INSTAGRAM_APP_ID,
-            "client_secret": settings.META_INSTAGRAM_APP_SECRET,
-            "grant_type": "authorization_code",
-            "redirect_uri": redirect_uri,
-            "code": str(code or "").strip(),
-        },
-    )
+    try:
+        short = _request_json(
+            "POST",
+            "https://api.instagram.com/oauth/access_token",
+            form={
+                "client_id": settings.META_INSTAGRAM_APP_ID,
+                "client_secret": settings.META_INSTAGRAM_APP_SECRET,
+                "grant_type": "authorization_code",
+                "redirect_uri": redirect_uri,
+                "code": str(code or "").strip(),
+            },
+        )
+    except InstagramOAuthError as exc:
+        raise InstagramOAuthError(f"Instagram code exchange failed: {exc}") from exc
     short_token = str(short.get("access_token") or "").strip()
     if not short_token:
         raise InstagramOAuthError("Instagram did not return an access token")
@@ -165,14 +168,20 @@ def exchange_instagram_code(*, code: str) -> dict:
             "access_token": short_token,
         }
     )
-    long = _request_json("GET", long_url)
+    try:
+        long = _request_json("GET", long_url)
+    except InstagramOAuthError as exc:
+        raise InstagramOAuthError(f"Instagram long-lived token exchange failed: {exc}") from exc
     access_token = str(long.get("access_token") or "").strip() or short_token
 
     profile_url = (
         f"https://graph.instagram.com/{version}/me?"
         + urllib.parse.urlencode({"fields": "user_id,username", "access_token": access_token})
     )
-    profile = _request_json("GET", profile_url)
+    try:
+        profile = _request_json("GET", profile_url)
+    except InstagramOAuthError as exc:
+        raise InstagramOAuthError(f"Instagram profile lookup failed: {exc}") from exc
     user_id = str(profile.get("user_id") or profile.get("id") or short.get("user_id") or "").strip()
     username = str(profile.get("username") or "").strip()
     if not user_id:
@@ -188,12 +197,19 @@ def exchange_instagram_code(*, code: str) -> dict:
 
 def subscribe_instagram_messaging(*, user_id: str, access_token: str) -> None:
     version = str(settings.META_GRAPH_API_VERSION or "v26.0").strip()
-    url = f"https://graph.instagram.com/{version}/{urllib.parse.quote(str(user_id), safe='')}/subscribed_apps"
-    payload = _request_json(
-        "POST",
-        url,
-        access_token=access_token,
-        form={"subscribed_fields": "messages,messaging_postbacks"},
+    url = (
+        f"https://graph.instagram.com/{version}/"
+        f"{urllib.parse.quote(str(user_id), safe='')}/subscribed_apps?"
+        + urllib.parse.urlencode(
+            {
+                "subscribed_fields": "messages,messaging_postbacks",
+                "access_token": access_token,
+            }
+        )
     )
+    try:
+        payload = _request_json("POST", url)
+    except InstagramOAuthError as exc:
+        raise InstagramOAuthError(f"Instagram webhook subscription failed: {exc}") from exc
     if payload.get("success") is not True:
         raise InstagramOAuthError("Instagram did not confirm the messaging webhook subscription")

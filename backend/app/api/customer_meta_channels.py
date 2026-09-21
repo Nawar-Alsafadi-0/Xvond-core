@@ -467,7 +467,7 @@ def discover_assets(
     current_user: User = Depends(require_customer_manager),
 ):
     channel_type = _normalize_channel_type(data.channel_type)
-    config = _meta_connect_settings()
+    config = _meta_connect_settings(channel_type)
     if not config["ready"]:
         raise HTTPException(503, "Xvond Meta Connect is not configured")
     db = SessionLocal()
@@ -493,7 +493,7 @@ def complete_connect(
     current_user: User = Depends(require_customer_manager),
 ):
     channel_type = _normalize_channel_type(data.channel_type)
-    config = _meta_connect_settings()
+    config = _meta_connect_settings(channel_type)
     if not config["ready"]:
         raise HTTPException(503, "Xvond Meta Connect is not configured")
 
