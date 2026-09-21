@@ -9,19 +9,43 @@ function xvondLoadMetaChannelSdk(appId, graphVersion) {
         return Promise.resolve();
     }
     if (xvondMetaChannelSdkPromise) return xvondMetaChannelSdkPromise;
-    xvondMetaChannelSdkPromise = new Promise((resolve, reject) => {
-        window.fbAsyncInit = function () {
+    const sdkPromise = new Promise((resolve, reject) => {
+        let settled = false;
+        const fail = () => {
+            if (settled) return;
+            settled = true;
+            const existing = document.getElementById("facebook-jssdk");
+            if (existing && !window.FB) existing.remove?.();
+            reject(new Error("Could not open Meta Connect."));
+        };
+        const ready = () => {
+            if (settled) return;
+            if (!window.FB) {
+                fail();
+                return;
+            }
+            settled = true;
             FB.init({appId, cookie: true, xfbml: false, version: graphVersion || "v26.0", fedCM: false});
             resolve();
         };
+        window.fbAsyncInit = ready;
+        const existing = document.getElementById("facebook-jssdk");
+        if (existing) {
+            existing.addEventListener("load", ready, {once: true});
+            existing.addEventListener("error", fail, {once: true});
+            return;
+        }
         const script = document.createElement("script");
         script.id = "facebook-jssdk";
         script.async = true;
         script.defer = true;
-        script.crossOrigin = "anonymous";
         script.src = "https://connect.facebook.net/en_US/sdk.js";
-        script.onerror = () => reject(new Error("Could not open Meta Connect."));
+        script.onerror = fail;
         document.head.appendChild(script);
+    });
+    xvondMetaChannelSdkPromise = sdkPromise.catch(error => {
+        xvondMetaChannelSdkPromise = null;
+        throw error;
     });
     return xvondMetaChannelSdkPromise;
 }
