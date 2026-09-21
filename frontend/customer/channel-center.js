@@ -67,8 +67,11 @@ window.renderXvondChannelCenter = async function () {
     if (!target) return;
     target.innerHTML = '<div class="panel"><p class="muted">Loading channel connections...</p></div>';
     try {
-        portalOverview = await api("/customer/overview");
-        await loadAgents();
+        const [overview] = await Promise.all([
+            api("/customer/overview"),
+            loadAgents(),
+        ]);
+        portalOverview = overview;
         const channels = portalOverview?.channels || [];
         target.innerHTML = `
             <div class="panel" style="margin-bottom:20px">
