@@ -24,6 +24,9 @@ function xvondChannelCenterAction(agent, channel) {
     if (type === "website") {
         return `<button type="button" onclick="openCustomerWebsiteChannelSettings(${Number(agent.id)})">Manage Website Chat</button>`;
     }
+    if (type === "voice") {
+        return `<button type="button" onclick="openCustomerVoiceChannelSettings(${Number(agent.id)})">Voice settings</button>`;
+    }
     return `<button type="button" disabled>Managed by Xvond</button>`;
 }
 
@@ -249,5 +252,102 @@ window.openCustomerGenericChannelSettings = async function(agentId, channelType)
         });
     } catch (error) {
         alert(error.message || "Channel settings are unavailable.");
+    }
+};
+
+
+window.openCustomerVoiceChannelSettings = async function(agentId) {
+    const agent = (agents || []).find(item => Number(item.id) === Number(agentId));
+    try {
+        const result = await api(`/customer/agents/voice/${Number(agentId)}/settings`);
+        const settings = result.settings || {};
+        const overlay = document.createElement("div");
+        overlay.style.cssText = "position:fixed;inset:0;z-index:10000;background:rgba(15,23,42,.66);display:flex;align-items:flex-start;justify-content:center;padding:28px 16px;overflow:auto";
+        overlay.innerHTML = `
+            <div class="panel" style="width:min(700px,100%);margin:auto">
+                <div class="service-card-head">
+                    <div>
+                        <h2 style="margin:0">Voice Settings · ${safe(agent?.name || "AI Employee")}</h2>
+                        <p class="muted" style="margin:6px 0 0">These settings change only the phone-call experience. Employee identity, knowledge and reply-language policy remain shared.</p>
+                    </div>
+                    <button type="button" data-xvond-voice-settings-close>Close</button>
+                </div>
+                ${result.phone_number ? `<div class="agent" style="margin-top:14px"><strong>Connected number</strong><p class="muted" style="margin:6px 0 0">${safe(result.phone_number)}</p></div>` : ""}
+                <form data-xvond-voice-settings-form style="display:grid;gap:12px;margin-top:16px">
+                    <div>
+                        <label>Tone</label>
+                        <select data-field="tone">
+                            <option value="professional_friendly" ${settings.tone === "professional_friendly" ? "selected" : ""}>Professional & friendly</option>
+                            <option value="professional" ${settings.tone === "professional" ? "selected" : ""}>Professional</option>
+                            <option value="warm" ${settings.tone === "warm" ? "selected" : ""}>Warm</option>
+                            <option value="concise" ${settings.tone === "concise" ? "selected" : ""}>Concise</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Response length</label>
+                        <select data-field="response_length">
+                            <option value="concise" ${settings.response_length === "concise" ? "selected" : ""}>Concise</option>
+                            <option value="balanced" ${settings.response_length === "balanced" ? "selected" : ""}>Balanced</option>
+                            <option value="detailed" ${settings.response_length === "detailed" ? "selected" : ""}>Detailed</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Call greeting</label>
+                        <textarea data-field="greeting_message" rows="3" placeholder="Optional first message when a call starts.">${safe(settings.greeting_message || "")}</textarea>
+                    </div>
+                    <div>
+                        <label>Voice-only instructions</label>
+                        <textarea data-field="channel_instructions" rows="5" placeholder="Example: Keep answers short and never read long URLs aloud.">${safe(settings.channel_instructions || "")}</textarea>
+                    </div>
+                    <label style="display:flex;gap:8px;align-items:center">
+                        <input data-field="allow_interruption" type="checkbox" ${settings.allow_interruption === false ? "" : "checked"}>
+                        Allow caller interruption while the employee is speaking
+                    </label>
+                    <div class="agent">
+                        <strong>Human transfer</strong>
+                        <p class="muted" style="margin:6px 0 0">Live call transfer is not exposed here until the telephony transfer route is configured and verified by Xvond.</p>
+                    </div>
+                    <div class="error" data-xvond-voice-settings-error></div>
+                    <button type="submit">Save voice settings</button>
+                </form>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+        const close = () => overlay.remove();
+        overlay.querySelector("[data-xvond-voice-settings-close]")?.addEventListener("click", close);
+        overlay.addEventListener("click", event => {
+            if (event.target === overlay) close();
+        });
+        const form = overlay.querySelector("[data-xvond-voice-settings-form]");
+        form?.addEventListener("submit", async event => {
+            event.preventDefault();
+            const value = key => form.querySelector(`[data-field="${key}"]`)?.value || "";
+            const checked = key => Boolean(form.querySelector(`[data-field="${key}"]`)?.checked);
+            const error = form.querySelector("[data-xvond-voice-settings-error]");
+            const submit = form.querySelector('button[type="submit"]');
+            if (submit) submit.disabled = true;
+            if (error) error.textContent = "";
+            try {
+                await api(`/customer/agents/voice/${Number(agentId)}/settings`, {
+                    method: "PUT",
+                    body: JSON.stringify({
+                        tone: value("tone"),
+                        response_length: value("response_length"),
+                        greeting_message: value("greeting_message"),
+                        channel_instructions: value("channel_instructions"),
+                        allow_interruption: checked("allow_interruption"),
+                    }),
+                });
+                portalOverview = await api("/customer/overview");
+                await renderXvondChannelCenter();
+                close();
+            } catch (err) {
+                if (error) error.textContent = err?.message || "Could not save voice settings.";
+            } finally {
+                if (submit) submit.disabled = false;
+            }
+        });
+    } catch (error) {
+        alert(error.message || "Voice settings are unavailable.");
     }
 };
