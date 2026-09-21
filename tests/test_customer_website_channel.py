@@ -216,7 +216,7 @@ def test_customer_website_setup_rejects_unselected_self_service_channel(
     assert "current Job Brief" in str(exc_info.value.detail)
 
 
-def test_customer_website_setup_is_tenant_scoped_and_self_service_only(website_database):
+def test_customer_website_setup_is_tenant_scoped_and_managed_channel_must_be_assigned(website_database):
     with pytest.raises(HTTPException) as other:
         api.customer_get_website_config(2, USER)
     assert other.value.status_code == 404
@@ -224,7 +224,38 @@ def test_customer_website_setup_is_tenant_scoped_and_self_service_only(website_d
     managed_user = SimpleNamespace(company_id=3, role="owner")
     with pytest.raises(HTTPException) as managed:
         api.customer_get_website_config(3, managed_user)
-    assert managed.value.status_code == 409
+    assert managed.value.status_code == 404
+    assert "not assigned" in str(managed.value.detail)
+
+
+def test_managed_customer_can_configure_admin_assigned_website_channel(website_database):
+    factory = website_database
+    with factory() as db:
+        db.add(
+            AgentChannel(
+                company_id=3,
+                agent_id=3,
+                channel_type="website",
+                config={},
+                enabled=False,
+            )
+        )
+        db.commit()
+
+    managed_user = SimpleNamespace(company_id=3, role="owner")
+    result = api.customer_configure_website(
+        3,
+        api.WebsiteSetup(
+            allowed_domain="managed.example.com",
+            widget_name="Managed Website Assistant",
+            human_assistance_mode="ai_only",
+        ),
+        managed_user,
+    )
+
+    assert result["configured"] is True
+    assert result["config"]["allowed_domain"] == "managed.example.com"
+    assert result["config"]["human_assistance_mode"] == "ai_only"
 
 
 def test_customer_website_setup_flows_into_atomic_self_service_launch(
@@ -334,5 +365,8 @@ def test_customer_portal_loads_website_setup_ui():
     assert "/static/customer/website-channel.js" in index
     assert "/customer/website-channel/agents/" in js
     assert "Website Chat prepared" in js
-    assert "Save Website setup" in js
+    assert "Save Website Chat settings" in js
+    assert "human_assistance_mode" in js
+    assert "custom_instructions" in js
+    assert "openCustomerWebsiteChannelSettings" in js
     assert "widget_key" not in js
