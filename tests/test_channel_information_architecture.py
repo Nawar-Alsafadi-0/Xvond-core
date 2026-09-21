@@ -91,3 +91,11 @@ def test_admin_is_not_a_customer_conversation_control_plane():
     assert "requests: []" in privacy
     assert "conversations: []" in privacy
     assert "handoffs: []" in privacy
+
+def test_customer_channel_management_stays_on_dedicated_channels_page():
+    whatsapp = read("frontend/customer/meta-whatsapp.js")
+    center = read("frontend/customer/channel-center.js")
+    assert "xvondDecorateCustomerAgentsWithWhatsApp" not in whatsapp
+    assert "openCustomerMetaWhatsAppConnect" in center
+    assert 'document.getElementById("page-channels")' in center
+
