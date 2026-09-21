@@ -9,16 +9,25 @@ from backend.app.api.admin_ai_employee_profile import (
     _set_agent_behavior,
     _upsert_profile,
 )
+from backend.app.core.config_secrets import merge_config, reveal_config
 from backend.app.core.database.connection import SessionLocal
 from backend.app.core.dependencies import require_customer_manager
 from backend.app.models.company import Company
 from backend.app.models.user import User
 from backend.app.modules.ai_agent.factory_models import AgentConfig
 from backend.app.modules.ai_agent.models import AIAgent
+from backend.app.modules.channels.catalog import get_channel_capability
 from backend.app.modules.channels.models import AgentChannel
 
 
 router = APIRouter(prefix="/customer/agents", tags=["Customer Agent Controls"])
+
+
+class CustomerChannelBehaviorUpdate(BaseModel):
+    tone: str | None = None
+    response_style: str | None = None
+    response_length: str | None = None
+    channel_instructions: str | None = None
 
 
 class AgentCustomerUpdate(BaseModel):
@@ -62,6 +71,99 @@ def _current_profile(db, company: Company, agent: AIAgent):
     behavior = _agent_behavior(db, agent, channels)
     return profile, behavior
 
+
+
+
+_GENERIC_CUSTOMER_BEHAVIOR_CHANNELS = {"telegram", "email", "sms", "slack", "teams", "custom"}
+
+
+def _customer_behavior_channel(db, user: User, agent_id: int, channel_type: str) -> AgentChannel:
+    key = str(channel_type or "").strip().lower()
+    if key not in _GENERIC_CUSTOMER_BEHAVIOR_CHANNELS:
+        raise HTTPException(400, "This channel uses its dedicated settings flow")
+    agent = get_customer_agent(db, user, agent_id)
+    channel = (
+        db.query(AgentChannel)
+        .filter(
+            AgentChannel.company_id == user.company_id,
+            AgentChannel.agent_id == agent.id,
+            AgentChannel.channel_type == key,
+        )
+        .first()
+    )
+    if channel is None:
+        raise HTTPException(404, "Channel is not assigned to this AI Employee")
+    capability = get_channel_capability(key) or {}
+    if capability.get("runtime_state") != "live":
+        raise HTTPException(409, "Channel runtime is not available")
+    return channel
+
+
+@router.get("/{agent_id}/channels/{channel_type}/settings")
+def customer_channel_behavior_settings(
+    agent_id: int,
+    channel_type: str,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        channel = _customer_behavior_channel(db, current_user, agent_id, channel_type)
+        config = reveal_config(channel.config) or {}
+        return {
+            "agent_id": agent_id,
+            "channel_id": channel.id,
+            "channel_type": channel.channel_type,
+            "settings": {
+                "tone": str(config.get("tone") or "professional_friendly"),
+                "response_style": str(config.get("response_style") or "conversational"),
+                "response_length": str(config.get("response_length") or "concise"),
+                "channel_instructions": str(config.get("channel_instructions") or ""),
+            },
+        }
+    finally:
+        db.close()
+
+
+@router.put("/{agent_id}/channels/{channel_type}/settings")
+def update_customer_channel_behavior_settings(
+    agent_id: int,
+    channel_type: str,
+    data: CustomerChannelBehaviorUpdate,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        channel = _customer_behavior_channel(db, current_user, agent_id, channel_type)
+        channel = (
+            db.query(AgentChannel)
+            .filter(AgentChannel.id == channel.id)
+            .with_for_update()
+            .first()
+        )
+        current = reveal_config(channel.config) or {}
+        updates = {
+            "tone": str(data.tone or current.get("tone") or "professional_friendly").strip()[:80],
+            "response_style": str(data.response_style or current.get("response_style") or "conversational").strip()[:80],
+            "response_length": str(data.response_length or current.get("response_length") or "concise").strip()[:80],
+            "channel_instructions": str(data.channel_instructions or "").strip()[:4000] or None,
+        }
+        channel.config = merge_config(channel.config, updates)
+        db.commit()
+        return {
+            "status": "updated",
+            "agent_id": agent_id,
+            "channel_id": channel.id,
+            "channel_type": channel.channel_type,
+            "settings": updates,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 @router.get("/{agent_id}")
 def agent_details(

@@ -109,3 +109,16 @@ def test_customer_meta_origin_validation_is_strict():
     assert "new URL(origin)" in js
     assert 'host === "facebook.com" || host.endsWith(".facebook.com")' in js
     assert "event.origin.endsWith('facebook.com')" not in js
+
+
+def test_customer_whatsapp_channel_settings_are_exposed_and_channel_scoped():
+    api = source("backend/app/api/customer_meta_whatsapp.py")
+    js = source("frontend/customer/meta-whatsapp.js")
+    center = source("frontend/customer/channel-center.js")
+    assert '@router.get("/settings")' in api
+    assert '@router.put("/settings")' in api
+    assert "whatsapp.customer_settings_updated" in api
+    assert "emoji_style" in api
+    assert "openCustomerWhatsAppChannelSettings" in js
+    assert "WhatsApp-only instructions" in js
+    assert "Channel settings" in center

@@ -116,3 +116,18 @@ def test_customer_employee_manager_includes_channels_and_systems():
     assert "renderCustomerSystemsTab" in manager
     assert "/customer/agents/manage/integrations" in manager
 
+
+
+def test_customer_managed_text_channels_expose_behavior_settings_without_provider_secrets():
+    from pathlib import Path
+
+    backend = Path("backend/app/api/customer_agents.py").read_text(encoding="utf-8")
+    frontend = Path("frontend/customer/channel-center.js").read_text(encoding="utf-8")
+
+    assert '_GENERIC_CUSTOMER_BEHAVIOR_CHANNELS = {"telegram", "email", "sms", "slack", "teams", "custom"}' in backend
+    assert '@router.get("/{agent_id}/channels/{channel_type}/settings")' in backend
+    assert '@router.put("/{agent_id}/channels/{channel_type}/settings")' in backend
+    assert "channel_instructions" in backend
+    assert "provider_secret" not in backend.split("def customer_channel_behavior_settings", 1)[1].split("def update_customer_channel_behavior_settings", 1)[0]
+    assert "openCustomerGenericChannelSettings" in frontend
+    assert '["telegram","email","sms","slack","teams","custom"]' in frontend
