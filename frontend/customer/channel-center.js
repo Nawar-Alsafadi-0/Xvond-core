@@ -22,7 +22,7 @@ function xvondChannelCenterAction(agent, channel) {
         return `<button type="button" onclick="openCustomerMetaChannelConnect(${Number(agent.id)},'${type}')">${connected ? "Reconnect / Change account" : connectLabel}</button>`;
     }
     if (type === "website") {
-        return `<button type="button" onclick="openPage('agents',[...document.querySelectorAll('#portal-nav .nav-item')].find(x=>x.dataset.page==='agents')||null)">Manage Website Chat</button>`;
+        return `<button type="button" onclick="openCustomerWebsiteChannelSettings(${Number(agent.id)})">Manage Website Chat</button>`;
     }
     return `<button type="button" disabled>Managed by Xvond</button>`;
 }
