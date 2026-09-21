@@ -5,7 +5,7 @@ from time import perf_counter
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
@@ -307,16 +307,14 @@ def health():
 
 @app.get("/admin-ui")
 def admin_ui():
-    return RedirectResponse(url=f"/static/admin/index.html?v={CUSTOMER_PORTAL_VERSION}")
+    return FileResponse(FRONTEND_DIR / "admin" / "index.html")
 
 
 @app.get("/customer-ui")
 @app.get("/login")
 @app.get("/dashboard")
 def customer_ui():
-    return RedirectResponse(
-        url=f"/static/customer/index.html?v={CUSTOMER_PORTAL_VERSION}"
-    )
+    return FileResponse(FRONTEND_DIR / "customer" / "index.html")
 
 
 @app.get("/build")

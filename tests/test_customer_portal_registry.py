@@ -193,3 +193,11 @@ def test_customer_channel_ui_does_not_wrap_agent_loading_with_network_decorators
     assert "Promise.all([" in center
     assert 'api("/customer/overview")' in center
     assert "loadAgents()" in center
+
+
+def test_portal_shells_use_clean_canonical_routes():
+    source = (Path(__file__).resolve().parents[1] / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+    assert 'return FileResponse(FRONTEND_DIR / "customer" / "index.html")' in source
+    assert 'return FileResponse(FRONTEND_DIR / "admin" / "index.html")' in source
+    assert 'RedirectResponse(url=f"/static/customer/index.html' not in source
+    assert 'RedirectResponse(url=f"/static/admin/index.html' not in source
