@@ -281,16 +281,10 @@ def overview(current_user: User = Depends(require_customer_user)):
             enabled_modules,
         )
         if is_self_service_workspace:
-            navigation.insert(
-                1,
-                {
-                    "id": "employee-builder",
-                    "label": "Build your employee",
-                    "loader": "employee-builder",
-                    "group": "AI Workforce",
-                    "service_code": "ai_agents",
-                },
-            )
+            # Keep the legacy/self-service builder implementation available in
+            # source for future product use, but do not expose it inside the
+            # current customer management workspace. Customers manage employees
+            # delivered to their company; creation remains outside this portal.
             if not any(item.get("id") == "integrations" for item in navigation):
                 navigation.insert(
                     max(len(navigation) - 2, 2),
