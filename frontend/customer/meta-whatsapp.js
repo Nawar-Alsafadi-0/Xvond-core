@@ -301,14 +301,6 @@ async function xvondDecorateCustomerAgentsWithWhatsApp() {
     }));
 }
 
-if (typeof loadAgents === "function") {
-    const xvondOriginalCustomerLoadAgents = loadAgents;
-    loadAgents = async function (...args) {
-        const result = await xvondOriginalCustomerLoadAgents(...args);
-        await xvondDecorateCustomerAgentsWithWhatsApp();
-        return result;
-    };
-}
 
 
 
