@@ -3,140 +3,242 @@ function xvondCustomerWebsiteStatus(config) {
         return {
             title: "Website Chat Live",
             detail: "The website widget is active and uses this AI employee.",
-            action: null,
         };
     }
     if (config?.prepared) {
         return {
             title: "Website Chat prepared",
-            detail: "The website is configured. It will become live together with the employee when you launch.",
-            action: "Edit Website setup",
+            detail: "The channel is configured and waiting for launch.",
         };
     }
     return {
         title: "Set up Website Chat",
-        detail: "Add the website domain that will host the Xvond chat widget.",
-        action: "Set up Website Chat",
+        detail: "Configure the website domain, widget experience and channel-specific human assistance.",
     };
 }
 
-function xvondCustomerWebsiteForm(box, agentId, config) {
-    const form = box.querySelector(".xvond-website-form");
-    if (!form) return;
-    const values = config?.config || {};
-    const domain = form.querySelector('[data-field="allowed_domain"]');
-    const name = form.querySelector('[data-field="widget_name"]');
-    const welcome = form.querySelector('[data-field="welcome_message"]');
-    const welcomeEn = form.querySelector('[data-field="welcome_message_en"]');
-    if (domain) domain.value = values.allowed_domain || "";
-    if (name) name.value = values.widget_name || "";
-    if (welcome) welcome.value = values.welcome_message || "";
-    if (welcomeEn) welcomeEn.value = values.welcome_message_en || "";
-
-    form.addEventListener("submit", async event => {
-        event.preventDefault();
-        const submit = form.querySelector('button[type="submit"]');
-        const error = form.querySelector(".xvond-website-error");
-        if (submit) submit.disabled = true;
-        if (error) error.textContent = "";
-        try {
-            await api(`/customer/website-channel/agents/${Number(agentId)}`, {
-                method: "PUT",
-                body: JSON.stringify({
-                    allowed_domain: domain?.value?.trim() || "",
-                    widget_name: name?.value?.trim() || null,
-                    welcome_message: welcome?.value?.trim() || null,
-                    welcome_message_en: welcomeEn?.value?.trim() || null,
-                }),
-            });
-            await loadAgents();
-        } catch (err) {
-            if (error) error.textContent = err?.message || "Could not save Website Chat setup.";
-        } finally {
-            if (submit) submit.disabled = false;
-        }
-    });
+function xvondWebsiteAssignedToAgent(agentId) {
+    return (portalOverview?.channels || []).some(item =>
+        Number(item.agent_id) === Number(agentId) &&
+        String(item.type || "").toLowerCase() === "website"
+    );
 }
 
+function xvondWebsiteSelfServiceSelected(agent) {
+    const slots = Array.isArray(agent?.self_service_channel_slots)
+        ? agent.self_service_channel_slots
+        : [];
+    return slots.includes("website");
+}
+
+function xvondWebsiteCanOpen(agent) {
+    return xvondWebsiteAssignedToAgent(agent?.id) || xvondWebsiteSelfServiceSelected(agent);
+}
+
+function xvondWebsiteFieldValue(config, key, fallback = "") {
+    const value = config?.config?.[key];
+    return value === undefined || value === null ? fallback : String(value);
+}
+
+function xvondWebsiteModalMarkup(agent, config) {
+    const status = xvondCustomerWebsiteStatus(config);
+    const mode = xvondWebsiteFieldValue(config, "human_assistance_mode", "direct_handoff");
+    const position = xvondWebsiteFieldValue(config, "position", "right");
+    const editable = config?.can_edit !== false;
+    return `
+        <div class="xvond-channel-modal-backdrop" style="position:fixed;inset:0;z-index:10000;background:rgba(15,23,42,.66);display:flex;align-items:flex-start;justify-content:center;padding:28px 16px;overflow:auto">
+            <div class="panel" style="width:min(760px,100%);margin:auto;max-height:none">
+                <div class="service-card-head">
+                    <div>
+                        <h2 style="margin:0">Website Chat · ${safe(agent?.name || "AI Employee")}</h2>
+                        <p class="muted" style="margin:6px 0 0">${safe(status.detail)}</p>
+                    </div>
+                    <button type="button" data-xvond-website-close>Close</button>
+                </div>
+
+                <div class="cards" style="margin:16px 0">
+                    <div class="card"><span>Status</span><strong>${safe(status.title)}</strong></div>
+                    <div class="card"><span>Domain</span><strong>${safe(xvondWebsiteFieldValue(config, "allowed_domain", "Not configured"))}</strong></div>
+                    <div class="card"><span>Human assistance</span><strong>${safe(mode.replaceAll("_", " "))}</strong></div>
+                </div>
+
+                ${!editable ? '<div class="agent" style="margin-bottom:14px"><strong>Editing is locked while this AI Employee is active.</strong><p class="muted">Deactivate the employee before changing Website Chat settings. Existing configuration remains unchanged.</p></div>' : ""}
+
+                <form data-xvond-website-form style="display:grid;gap:12px">
+                    <div>
+                        <label>Website domain</label>
+                        <input data-field="allowed_domain" placeholder="example.com" required value="${safe(xvondWebsiteFieldValue(config, "allowed_domain"))}" ${editable ? "" : "disabled"}>
+                    </div>
+                    <div>
+                        <label>Widget name</label>
+                        <input data-field="widget_name" placeholder="Customer Assistant" value="${safe(xvondWebsiteFieldValue(config, "widget_name"))}" ${editable ? "" : "disabled"}>
+                    </div>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+                        <div>
+                            <label>Launcher label · Arabic</label>
+                            <input data-field="launcher_label_ar" placeholder="ابدأ المحادثة" value="${safe(xvondWebsiteFieldValue(config, "launcher_label_ar"))}" ${editable ? "" : "disabled"}>
+                        </div>
+                        <div>
+                            <label>Launcher label · English</label>
+                            <input data-field="launcher_label_en" placeholder="Chat" value="${safe(xvondWebsiteFieldValue(config, "launcher_label_en"))}" ${editable ? "" : "disabled"}>
+                        </div>
+                    </div>
+                    <div>
+                        <label>Welcome message · Arabic</label>
+                        <textarea data-field="welcome_message" rows="2" ${editable ? "" : "disabled"}>${safe(xvondWebsiteFieldValue(config, "welcome_message"))}</textarea>
+                    </div>
+                    <div>
+                        <label>Welcome message · English</label>
+                        <textarea data-field="welcome_message_en" rows="2" ${editable ? "" : "disabled"}>${safe(xvondWebsiteFieldValue(config, "welcome_message_en"))}</textarea>
+                    </div>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+                        <div>
+                            <label>Widget position</label>
+                            <select data-field="position" ${editable ? "" : "disabled"}>
+                                <option value="right" ${position === "right" ? "selected" : ""}>Right</option>
+                                <option value="left" ${position === "left" ? "selected" : ""}>Left</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label>Accent color</label>
+                            <input data-field="accent_color" type="text" placeholder="#111827" value="${safe(xvondWebsiteFieldValue(config, "accent_color", "#111827"))}" ${editable ? "" : "disabled"}>
+                        </div>
+                    </div>
+
+                    <div class="agent">
+                        <strong>Human assistance on Website Chat</strong>
+                        <p class="muted">This controls only the website channel. It does not change WhatsApp, Instagram or other channel behavior.</p>
+                        <select data-field="human_assistance_mode" ${editable ? "" : "disabled"}>
+                            <option value="direct_handoff" ${mode === "direct_handoff" ? "selected" : ""}>Direct handoff to a human</option>
+                            <option value="contact_only" ${mode === "contact_only" ? "selected" : ""}>Show contact methods only</option>
+                            <option value="ai_only" ${mode === "ai_only" ? "selected" : ""}>AI only · no human transfer</option>
+                        </select>
+                        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:10px">
+                            <input data-field="contact_phone" placeholder="Phone" value="${safe(xvondWebsiteFieldValue(config, "contact_phone"))}" ${editable ? "" : "disabled"}>
+                            <input data-field="contact_whatsapp" placeholder="WhatsApp" value="${safe(xvondWebsiteFieldValue(config, "contact_whatsapp"))}" ${editable ? "" : "disabled"}>
+                            <input data-field="contact_email" type="email" placeholder="Email" value="${safe(xvondWebsiteFieldValue(config, "contact_email"))}" ${editable ? "" : "disabled"}>
+                            <input data-field="contact_url" placeholder="Contact / booking URL" value="${safe(xvondWebsiteFieldValue(config, "contact_url"))}" ${editable ? "" : "disabled"}>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label>Website-only instructions</label>
+                        <textarea data-field="custom_instructions" rows="4" placeholder="Example: On the website, keep replies short and never offer human transfer after 10 PM." ${editable ? "" : "disabled"}>${safe(xvondWebsiteFieldValue(config, "custom_instructions"))}</textarea>
+                        <p class="muted">The AI Employee's core knowledge and identity remain shared across channels. These instructions adapt behavior only for Website Chat.</p>
+                    </div>
+
+                    ${config?.embed_code ? `
+                        <div>
+                            <label>Embed code</label>
+                            <textarea data-xvond-website-embed readonly rows="2"></textarea>
+                            <button type="button" data-xvond-website-copy style="margin-top:6px">Copy embed code</button>
+                        </div>
+                    ` : ""}
+
+                    <div class="error" data-xvond-website-error></div>
+                    ${editable ? '<button type="submit">Save Website Chat settings</button>' : ""}
+                </form>
+            </div>
+        </div>
+    `;
+}
+
+function xvondWebsitePayload(form) {
+    const value = key => form.querySelector(`[data-field="${key}"]`)?.value?.trim() || "";
+    return {
+        allowed_domain: value("allowed_domain"),
+        widget_name: value("widget_name") || null,
+        welcome_message: value("welcome_message") || null,
+        welcome_message_en: value("welcome_message_en") || null,
+        position: value("position") || "right",
+        custom_instructions: value("custom_instructions") || null,
+        accent_color: value("accent_color") || "#111827",
+        launcher_label_ar: value("launcher_label_ar") || null,
+        launcher_label_en: value("launcher_label_en") || null,
+        human_assistance_mode: value("human_assistance_mode") || "direct_handoff",
+        contact_phone: value("contact_phone") || null,
+        contact_whatsapp: value("contact_whatsapp") || null,
+        contact_email: value("contact_email") || null,
+        contact_url: value("contact_url") || null,
+    };
+}
+
+window.openCustomerWebsiteChannelSettings = async function(agentId) {
+    const agent = (agents || []).find(item => Number(item.id) === Number(agentId));
+    if (!agent) {
+        alert("AI Employee was not found.");
+        return;
+    }
+    try {
+        const config = await api(`/customer/website-channel/agents/${Number(agentId)}`);
+        const host = document.createElement("div");
+        host.innerHTML = xvondWebsiteModalMarkup(agent, config);
+        const overlay = host.firstElementChild;
+        document.body.appendChild(overlay);
+
+        const close = () => overlay.remove();
+        overlay.querySelector("[data-xvond-website-close]")?.addEventListener("click", close);
+        overlay.addEventListener("click", event => {
+            if (event.target === overlay) close();
+        });
+
+        const embed = overlay.querySelector("[data-xvond-website-embed]");
+        if (embed) embed.value = config.embed_code || "";
+        overlay.querySelector("[data-xvond-website-copy]")?.addEventListener("click", async event => {
+            try {
+                await navigator.clipboard.writeText(embed?.value || "");
+                event.currentTarget.textContent = "Copied";
+            } catch (_) {
+                embed?.select();
+            }
+        });
+
+        const form = overlay.querySelector("[data-xvond-website-form]");
+        form?.addEventListener("submit", async event => {
+            event.preventDefault();
+            const submit = form.querySelector('button[type="submit"]');
+            const error = form.querySelector("[data-xvond-website-error]");
+            if (submit) submit.disabled = true;
+            if (error) error.textContent = "";
+            try {
+                await api(`/customer/website-channel/agents/${Number(agentId)}`, {
+                    method: "PUT",
+                    body: JSON.stringify(xvondWebsitePayload(form)),
+                });
+                await xvondRefreshCustomerOverview?.();
+                await loadAgents();
+                close();
+                if (typeof renderXvondChannelCenter === "function") await renderXvondChannelCenter();
+            } catch (err) {
+                if (error) error.textContent = err?.message || "Could not save Website Chat settings.";
+            } finally {
+                if (submit) submit.disabled = false;
+            }
+        });
+    } catch (error) {
+        alert(error.message || "Website Chat settings are unavailable.");
+    }
+};
+
 async function xvondDecorateCustomerAgentsWithWebsite() {
-    if (portalOverview?.company?.onboarding_source !== "self_service") return;
     if (!currentUser || !["owner", "admin", "manager"].includes(currentUser.role)) return;
 
     const cards = Array.from(document.querySelectorAll("#agents-list .agent"));
-    await Promise.all((agents || []).map(async (agent, index) => {
+    (agents || []).forEach((agent, index) => {
+        if (!xvondWebsiteCanOpen(agent)) return;
         const card = cards[index];
-        const slots = Array.isArray(agent?.self_service_channel_slots)
-            ? agent.self_service_channel_slots
-            : [];
-        if (!slots.includes("website")) return;
         if (!card || card.querySelector(".xvond-website-connect")) return;
 
         const box = document.createElement("div");
         box.className = "xvond-website-connect";
-        box.style.marginTop = "14px";
-        box.style.paddingTop = "12px";
-        box.style.borderTop = "1px solid rgba(148,163,184,.25)";
-        box.innerHTML = '<p class="muted" style="margin:0">Checking Website Chat setup...</p>';
+        box.style.cssText = "margin-top:14px;padding-top:12px;border-top:1px solid rgba(148,163,184,.25)";
+        box.innerHTML = `
+            <strong>Website Chat</strong>
+            <p class="muted" style="margin:6px 0 10px">Manage website-specific appearance, welcome messages, instructions and human assistance.</p>
+            <button type="button" onclick="openCustomerWebsiteChannelSettings(${Number(agent.id)})">Manage Website Chat</button>
+        `;
         card.appendChild(box);
-
-        try {
-            const config = await api(`/customer/website-channel/agents/${Number(agent.id)}`);
-            const status = xvondCustomerWebsiteStatus(config);
-            box.innerHTML = `
-                <p style="margin:0 0 6px"><strong>${safe(status.title)}</strong></p>
-                <p class="muted" style="margin:0 0 8px">${safe(status.detail)}</p>
-                ${config?.configured ? `
-                    <p class="muted" style="margin:0 0 8px">Domain: <strong>${safe(config.config?.allowed_domain || "")}</strong></p>
-                ` : ""}
-                ${config?.embed_code ? `
-                    <div style="margin-top:10px">
-                        <label><strong>Embed code</strong></label>
-                        <textarea class="xvond-website-embed" readonly rows="2"></textarea>
-                        <button type="button" class="xvond-website-copy" style="margin-top:6px">Copy embed code</button>
-                    </div>
-                ` : ""}
-                ${status.action && config?.can_edit ? `
-                    <button type="button" class="xvond-website-toggle" style="margin-top:10px">${safe(status.action)}</button>
-                    <form class="xvond-website-form hidden" style="margin-top:12px">
-                        <label>Website domain</label>
-                        <input data-field="allowed_domain" placeholder="example.com" required>
-                        <label style="display:block;margin-top:8px">Widget name <span class="muted">(optional)</span></label>
-                        <input data-field="widget_name" placeholder="Customer Assistant">
-                        <label style="display:block;margin-top:8px">Welcome message <span class="muted">(Arabic)</span></label>
-                        <input data-field="welcome_message">
-                        <label style="display:block;margin-top:8px">Welcome message <span class="muted">(English)</span></label>
-                        <input data-field="welcome_message_en">
-                        <button type="submit" style="margin-top:10px">Save Website setup</button>
-                        <div class="error xvond-website-error"></div>
-                    </form>
-                ` : ""}
-                ${!config?.can_edit && !config?.enabled ? '<p class="muted" style="margin-top:8px">Deactivate the employee before changing Website Chat setup.</p>' : ""}
-            `;
-
-            const embed = box.querySelector(".xvond-website-embed");
-            if (embed) embed.value = config.embed_code || "";
-            const copy = box.querySelector(".xvond-website-copy");
-            if (copy && embed) {
-                copy.addEventListener("click", async () => {
-                    try {
-                        await navigator.clipboard.writeText(embed.value);
-                        copy.textContent = "Copied";
-                    } catch (_) {
-                        embed.select();
-                    }
-                });
-            }
-
-            const toggle = box.querySelector(".xvond-website-toggle");
-            const form = box.querySelector(".xvond-website-form");
-            if (toggle && form) {
-                toggle.addEventListener("click", () => form.classList.toggle("hidden"));
-            }
-            xvondCustomerWebsiteForm(box, agent.id, config);
-        } catch (error) {
-            box.innerHTML = '<p class="muted" style="margin:0">Website Chat setup is unavailable right now.</p>';
-        }
-    }));
+    });
 }
 
 if (typeof loadAgents === "function") {
