@@ -134,7 +134,7 @@ def test_manager_knowledge_ui_loads_after_base_manager_controls_before_session_s
     knowledge = html.index("/static/customer/manager-knowledge-controls.js")
     session = html.index("/static/customer/session-security.js")
     assert base < knowledge < session
-    assert "manager-knowledge-controls.js?v=20260905-3" in html
+    assert "manager-knowledge-controls.js?v=20260921-employee-control1" in html
 
 
 def test_customer_portal_entrypoint_version_is_bumped_for_new_manager_ui():
