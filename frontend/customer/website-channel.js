@@ -205,7 +205,7 @@ window.openCustomerWebsiteChannelSettings = async function(agentId) {
                     method: "PUT",
                     body: JSON.stringify(xvondWebsitePayload(form)),
                 });
-                await xvondRefreshCustomerOverview?.();
+                if (typeof xvondRefreshCustomerOverview === "function") await xvondRefreshCustomerOverview();
                 await loadAgents();
                 close();
                 if (typeof renderXvondChannelCenter === "function") await renderXvondChannelCenter();
