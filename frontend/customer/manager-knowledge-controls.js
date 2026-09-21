@@ -21,17 +21,20 @@ openCustomerAgentSettings = async function(agentId) {
         target.innerHTML = `
             <div class="panel" style="margin-top:18px">
                 <div class="service-card-head">
-                    <div><h2>Manage ${safe(customerManagedAgent.name)}</h2><p>Manage employee behavior, business information and knowledge.</p></div>
+                    <div><h2>Manage ${safe(customerManagedAgent.name)}</h2><p>Full employee control center: behavior, knowledge, channels, connected systems and runtime status.</p></div>
                 </div>
                 <div style="margin:14px 0">
+                    ${managerTabButton("Overview", "overview")}
                     ${managerTabButton("Behavior", "behavior")}
-                    ${managerTabButton("Business Information", "business")}
                     ${managerTabButton("Knowledge", "knowledge")}
+                    ${managerTabButton("Channels", "channels")}
+                    ${managerTabButton("Connected Systems", "systems")}
+                    ${managerTabButton("Business Profile", "business")}
                 </div>
                 <div id="customer-manager-tab"></div>
             </div>
         `;
-        await openCustomerManagerTab("behavior");
+        await openCustomerManagerTab("overview");
         target.scrollIntoView({behavior: "smooth", block: "start"});
     } catch (err) {
         target.innerHTML = `<div class="panel"><div class="error">${safe(err.message)}</div></div>`;
@@ -41,10 +44,116 @@ openCustomerAgentSettings = async function(agentId) {
 async function openCustomerManagerTab(tab) {
     const target = document.getElementById("customer-manager-tab");
     if (!target || !customerManagedAgentId) return;
-    if (tab === "behavior") renderCustomerBehaviorTab(target);
+    if (tab === "overview") renderCustomerOverviewTab(target);
+    else if (tab === "behavior") renderCustomerBehaviorTab(target);
     else if (tab === "business") await renderCustomerBusinessTab(target);
     else if (tab === "knowledge") await renderCustomerKnowledgeTab(target);
+    else if (tab === "channels") await renderCustomerChannelsTab(target);
+    else if (tab === "systems") await renderCustomerSystemsTab(target);
 }
+
+function customerPortalButtonFor(pageId) {
+    return [...document.querySelectorAll("#portal-nav .nav-item")]
+        .find(item => item.dataset.page === pageId) || null;
+}
+
+async function openManagedEmployeePortalPage(pageId, agentId = null) {
+    if (typeof window.openPage !== "function") return;
+    await window.openPage(pageId, customerPortalButtonFor(pageId));
+    if (agentId && pageId === "chat") {
+        const select = document.getElementById("chat-agent");
+        if (select) select.value = String(agentId);
+    }
+}
+
+function renderCustomerOverviewTab(target) {
+    const d = customerManagedAgent || {};
+    const channels = (portalOverview?.channels || [])
+        .filter(item => Number(item.agent_id) === Number(customerManagedAgentId));
+    const connected = channels.filter(item =>
+        item.enabled || String(item.provisioning_state || "").toLowerCase() === "connected"
+    ).length;
+    target.innerHTML = `
+        <div class="cards" style="margin-bottom:16px">
+            <div class="card"><span>Runtime</span><strong>${d.enabled ? "Live" : "Draft / Paused"}</strong></div>
+            <div class="card"><span>Assigned Channels</span><strong>${channels.length}</strong></div>
+            <div class="card"><span>Connected Channels</span><strong>${connected}</strong></div>
+            <div class="card"><span>Reply Language</span><strong>${safe(d.reply_language || "auto")}</strong></div>
+        </div>
+        <div class="panel" style="margin-bottom:14px">
+            <h3>Employee Control Center</h3>
+            <p class="muted">Use the tabs above to manage this employee. Company-wide facts remain in Business Profile; everything specific to this employee stays here.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button type="button" onclick="openManagedEmployeePortalPage('chat', ${Number(customerManagedAgentId)})">Test Employee</button>
+                <button type="button" onclick="openCustomerManagerTab('channels')">Manage Channels</button>
+                <button type="button" onclick="openCustomerManagerTab('knowledge')">Manage Knowledge</button>
+                <button type="button" onclick="openCustomerManagerTab('systems')">Connected Systems</button>
+            </div>
+        </div>
+    `;
+}
+
+async function renderCustomerChannelsTab(target) {
+    try {
+        portalOverview = await api("/customer/overview");
+        const channels = (portalOverview?.channels || [])
+            .filter(item => Number(item.agent_id) === Number(customerManagedAgentId));
+        target.innerHTML = `
+            <div class="service-card-head">
+                <div>
+                    <h3>Channels</h3>
+                    <p class="muted">Connect, reconnect, test and disconnect customer-facing channels for this employee.</p>
+                </div>
+                <button type="button" onclick="openManagedEmployeePortalPage('channels')">Open Channels Center</button>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:14px">
+                ${channels.length
+                    ? channels.map(channel => (
+                        typeof xvondChannelCenterCard === "function"
+                            ? xvondChannelCenterCard(customerManagedAgent, channel)
+                            : `<div class="agent"><strong>${safe(channel.name || channel.type)}</strong><p class="muted">Open Channels Center to manage this connection.</p></div>`
+                    )).join("")
+                    : '<div class="agent"><p class="muted">No channels are assigned to this employee yet.</p></div>'}
+            </div>
+        `;
+    } catch (err) {
+        target.innerHTML = `<div class="error">${safe(err.message)}</div>`;
+    }
+}
+
+async function renderCustomerSystemsTab(target) {
+    try {
+        const result = await api("/customer/agents/manage/integrations");
+        const integrations = result.integrations || [];
+        target.innerHTML = `
+            <div class="service-card-head">
+                <div>
+                    <h3>Connected Systems</h3>
+                    <p class="muted">CRM, booking, calendar, APIs and other company systems available to AI employees.</p>
+                </div>
+                <button type="button" onclick="openManagedEmployeePortalPage('integrations')">Manage Connected Systems</button>
+            </div>
+            <div style="display:grid;gap:10px;margin-top:14px">
+                ${integrations.length ? integrations.map(item => `
+                    <div class="agent">
+                        <div class="service-card-head">
+                            <div>
+                                <strong>${safe(item.name)}</strong>
+                                <p class="muted">${safe(item.integration_type)} · ${item.validated ? "Validated" : item.configured ? "Configured · validation required" : "Setup incomplete"}</p>
+                            </div>
+                            <span class="status">${item.enabled ? "Active" : "Inactive"}</span>
+                        </div>
+                    </div>
+                `).join("") : '<p class="muted">No connected systems configured yet.</p>'}
+            </div>
+            <p class="muted" style="margin-top:12px">Connection credentials and company-wide systems are managed centrally so multiple employees can use the same approved integration safely.</p>
+        `;
+    } catch (err) {
+        target.innerHTML = `<div class="error">${safe(err.message)}</div>`;
+    }
+}
+
+window.openManagedEmployeePortalPage = openManagedEmployeePortalPage;
 
 function renderCustomerBehaviorTab(target) {
     const d = customerManagedAgent || {};
