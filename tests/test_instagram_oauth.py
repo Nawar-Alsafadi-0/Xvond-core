@@ -2,10 +2,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from backend.app.core.config.settings import settings
+from backend.app.modules.channels import instagram_oauth
 from backend.app.modules.channels.instagram_oauth import (
     INSTAGRAM_SCOPES,
     build_instagram_authorization_url,
     issue_instagram_oauth_state,
+    subscribe_instagram_messaging,
     verify_instagram_oauth_state,
 )
 
@@ -49,3 +51,28 @@ def test_customer_portal_starts_direct_instagram_oauth():
     assert 'type === "instagram"' in javascript
     assert '"/customer/meta/channels/instagram/oauth/start"' in javascript
     assert "window.location.assign(result.authorization_url)" in javascript
+
+
+def test_instagram_subscription_uses_documented_query_parameters(monkeypatch):
+    monkeypatch.setattr(settings, "META_GRAPH_API_VERSION", "v26.0")
+    captured = {}
+
+    def fake_request_json(method, url, **kwargs):
+        captured.update({"method": method, "url": url, "kwargs": kwargs})
+        return {"success": True}
+
+    monkeypatch.setattr(instagram_oauth, "_request_json", fake_request_json)
+
+    subscribe_instagram_messaging(user_id="17841400000000000", access_token="test-token")
+
+    parsed = urlparse(captured["url"])
+    query = parse_qs(parsed.query)
+    assert captured["method"] == "POST"
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "graph.instagram.com"
+    assert parsed.path == "/v26.0/17841400000000000/subscribed_apps"
+    assert query == {
+        "subscribed_fields": ["messages,messaging_postbacks"],
+        "access_token": ["test-token"],
+    }
+    assert captured["kwargs"] == {}
