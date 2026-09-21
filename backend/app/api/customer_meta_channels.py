@@ -68,6 +68,13 @@ class MetaChannelAction(BaseModel):
     channel_type: str
 
 
+class MetaChannelSettingsUpdate(MetaChannelAction):
+    tone: str | None = None
+    response_style: str | None = None
+    response_length: str | None = None
+    channel_instructions: str | None = None
+
+
 class InstagramOAuthStart(BaseModel):
     agent_id: int
 
@@ -707,6 +714,97 @@ def channel_health(
             "issue": None if healthy else "Xvond could not verify the provider route",
             "blockers": blockers,
         }
+    finally:
+        db.close()
+
+
+
+@router.get("/settings")
+def meta_channel_settings(
+    agent_id: int,
+    channel_type: str,
+    current_user: User = Depends(require_customer_manager),
+):
+    channel_type = _normalize_channel_type(channel_type)
+    db = SessionLocal()
+    try:
+        _agent, channel, _capability = _customer_channel(
+            db,
+            current_user,
+            agent_id=agent_id,
+            channel_type=channel_type,
+        )
+        config = reveal_config(channel.config) or {}
+        return {
+            "agent_id": agent_id,
+            "channel_id": channel.id,
+            "channel_type": channel_type,
+            "settings": {
+                "tone": str(config.get("tone") or "professional_friendly"),
+                "response_style": str(config.get("response_style") or "conversational"),
+                "response_length": str(config.get("response_length") or "concise"),
+                "channel_instructions": str(config.get("channel_instructions") or ""),
+            },
+        }
+    finally:
+        db.close()
+
+
+@router.put("/settings")
+def update_meta_channel_settings(
+    data: MetaChannelSettingsUpdate,
+    current_user: User = Depends(require_customer_manager),
+):
+    channel_type = _normalize_channel_type(data.channel_type)
+    db = SessionLocal()
+    try:
+        agent, channel, _capability = _customer_channel(
+            db,
+            current_user,
+            agent_id=data.agent_id,
+            channel_type=channel_type,
+        )
+        channel = (
+            db.query(AgentChannel)
+            .filter(AgentChannel.id == channel.id)
+            .with_for_update()
+            .first()
+        )
+        current = reveal_config(channel.config) or {}
+        updates = {
+            "tone": str(data.tone or current.get("tone") or "professional_friendly").strip()[:80],
+            "response_style": str(data.response_style or current.get("response_style") or "conversational").strip()[:80],
+            "response_length": str(data.response_length or current.get("response_length") or "concise").strip()[:80],
+            "channel_instructions": str(data.channel_instructions or "").strip()[:4000] or None,
+        }
+        channel.config = merge_config(channel.config, updates)
+        audit_service.log(
+            db=db,
+            action="channel.meta_customer_settings_updated",
+            resource_type="channel",
+            resource_id=channel.id,
+            user_id=current_user.id,
+            company_id=channel.company_id,
+            details={
+                "agent_id": agent.id,
+                "channel_type": channel_type,
+                "behavior_fields": ["tone", "response_style", "response_length", "channel_instructions"],
+            },
+        )
+        db.commit()
+        return {
+            "status": "updated",
+            "agent_id": agent.id,
+            "channel_id": channel.id,
+            "channel_type": channel_type,
+            "settings": updates,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
