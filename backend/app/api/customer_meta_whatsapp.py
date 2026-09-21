@@ -59,6 +59,15 @@ class CustomerWhatsAppDisconnect(BaseModel):
     agent_id: int
 
 
+class CustomerWhatsAppSettingsUpdate(BaseModel):
+    agent_id: int
+    tone: str | None = None
+    response_style: str | None = None
+    response_length: str | None = None
+    emoji_style: str | None = None
+    channel_instructions: str | None = None
+
+
 def _customer_agent(db, current_user: User, agent_id: int) -> AIAgent:
     agent = (
         db.query(AIAgent)
@@ -364,6 +373,104 @@ def complete_embedded_signup(
             "runtime_ready": bool(channel.enabled and not blockers),
             "ready": not blockers,
             "blockers": blockers,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+
+@router.get("/settings")
+def whatsapp_channel_settings(
+    agent_id: int,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        agent = _customer_agent(db, current_user, agent_id)
+        _assert_whatsapp_selected_for_self_service(db, agent)
+        channel = (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.company_id == current_user.company_id,
+                AgentChannel.agent_id == agent.id,
+                AgentChannel.channel_type == "whatsapp",
+            )
+            .first()
+        )
+        if channel is None:
+            raise HTTPException(404, "WhatsApp channel not found")
+        config = reveal_config(channel.config) or {}
+        return {
+            "agent_id": agent.id,
+            "channel_id": channel.id,
+            "channel_type": "whatsapp",
+            "settings": {
+                "tone": str(config.get("tone") or "professional_friendly"),
+                "response_style": str(config.get("response_style") or "conversational"),
+                "response_length": str(config.get("response_length") or "concise"),
+                "emoji_style": str(config.get("emoji_style") or "minimal"),
+                "channel_instructions": str(config.get("channel_instructions") or ""),
+            },
+        }
+    finally:
+        db.close()
+
+
+@router.put("/settings")
+def update_whatsapp_channel_settings(
+    data: CustomerWhatsAppSettingsUpdate,
+    current_user: User = Depends(require_customer_manager),
+):
+    db = SessionLocal()
+    try:
+        agent = _customer_agent(db, current_user, data.agent_id)
+        _assert_whatsapp_selected_for_self_service(db, agent)
+        channel = (
+            db.query(AgentChannel)
+            .filter(
+                AgentChannel.company_id == current_user.company_id,
+                AgentChannel.agent_id == agent.id,
+                AgentChannel.channel_type == "whatsapp",
+            )
+            .with_for_update()
+            .first()
+        )
+        if channel is None:
+            raise HTTPException(404, "WhatsApp channel not found")
+        current = reveal_config(channel.config) or {}
+        updates = {
+            "tone": str(data.tone or current.get("tone") or "professional_friendly").strip()[:80],
+            "response_style": str(data.response_style or current.get("response_style") or "conversational").strip()[:80],
+            "response_length": str(data.response_length or current.get("response_length") or "concise").strip()[:80],
+            "emoji_style": str(data.emoji_style or current.get("emoji_style") or "minimal").strip()[:80],
+            "channel_instructions": str(data.channel_instructions or "").strip()[:4000] or None,
+        }
+        channel.config = merge_config(channel.config, updates)
+        audit_service.log(
+            db=db,
+            action="whatsapp.customer_settings_updated",
+            resource_type="agent_channel",
+            resource_id=channel.id,
+            user_id=current_user.id,
+            company_id=channel.company_id,
+            details={
+                "agent_id": agent.id,
+                "behavior_fields": ["tone", "response_style", "response_length", "emoji_style", "channel_instructions"],
+            },
+        )
+        db.commit()
+        return {
+            "status": "updated",
+            "agent_id": agent.id,
+            "channel_id": channel.id,
+            "channel_type": "whatsapp",
+            "settings": updates,
         }
     except HTTPException:
         db.rollback()
