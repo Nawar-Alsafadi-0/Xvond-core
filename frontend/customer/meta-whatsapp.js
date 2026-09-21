@@ -15,29 +15,58 @@ function xvondCustomerTrustedMetaOrigin(origin) {
 function xvondCustomerLoadMetaSdk(appId, graphVersion) {
     // WhatsApp Embedded Signup needs provider-side identifiers and a code
     // response, but those implementation details stay hidden from customers.
-    if (window.FB) {
+    const initialize = () => {
         FB.init({appId, cookie: true, xfbml: false, version: graphVersion || "v26.0", fedCM: false});
+    };
+    if (window.FB) {
+        initialize();
         return Promise.resolve();
     }
     if (xvondCustomerMetaSdkPromise) return xvondCustomerMetaSdkPromise;
-    xvondCustomerMetaSdkPromise = new Promise((resolve, reject) => {
-        window.fbAsyncInit = function () {
-            FB.init({appId, cookie: true, xfbml: false, version: graphVersion || "v26.0", fedCM: false});
+
+    const sdkPromise = new Promise((resolve, reject) => {
+        let settled = false;
+        const fail = () => {
+            if (settled) return;
+            settled = true;
+            const script = document.getElementById("facebook-jssdk");
+            if (script && !window.FB) script.remove?.();
+            reject(new Error("تعذر تحميل خدمة ربط واتساب من Meta. تحقق من حظر النوافذ/الإضافات ثم حاول مرة أخرى."));
+        };
+        const ready = () => {
+            if (settled) return;
+            if (!window.FB) {
+                fail();
+                return;
+            }
+            settled = true;
+            initialize();
             resolve();
         };
+
+        window.fbAsyncInit = ready;
         const existing = document.getElementById("facebook-jssdk");
         if (existing) {
-            existing.addEventListener("load", () => resolve(), {once: true});
+            existing.addEventListener("load", ready, {once: true});
+            existing.addEventListener("error", fail, {once: true});
             return;
         }
+
         const script = document.createElement("script");
         script.id = "facebook-jssdk";
         script.async = true;
         script.defer = true;
-        script.crossOrigin = "anonymous";
+        // Meta's documented browser SDK snippet loads this as a normal classic script.
+        // Do not force CORS mode here; it can make the provider script fail before FB.login.
         script.src = "https://connect.facebook.net/en_US/sdk.js";
-        script.onerror = () => reject(new Error("تعذر فتح نافذة ربط واتساب. حاول مرة أخرى."));
+        script.onerror = fail;
         document.head.appendChild(script);
+    });
+
+    xvondCustomerMetaSdkPromise = sdkPromise.catch(error => {
+        // A failed provider-script load must be retryable on the next user click.
+        xvondCustomerMetaSdkPromise = null;
+        throw error;
     });
     return xvondCustomerMetaSdkPromise;
 }
@@ -232,51 +261,4 @@ async function xvondCustomerFinishMetaWhatsAppSignup(code) {
         xvondCustomerMetaSignupState = null;
         xvondCustomerMetaSignupMessage = null;
     }
-}
-
-async function xvondDecorateCustomerAgentsWithWhatsApp() {
-    if (!currentUser || !["owner", "admin", "manager"].includes(currentUser.role)) return;
-    const selfService = portalOverview?.company?.onboarding_source === "self_service";
-    const cards = Array.from(document.querySelectorAll("#agents-list .agent"));
-    await Promise.all((agents || []).map(async (agent, index) => {
-        const card = cards[index];
-        const slots = Array.isArray(agent?.self_service_channel_slots)
-            ? agent.self_service_channel_slots
-            : [];
-        if (selfService && !slots.includes("whatsapp")) return;
-        if (!card || card.querySelector(".xvond-whatsapp-connect")) return;
-
-        const box = document.createElement("div");
-        box.className = "xvond-whatsapp-connect";
-        box.style.marginTop = "14px";
-        box.style.paddingTop = "12px";
-        box.style.borderTop = "1px solid rgba(148,163,184,.25)";
-        box.innerHTML = `<p class="muted" style="margin:0">جاري فحص اتصال واتساب...</p>`;
-        card.appendChild(box);
-
-        try {
-            const config = await api(`/customer/meta/whatsapp/embedded-signup/config?agent_id=${Number(agent.id)}`);
-            const status = xvondCustomerWhatsAppStatus(config);
-            box.innerHTML = `
-                ${xvondCustomerWhatsAppIntro()}
-                <p style="margin:0 0 6px"><strong>${status.title}</strong></p>
-                <p class="muted" style="margin:0 0 8px">${status.detail}</p>
-                ${xvondCustomerWhatsAppBlockers(config)}
-                <button type="button" style="margin-top:10px" onclick="openCustomerMetaWhatsAppConnect(${Number(agent.id)})" ${(config.ready && config.can_edit !== false) ? "" : "disabled"}>${status.label}</button>
-                ${config.ready ? "" : `<p class="muted" style="margin:8px 0 0">ربط واتساب يحتاج تفعيلًا من فريق Xvond.</p>`}
-                ${config.can_edit === false ? `<p class="muted" style="margin:8px 0 0">أوقف الموظف أولًا قبل تغيير الرقم أو إعادة ربط واتساب.</p>` : ""}
-            `;
-        } catch (error) {
-            box.innerHTML = `<p class="muted" style="margin:0">تعذر فحص اتصال واتساب. تواصل مع Xvond إذا استمرت المشكلة.</p>`;
-        }
-    }));
-}
-
-if (typeof loadAgents === "function") {
-    const xvondOriginalCustomerLoadAgents = loadAgents;
-    loadAgents = async function (...args) {
-        const result = await xvondOriginalCustomerLoadAgents(...args);
-        await xvondDecorateCustomerAgentsWithWhatsApp();
-        return result;
-    };
 }
