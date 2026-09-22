@@ -139,3 +139,35 @@ def test_meta_channel_settings_contract_is_channel_scoped():
     assert "openCustomerMetaChannelSettings" in frontend
     assert "Channel-only instructions" in frontend
     assert "Channel settings" in center
+
+
+def test_connected_meta_channel_auto_activates_when_ready(monkeypatch):
+    channel = SimpleNamespace(company_id=11, enabled=False)
+
+    class DummyDb:
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(module, "_ensure_channels_module", lambda db, company_id: None)
+    monkeypatch.setattr(module, "_activation_blockers", lambda db, item: [])
+
+    blockers = module._auto_activate_connected_channel(DummyDb(), channel)
+
+    assert blockers == []
+    assert channel.enabled is True
+
+
+def test_connected_meta_channel_stays_disabled_when_blocked(monkeypatch):
+    channel = SimpleNamespace(company_id=11, enabled=False)
+
+    class DummyDb:
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(module, "_ensure_channels_module", lambda db, company_id: None)
+    monkeypatch.setattr(module, "_activation_blockers", lambda db, item: ["blocked"])
+
+    blockers = module._auto_activate_connected_channel(DummyDb(), channel)
+
+    assert blockers == ["blocked"]
+    assert channel.enabled is False
