@@ -417,3 +417,108 @@ def test_calendar_rejects_ambiguous_dst_time():
             {"date": "2026-11-01", "time": "01:30"},
         )
     assert "ambiguous" in str(exc.value)
+
+
+def test_google_calendar_reschedule_updates_existing_event(monkeypatch):
+    calls = []
+    config = _config()
+
+    class Claims:
+        def claim(self, key, *, ttl_seconds):
+            assert key.startswith("google_calendar_slot:")
+            return True
+        def release(self, key):
+            return None
+
+    monkeypatch.setattr(calendar, "execution_claims", Claims())
+    monkeypatch.setattr(calendar, "validate_public_http_url", lambda url: url)
+
+    event_id = calendar._event_id(88)
+
+    def fake_request(**kwargs):
+        calls.append(kwargs)
+        url = kwargs["url"]
+        method = kwargs["method"]
+        if method == "GET" and url.endswith("/events/" + event_id):
+            return {
+                "status_code": 200,
+                "response": json.dumps({
+                    "id": event_id,
+                    "start": {"dateTime": "2026-09-20T14:30:00+04:00"},
+                    "end": {"dateTime": "2026-09-20T15:00:00+04:00"},
+                }),
+            }
+        if method == "POST" and url.endswith("/freeBusy"):
+            return {
+                "status_code": 200,
+                "response": json.dumps({"calendars": {"primary": {"busy": []}}}),
+            }
+        if method == "PATCH" and url.endswith("/events/" + event_id):
+            assert kwargs["json_data"]["start"]["dateTime"].startswith("2026-09-21T16:00")
+            return {
+                "status_code": 200,
+                "response": json.dumps({"id": event_id, "htmlLink": "https://calendar.google.com/event"}),
+            }
+        raise AssertionError((method, url))
+
+    monkeypatch.setattr(calendar, "safe_http_request", fake_request)
+
+    result = calendar.google_calendar_reschedule(
+        config,
+        {
+            "request_id": 88,
+            "details": {"date": "2026-09-21", "time": "16:00"},
+        },
+    )
+
+    assert result["rescheduled"] is True
+    assert result["event_id"] == event_id
+    assert any(call["method"] == "PATCH" for call in calls)
+
+
+def test_google_calendar_reschedule_refuses_busy_target(monkeypatch):
+    config = _config()
+
+    class Claims:
+        def claim(self, key, *, ttl_seconds):
+            return True
+        def release(self, key):
+            return None
+
+    monkeypatch.setattr(calendar, "execution_claims", Claims())
+    monkeypatch.setattr(calendar, "validate_public_http_url", lambda url: url)
+    event_id = calendar._event_id(89)
+
+    def fake_request(**kwargs):
+        if kwargs["method"] == "GET":
+            return {
+                "status_code": 200,
+                "response": json.dumps({
+                    "id": event_id,
+                    "start": {"dateTime": "2026-09-20T14:30:00+04:00"},
+                    "end": {"dateTime": "2026-09-20T15:00:00+04:00"},
+                }),
+            }
+        if kwargs["method"] == "POST":
+            return {
+                "status_code": 200,
+                "response": json.dumps({
+                    "calendars": {"primary": {"busy": [{
+                        "start": "2026-09-21T16:00:00+04:00",
+                        "end": "2026-09-21T16:30:00+04:00",
+                    }]}}
+                }),
+            }
+        raise AssertionError("PATCH must not run for a busy target slot")
+
+    monkeypatch.setattr(calendar, "safe_http_request", fake_request)
+
+    with pytest.raises(calendar.CalendarConnectorError) as exc:
+        calendar.google_calendar_reschedule(
+            config,
+            {
+                "request_id": 89,
+                "details": {"date": "2026-09-21", "time": "16:00"},
+            },
+        )
+    assert "no longer available" in str(exc.value)

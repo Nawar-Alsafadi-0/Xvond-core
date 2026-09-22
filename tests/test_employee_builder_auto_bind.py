@@ -85,6 +85,7 @@ def test_single_validated_packaged_connector_is_auto_bound():
     assert set(requirement["integration_operations"]) == {
         "availability",
         "execute",
+        "reschedule",
         "cancel",
     }
     assert "booking" not in result["setup_required"]

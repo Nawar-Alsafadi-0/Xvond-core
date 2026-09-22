@@ -150,6 +150,7 @@ def test_calendar_booking_binds_without_customer_defined_endpoints(database):
     assert requirement["integration_operations"] == {
         "availability": {"adapter": "google_calendar"},
         "execute": {"adapter": "google_calendar"},
+        "reschedule": {"adapter": "google_calendar"},
         "cancel": {"adapter": "google_calendar"},
     }
 
