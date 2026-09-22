@@ -45,3 +45,12 @@ def test_workflow_compose_exposes_delivery_confirmation_callback():
         "XVOND_INTERNAL_CHANNEL_CONFIRM_URL=http://app:8000/internal/channels/delivery-confirmed"
         in env
     )
+
+
+def test_workflow_sync_verifies_running_runtime_matches_git():
+    script = read("scripts/sync_workflow_engine.sh")
+
+    assert "verify_runtime_workflow" in script
+    assert "n8n export:workflow" in script
+    assert "runtime_workflow_drift" in script
+    assert "runtime-verified from Git" in script
