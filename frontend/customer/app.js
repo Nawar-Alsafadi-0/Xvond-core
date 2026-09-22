@@ -363,16 +363,16 @@ async function renderIntegrations() {
             <div class="panel" style="margin-bottom:20px">
                 <div class="service-card-head">
                     <div>
-                        <h2>Connected Systems</h2>
-                        <p class="muted">Connect the systems your employee needs. Google Calendar uses a secure consent flow when Xvond OAuth is configured; other secrets stay encrypted and are never shown again.</p>
+                        <h2>Booking & Connected Systems</h2>
+                        <p class="muted">Connect the system your AI employee should use for real availability and bookings. Use Google Calendar for calendar-based appointments, or connect an existing booking system/API without replacing it.</p>
                     </div>
                 </div>
                 <div class="service-grid" style="margin-top:14px">
-                    <label>Type
+                    <label>Booking / system type
                         <select id="customer-integration-type">${definitionOptions}</select>
                     </label>
-                    <label>Name
-                        <input id="customer-integration-name" maxlength="200" placeholder="My booking system">
+                    <label>Connection name
+                        <input id="customer-integration-name" maxlength="200" placeholder="Main booking calendar">
                     </label>
                 </div>
                 <div id="customer-integration-fields" class="service-grid" style="margin-top:14px"></div>
@@ -382,7 +382,7 @@ async function renderIntegrations() {
                 <div id="customer-integration-error" class="error"></div>
             </div>
             <div class="panel">
-                <h2>Your connections</h2>
+                <h2>Connected booking & business systems</h2>
                 ${integrations.length ? integrations.map(item => `
                     <div class="agent">
                         <div class="service-card-head">
@@ -400,6 +400,9 @@ async function renderIntegrations() {
                             : ""}
                         ${item.openapi_import_supported
                             ? `<button type="button" onclick="importCustomerIntegrationOpenAPI(${Number(item.id)})">Import OpenAPI</button>`
+                            : ""}
+                        ${item.integration_type === "calendar"
+                            ? `<p class="muted">Booking actions: check availability · create · reschedule · cancel</p>`
                             : ""}
                         ${item.integration_type === "calendar" && googleOAuth.ready
                             ? `<button type="button" onclick="connectGoogleCalendar(${Number(item.id)})">Reconnect Google Calendar</button>`
@@ -423,7 +426,12 @@ async function renderIntegrations() {
             const fields = (definition?.config_fields || []).filter(
                 field => !oauthCalendar || !hiddenOAuthFields.has(String(field.name || ""))
             );
-            host.innerHTML = fields.map(field => {
+            host.innerHTML = (oauthCalendar ? `
+                <div class="agent" style="grid-column:1/-1">
+                    <strong>Google Calendar</strong>
+                    <p class="muted">Xvond will use this calendar as a live booking source. The employee checks availability before creating or moving appointments and can cancel existing Xvond bookings.</p>
+                </div>
+            ` : "") + fields.map(field => {
                 const choices = Array.isArray(field.choices) ? field.choices : [];
                 const defaultValue = field.default == null ? "" : String(field.default);
                 const control = choices.length
