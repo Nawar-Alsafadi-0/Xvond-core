@@ -229,6 +229,17 @@ def _instagram_portal_redirect(status: str) -> str:
     return f"{origin.rstrip('/')}{suffix}" if origin else suffix
 
 
+def _auto_activate_connected_channel(db, channel: AgentChannel) -> list[str]:
+    """Turn a successfully connected managed Meta channel live when it is ready."""
+    channel.enabled = False
+    _ensure_channels_module(db, channel.company_id)
+    db.flush()
+    blockers = _activation_blockers(db, channel)
+    if not blockers:
+        channel.enabled = True
+    return blockers
+
+
 def _instagram_manager_from_state(db, payload: dict) -> User:
     user = db.query(User).filter(User.id == int(payload.get("user_id") or 0)).first()
     company_id = int(payload.get("company_id") or 0)
@@ -334,8 +345,7 @@ def _provision_direct_instagram(
             "meta_connected_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         },
     )
-    channel.enabled = False
-    _ensure_channels_module(db, channel.company_id)
+    blockers = _auto_activate_connected_channel(db, channel)
     audit_service.log(
         db=db,
         action="channel.instagram_direct_connected",
@@ -348,10 +358,10 @@ def _provision_direct_instagram(
             "channel_type": "instagram",
             "provider_account_label": label,
             "connection_method": "instagram_direct_oauth",
+            "auto_activated": bool(channel.enabled),
+            "activation_blockers": blockers,
         },
     )
-    db.flush()
-    _activation_blockers(db, channel)
 
 
 @router.post("/instagram/oauth/start")
@@ -612,8 +622,7 @@ def complete_connect(
                 "meta_connected_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             },
         )
-        channel.enabled = False
-        _ensure_channels_module(db, channel.company_id)
+        blockers = _auto_activate_connected_channel(db, channel)
         audit_service.log(
             db=db,
             action="channel.meta_customer_connected",
@@ -626,17 +635,18 @@ def complete_connect(
                 "channel_type": channel_type,
                 "provider_account_label": label,
                 "connection_method": "meta_customer_connect",
+                "auto_activated": bool(channel.enabled),
+                "activation_blockers": blockers,
             },
         )
-        db.flush()
-        blockers = _activation_blockers(db, channel)
         db.commit()
         return {
-            "status": "connected",
+            "status": "live" if channel.enabled else "connected",
             "channel_id": channel.id,
             "channel_type": channel_type,
             "account_label": label,
-            "ready_for_launch": not blockers,
+            "enabled": bool(channel.enabled),
+            "ready_for_launch": bool(channel.enabled),
             "blockers": blockers,
         }
     except HTTPException:
