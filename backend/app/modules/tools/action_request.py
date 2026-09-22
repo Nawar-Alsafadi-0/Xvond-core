@@ -1351,6 +1351,7 @@ class ActionRequestTool(AgentTool):
                     "check_availability",
                     "prepare",
                     "execute",
+                    "reschedule",
                     "cancel",
                     "status",
                 ],
@@ -1540,11 +1541,94 @@ class ActionRequestTool(AgentTool):
                     "details": request.details,
                 },
             )
+        if operation == "reschedule":
+            return self._reschedule_request(request, action, details, context)
         if operation == "cancel":
             return self._cancel_request(request, action, context)
         if operation == "execute":
             return self._execute_request(request, action, arguments, context)
         return ToolResult(success=False, error="Unsupported action operation")
+
+    def _reschedule_request(
+        self,
+        request: ActionRequest,
+        action: dict,
+        details: dict,
+        context: dict,
+    ) -> ToolResult:
+        db = context["db"]
+        destination = action.get("destination") or {}
+        if str(destination.get("type") or "") != "integration":
+            return ToolResult(
+                success=False,
+                error="Rescheduling is available only for a connected booking system",
+            )
+        if request.status != "confirmed":
+            return ToolResult(
+                success=False,
+                error=f"Booking cannot be rescheduled from status {request.status}",
+            )
+        operations = destination.get("operations") or {}
+        if not isinstance(operations, dict) or not isinstance(
+            operations.get("reschedule"), dict
+        ):
+            return ToolResult(
+                success=False,
+                error="This connected booking system has no reschedule operation configured",
+            )
+        if not isinstance(details, dict):
+            return ToolResult(success=False, error="Reschedule details must be structured")
+
+        merged_details = {
+            **_customer_details(request.details or {}),
+            **{key: value for key, value in details.items() if value not in (None, "")},
+        }
+        idempotency_key = (
+            f"xvond-action-{context['company_id']}-{request.id}-reschedule-"
+            + hashlib.sha256(
+                json.dumps(merged_details, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()[:16]
+        )
+        result = _integration_call(
+            db,
+            context,
+            request.action_type,
+            action,
+            {
+                "operation": "reschedule",
+                "request_id": request.id,
+                "details": merged_details,
+            },
+            "reschedule",
+            idempotency_key=idempotency_key,
+        )
+        if not result.success:
+            return result
+
+        meta = dict(merged_details)
+        meta["_xvond_destination"] = {
+            "type": "integration",
+            "integration_id": destination.get("integration_id"),
+        }
+        request.details = meta
+        request.status = "confirmed"
+        _save_execution_state(
+            request,
+            state="confirmed",
+            key=idempotency_key,
+            operation="reschedule",
+            result=result.data,
+        )
+        db.commit()
+        return ToolResult(
+            success=True,
+            data={
+                "action": "rescheduled",
+                "request_id": request.id,
+                "status": request.status,
+                "integration_result": result.data,
+            },
+        )
 
     def _cancel_request(
         self,
