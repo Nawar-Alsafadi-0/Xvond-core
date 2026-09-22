@@ -143,9 +143,9 @@ window.openCustomerMetaChannelConnect = async function(agentId, channelType) {
                 });
                 await xvondRefreshCustomerOverview();
                 await loadAgents();
-                alert(result.ready_for_launch
-                    ? `${xvondMetaChannelName(type)} connected successfully. Xvond can now complete launch verification.`
-                    : `${xvondMetaChannelName(type)} connected. Xvond will complete the remaining launch checks.`);
+                alert(result.enabled
+                    ? `${xvondMetaChannelName(type)} connected successfully and is now live.`
+                    : `${xvondMetaChannelName(type)} connected, but it still needs attention before it can go live.`);
             } catch (error) {
                 alert(error.message || "Meta connection failed.");
             }
