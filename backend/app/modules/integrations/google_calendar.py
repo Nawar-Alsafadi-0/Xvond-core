@@ -523,6 +523,79 @@ def google_calendar_cancel(config: dict, payload: dict) -> dict:
     }
 
 
+
+def google_calendar_reschedule(config: dict, payload: dict) -> dict:
+    request_id = int(payload.get("request_id") or 0)
+    event_id = _event_id(request_id)
+    details = payload.get("details") if isinstance(payload, dict) else {}
+    if not isinstance(details, dict):
+        details = {}
+    start, end = _local_interval(config, details)
+    calendar_scope = _calendar_lock_scope(config)
+    slot_claim = (
+        f"google_calendar_slot:{calendar_scope}:"
+        f"{start.isoformat()}:{end.isoformat()}"
+    )
+    if not execution_claims.claim(slot_claim, ttl_seconds=300):
+        raise CalendarConnectorError(
+            "This calendar slot is being booked right now; check availability again"
+        )
+
+    try:
+        existing = _event_lookup(config, event_id)
+        if existing is None:
+            raise CalendarConnectorError("Google Calendar booking was not found")
+
+        availability = _freebusy(config, start=start, end=end)
+        conflicting = []
+        for item in availability["busy"]:
+            if not isinstance(item, dict):
+                continue
+            busy_start = str(item.get("start") or "")
+            busy_end = str(item.get("end") or "")
+            # freeBusy does not expose event ids, so ignore the current event
+            # only when its existing interval exactly matches the requested one.
+            current_start = str((existing.get("start") or {}).get("dateTime") or "")
+            current_end = str((existing.get("end") or {}).get("dateTime") or "")
+            if busy_start == current_start and busy_end == current_end:
+                continue
+            conflicting.append(item)
+        if conflicting:
+            raise CalendarConnectorError("Requested calendar time is no longer available")
+
+        body = {
+            "start": {"dateTime": start.isoformat(), "timeZone": _timezone(config).key},
+            "end": {"dateTime": end.isoformat(), "timeZone": _timezone(config).key},
+        }
+        result = _authorized_request(
+            config,
+            url=_calendar_url(config, f"/events/{quote(event_id, safe='')}"),
+            method="PATCH",
+            json_data=body,
+            timeout=20,
+            max_response_bytes=256_000,
+        )
+        updated = _parse_google_response(result, context="Google Calendar reschedule")
+    except CalendarConnectorError:
+        raise
+    except Exception as exc:
+        raise CalendarConnectorError(
+            "Google Calendar reschedule outcome is unknown; reconcile before retrying"
+        ) from exc
+    finally:
+        execution_claims.release(slot_claim)
+
+    return {
+        "provider": "google_calendar",
+        "event_id": str(updated.get("id") or event_id),
+        "html_link": updated.get("htmlLink"),
+        "rescheduled": True,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "timezone": _timezone(config).key,
+    }
+
+
 def execute_google_calendar_operation(
     *,
     config: dict,
@@ -542,6 +615,8 @@ def execute_google_calendar_operation(
             payload,
             idempotency_key=idempotency_key,
         )
+    if operation == "reschedule":
+        return google_calendar_reschedule(config, payload)
     if operation == "cancel":
         return google_calendar_cancel(config, payload)
     raise CalendarConnectorError(f"Unsupported Google Calendar operation: {operation}")
