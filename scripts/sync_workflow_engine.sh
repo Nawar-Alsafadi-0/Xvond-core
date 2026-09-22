@@ -388,6 +388,49 @@ sync_one_workflow() {
         update:workflow --id="$workflow_id" --active=true
 }
 
+verify_runtime_workflow() {
+    file="$1"
+    workflow_id="$2"
+    source_tmp="/tmp/xvond-source-$workflow_id.json"
+    runtime_tmp="/tmp/xvond-runtime-$workflow_id.json"
+
+    docker cp "$file" "xvond-workflow-engine:$source_tmp"
+    docker exec xvond-workflow-engine n8n export:workflow \
+        --id="$workflow_id" \
+        --output="$runtime_tmp" >/dev/null
+
+    if ! docker exec xvond-workflow-engine node -e '
+const fs = require("fs");
+const sourcePath = process.argv[1];
+const runtimePath = process.argv[2];
+const workflowId = process.argv[3];
+const source = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
+const exported = JSON.parse(fs.readFileSync(runtimePath, "utf8"));
+const runtime = Array.isArray(exported)
+  ? (exported.find(item => String(item.id || "") === workflowId) || exported[0])
+  : exported;
+if (!runtime) {
+  console.error("runtime_workflow_missing:" + workflowId);
+  process.exit(3);
+}
+const project = workflow => ({
+  name: workflow.name,
+  nodes: workflow.nodes,
+  connections: workflow.connections,
+});
+if (JSON.stringify(project(source)) !== JSON.stringify(project(runtime))) {
+  console.error("runtime_workflow_drift:" + workflowId);
+  process.exit(3);
+}
+' "$source_tmp" "$runtime_tmp" "$workflow_id"; then
+        echo "Workflow runtime verification failed for $workflow_id" >&2
+        docker exec xvond-workflow-engine rm -f "$source_tmp" "$runtime_tmp" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    docker exec xvond-workflow-engine rm -f "$source_tmp" "$runtime_tmp" >/dev/null 2>&1 || true
+}
+
 initialize_workflow_registry
 
 # Stop runtime while source-controlled workflow state is replaced so database
@@ -407,4 +450,17 @@ sync_one_workflow "$MICROSOFT_TEAMS_WORKFLOW_FILE" "$MICROSOFT_TEAMS_WORKFLOW_ID
 compose_workflow up -d --no-deps workflow-engine
 wait_for_runtime_webhooks
 
-echo "Workflow engine synced from Git: $ACTION_WORKFLOW_ID, $CHANNEL_WORKFLOW_ID, $TELEGRAM_WORKFLOW_ID, $META_WORKFLOW_ID, $SLACK_WORKFLOW_ID, $CUSTOM_CHANNEL_WORKFLOW_ID, $TWILIO_SMS_WORKFLOW_ID, $MAILGUN_EMAIL_WORKFLOW_ID, $MICROSOFT_TEAMS_WORKFLOW_ID"
+# Verify the running n8n container is actually executing the exact source-controlled
+# graph that was imported. This catches stale published/active workflow versions
+# before deployment is reported as successful.
+verify_runtime_workflow "$ACTION_WORKFLOW_FILE" "$ACTION_WORKFLOW_ID"
+verify_runtime_workflow "$CHANNEL_WORKFLOW_FILE" "$CHANNEL_WORKFLOW_ID"
+verify_runtime_workflow "$TELEGRAM_WORKFLOW_FILE" "$TELEGRAM_WORKFLOW_ID"
+verify_runtime_workflow "$META_WORKFLOW_FILE" "$META_WORKFLOW_ID"
+verify_runtime_workflow "$SLACK_WORKFLOW_FILE" "$SLACK_WORKFLOW_ID"
+verify_runtime_workflow "$CUSTOM_CHANNEL_WORKFLOW_FILE" "$CUSTOM_CHANNEL_WORKFLOW_ID"
+verify_runtime_workflow "$TWILIO_SMS_WORKFLOW_FILE" "$TWILIO_SMS_WORKFLOW_ID"
+verify_runtime_workflow "$MAILGUN_EMAIL_WORKFLOW_FILE" "$MAILGUN_EMAIL_WORKFLOW_ID"
+verify_runtime_workflow "$MICROSOFT_TEAMS_WORKFLOW_FILE" "$MICROSOFT_TEAMS_WORKFLOW_ID"
+
+echo "Workflow engine synced and runtime-verified from Git: $ACTION_WORKFLOW_ID, $CHANNEL_WORKFLOW_ID, $TELEGRAM_WORKFLOW_ID, $META_WORKFLOW_ID, $SLACK_WORKFLOW_ID, $CUSTOM_CHANNEL_WORKFLOW_ID, $TWILIO_SMS_WORKFLOW_ID, $MAILGUN_EMAIL_WORKFLOW_ID, $MICROSOFT_TEAMS_WORKFLOW_ID"
