@@ -33,6 +33,7 @@ def test_registry_declares_real_execution_and_endpoint_contracts():
     assert integration_packaged_operations("calendar") == {
         "availability": {"adapter": "google_calendar"},
         "execute": {"adapter": "google_calendar"},
+        "reschedule": {"adapter": "google_calendar"},
         "cancel": {"adapter": "google_calendar"},
     }
 
