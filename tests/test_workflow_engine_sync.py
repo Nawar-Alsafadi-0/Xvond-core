@@ -21,6 +21,14 @@ def test_workflow_sync_imports_and_activates_both_xvond_gateways():
     assert "invalid_contract" in script
 
 
+def test_actions_workflow_validates_managed_provider_urls_without_url_global():
+    workflow = read("ops/n8n/xvond-actions.workflow.json")
+
+    assert "providerUrlValid" in workflow
+    assert "new URL(providerUrl)" not in workflow
+    assert "invalid_channel_provisioning" in workflow
+
+
 def test_workflow_engine_startup_syncs_source_controlled_workflows():
     startup = read("scripts/workflow_engine_up.sh")
 
