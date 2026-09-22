@@ -208,9 +208,10 @@ INTEGRATION_CATALOG = {
         "packaged_operations": {
             "availability": {"adapter": "google_calendar"},
             "execute": {"adapter": "google_calendar"},
+            "reschedule": {"adapter": "google_calendar"},
             "cancel": {"adapter": "google_calendar"},
         },
-        "description": "Check availability and manage bookings in Google Calendar",
+        "description": "Check availability and create, reschedule or cancel bookings in Google Calendar",
         "config_fields": [
             {
                 "name": "provider",
