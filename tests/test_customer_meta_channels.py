@@ -171,3 +171,18 @@ def test_connected_meta_channel_stays_disabled_when_blocked(monkeypatch):
 
     assert blockers == ["blocked"]
     assert channel.enabled is False
+
+
+def test_customer_meta_channel_activation_contract():
+    from pathlib import Path
+
+    backend = Path("backend/app/api/customer_meta_channels.py").read_text(encoding="utf-8")
+    center = Path("frontend/customer/channel-center.js").read_text(encoding="utf-8")
+
+    assert '@router.post("/activate")' in backend
+    assert "channel.meta_customer_activated" in backend
+    assert "channel.enabled = True" in backend
+    assert "Channel cannot go live yet:" in backend
+    assert "xvondActivateCustomerMetaChannel" in center
+    assert ">Activate</button>" in center
+    assert "Connected and ready to activate" in center
