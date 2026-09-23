@@ -51,6 +51,7 @@ function xvondChannelCenterCard(agent, channel) {
             <div style="display:flex;gap:8px;flex-wrap:wrap">
                 ${xvondChannelCenterAction(agent, channel)}
                 ${type === "whatsapp" ? `<button type="button" onclick="openCustomerWhatsAppChannelSettings(${Number(agent.id)})">Channel settings</button>` : ""}
+                ${["instagram","messenger"].includes(type) && String(channel?.provisioning_state||"").toLowerCase()==="connected" && !channel?.enabled ? `<button type="button" onclick="xvondActivateCustomerMetaChannel(${Number(agent.id)},'${type}')">Activate</button>` : ""}
                 ${["instagram","messenger"].includes(type) ? `<button type="button" onclick="openCustomerMetaChannelSettings(${Number(agent.id)},'${type}')">Channel settings</button>` : ""}
                 ${["telegram","email","sms","slack","teams","custom"].includes(type) ? `<button type="button" onclick="openCustomerGenericChannelSettings(${Number(agent.id)},'${type}')">Channel settings</button>` : ""}
                 ${["whatsapp","instagram","messenger"].includes(type) && (String(channel?.provisioning_state||"").toLowerCase()==="connected" || channel?.enabled || type==="whatsapp") ? `<button type="button" onclick="xvondTestChannelConnection(${Number(agent.id)},'${type}')">Test connection</button>` : ""}
