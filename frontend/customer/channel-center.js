@@ -2,7 +2,7 @@ function xvondChannelCenterState(channel) {
     const type = String(channel?.type || "").toLowerCase();
     const provisioning = String(channel?.provisioning_state || "").toLowerCase();
     if (channel?.enabled) return {label: "Live", tone: "good", detail: "Serving customer traffic"};
-    if (provisioning === "connected") return {label: "Connected", tone: "ready", detail: "Connected and waiting for launch verification"};
+    if (provisioning === "connected") return {label: "Connected", tone: "ready", detail: "Connected and ready to activate"};
     if (provisioning === "requested") return {label: "Setup required", tone: "warn", detail: "Connection has not been completed"};
     if (provisioning === "cancelled") return {label: "Disconnected", tone: "muted", detail: "Connection was removed"};
     if (type === "website" && channel?.delivery_status === "ready_for_launch") {
@@ -51,6 +51,7 @@ function xvondChannelCenterCard(agent, channel) {
             <div style="display:flex;gap:8px;flex-wrap:wrap">
                 ${xvondChannelCenterAction(agent, channel)}
                 ${type === "whatsapp" ? `<button type="button" onclick="openCustomerWhatsAppChannelSettings(${Number(agent.id)})">Channel settings</button>` : ""}
+                ${["instagram","messenger"].includes(type) && String(channel?.provisioning_state||"").toLowerCase()==="connected" && !channel?.enabled ? `<button type="button" onclick="xvondActivateCustomerMetaChannel(${Number(agent.id)},'${type}')">Activate</button>` : ""}
                 ${["instagram","messenger"].includes(type) ? `<button type="button" onclick="openCustomerMetaChannelSettings(${Number(agent.id)},'${type}')">Channel settings</button>` : ""}
                 ${["telegram","email","sms","slack","teams","custom"].includes(type) ? `<button type="button" onclick="openCustomerGenericChannelSettings(${Number(agent.id)},'${type}')">Channel settings</button>` : ""}
                 ${["whatsapp","instagram","messenger"].includes(type) && (String(channel?.provisioning_state||"").toLowerCase()==="connected" || channel?.enabled || type==="whatsapp") ? `<button type="button" onclick="xvondTestChannelConnection(${Number(agent.id)},'${type}')">Test connection</button>` : ""}
@@ -76,7 +77,7 @@ window.renderXvondChannelCenter = async function () {
         target.innerHTML = `
             <div class="panel" style="margin-bottom:20px">
                 <h2>Channel Connections</h2>
-                <p class="muted">Connect customer-facing channels to each AI Employee. Account authorization is separate from final Xvond launch verification.</p>
+                <p class="muted">Connect customer-facing channels to each AI Employee. Connected Meta channels can be activated here once readiness checks pass.</p>
             </div>
             ${(agents || []).map(agent => {
                 const assigned = channels.filter(item => Number(item.agent_id) === Number(agent.id));
@@ -102,6 +103,24 @@ window.renderXvondChannelCenter = async function () {
 
 window.xvondRefreshChannelCenter = async function () {
     await renderXvondChannelCenter();
+};
+
+
+window.xvondActivateCustomerMetaChannel = async function(agentId, channelType) {
+    const type = String(channelType || "").toLowerCase();
+    try {
+        const result = await api("/customer/meta/channels/activate", {
+            method: "POST",
+            body: JSON.stringify({agent_id: Number(agentId), channel_type: type}),
+        });
+        portalOverview = await api("/customer/overview");
+        await renderXvondChannelCenter();
+        if (result?.enabled) {
+            alert(`${xvondCustomerChannelLabel(type)} is now live.`);
+        }
+    } catch (error) {
+        alert(error.message || "Could not activate the channel.");
+    }
 };
 
 

@@ -729,6 +729,81 @@ def channel_health(
 
 
 
+@router.post("/activate")
+def activate_channel(
+    data: MetaChannelAction,
+    current_user: User = Depends(require_customer_manager),
+):
+    """Let the customer manager launch a connected Meta channel once all checks pass."""
+    channel_type = _normalize_channel_type(data.channel_type)
+    db = SessionLocal()
+    try:
+        agent, channel, _capability = _customer_channel(
+            db,
+            current_user,
+            agent_id=data.agent_id,
+            channel_type=channel_type,
+        )
+        channel = (
+            db.query(AgentChannel)
+            .filter(AgentChannel.id == channel.id)
+            .with_for_update()
+            .first()
+        )
+        config = reveal_config(channel.config) or {}
+        if str(config.get("provisioning_state") or "").strip().lower() != "connected":
+            raise HTTPException(409, "Connect this Meta channel before activating it")
+
+        if channel.enabled:
+            return {
+                "status": "live",
+                "channel_id": channel.id,
+                "channel_type": channel_type,
+                "enabled": True,
+                "blockers": [],
+            }
+
+        _ensure_channels_module(db, channel.company_id)
+        db.flush()
+        blockers = _activation_blockers(db, channel)
+        if blockers:
+            raise HTTPException(
+                409,
+                "Channel cannot go live yet: " + "; ".join(str(item) for item in blockers),
+            )
+
+        channel.enabled = True
+        audit_service.log(
+            db=db,
+            action="channel.meta_customer_activated",
+            resource_type="channel",
+            resource_id=channel.id,
+            user_id=current_user.id,
+            company_id=channel.company_id,
+            details={
+                "agent_id": agent.id,
+                "channel_type": channel_type,
+                "activation_source": "customer_portal",
+            },
+        )
+        db.commit()
+        return {
+            "status": "live",
+            "channel_id": channel.id,
+            "channel_type": channel_type,
+            "enabled": True,
+            "blockers": [],
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @router.get("/settings")
 def meta_channel_settings(
     agent_id: int,
