@@ -76,7 +76,7 @@ window.renderXvondChannelCenter = async function () {
         target.innerHTML = `
             <div class="panel" style="margin-bottom:20px">
                 <h2>Channel Connections</h2>
-                <p class="muted">Connect customer-facing channels to each AI Employee. Account authorization is separate from final Xvond launch verification.</p>
+                <p class="muted">Connect customer-facing channels to each AI Employee. Connected Meta channels can be activated here once readiness checks pass.</p>
             </div>
             ${(agents || []).map(agent => {
                 const assigned = channels.filter(item => Number(item.agent_id) === Number(agent.id));
