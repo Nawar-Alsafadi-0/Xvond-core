@@ -14,6 +14,15 @@ def _setup(**overrides):
     return WebsiteSetup(**values)
 
 
+def test_website_behavior_keeps_small_talk_professional():
+    prompt = website_behavior({})
+
+    assert "warm, professional and business-appropriate" in prompt
+    assert "يا حبيبي" in prompt
+    assert "Do not mechanically mirror casual small talk" in prompt
+    assert "Do not ask a question that the visitor has already answered" in prompt
+
+
 def test_website_setup_accepts_supported_human_assistance_modes():
     for mode in ("direct_handoff", "contact_only", "ai_only"):
         assert _setup(human_assistance_mode=mode).human_assistance_mode == mode
