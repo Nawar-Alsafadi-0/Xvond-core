@@ -594,12 +594,34 @@ const CHANNEL=__CHANNEL__;
 const WIDGET_KEY=__WIDGET_KEY__;
 const CID_KEY='xvond_conversation_'+CHANNEL;
 const TOKEN_KEY='xvond_visitor_token_'+CHANNEL;
+const HISTORY_KEY='xvond_history_'+CHANNEL;
+const HISTORY_LIMIT=100;
 let cid=localStorage.getItem(CID_KEY)||null;
 let visitorToken=localStorage.getItem(TOKEN_KEY)||null;
 let lastId=0;
 let typingNode=null;
-if(cid&&!visitorToken){localStorage.removeItem(CID_KEY);cid=null;}
-if(visitorToken&&!cid){localStorage.removeItem(TOKEN_KEY);visitorToken=null;}
+let history=[];
+let renderedIds=new Set();
+let pollInFlight=false;
+function clearHistoryCache(){history=[];renderedIds.clear();lastId=0;localStorage.removeItem(HISTORY_KEY);}
+function loadHistoryCache(){
+  if(!cid||!visitorToken)return false;
+  try{
+    const raw=localStorage.getItem(HISTORY_KEY);
+    if(!raw)return false;
+    const cached=JSON.parse(raw);
+    if(String(cached?.conversationId||'')!==String(cid)||!Array.isArray(cached?.messages)){localStorage.removeItem(HISTORY_KEY);return false;}
+    history=cached.messages.slice(-HISTORY_LIMIT).filter(m=>m&&m.id&&m.content&&['user','assistant','human'].includes(m.role));
+    lastId=history.reduce((max,m)=>Math.max(max,Number(m.id)||0),0);
+    return history.length>0;
+  }catch(_e){localStorage.removeItem(HISTORY_KEY);return false;}
+}
+function saveHistoryCache(){
+  if(!cid||!visitorToken)return;
+  try{localStorage.setItem(HISTORY_KEY,JSON.stringify({conversationId:String(cid),messages:history.slice(-HISTORY_LIMIT)}));}catch(_e){}
+}
+if(cid&&!visitorToken){localStorage.removeItem(CID_KEY);localStorage.removeItem(HISTORY_KEY);cid=null;}
+if(visitorToken&&!cid){localStorage.removeItem(TOKEN_KEY);localStorage.removeItem(HISTORY_KEY);visitorToken=null;}
 const side=__POSITION__;
 const accent=__ACCENT__;
 const pageLang=(document.documentElement.lang||'').toLowerCase();
@@ -619,17 +641,23 @@ const box=document.createElement('div');box.id='xvond-box';box.setAttribute('dir
 document.body.append(btn,box);box.querySelector('#xvond-head').textContent=__NAME__;box.querySelector('#xvond-in').placeholder=inputPlaceholder;box.querySelector('#xvond-send').textContent=sendLabel;
 const msgs=box.querySelector('#xvond-msgs');
 function scrollToLatest(){msgs.scrollTop=msgs.scrollHeight;requestAnimationFrame(()=>{msgs.scrollTop=msgs.scrollHeight;});}
-function add(t,c){const text=cleanText(t);if(!text)return;const d=document.createElement('div');d.className='xvond-m '+c;d.setAttribute('dir','auto');d.textContent=text;msgs.appendChild(d);scrollToLatest();}
+function add(t,c,id=null){const text=cleanText(t);if(!text)return;if(id&&renderedIds.has(String(id)))return;const d=document.createElement('div');d.className='xvond-m '+c;d.setAttribute('dir','auto');if(id){d.dataset.messageId=String(id);renderedIds.add(String(id));}d.textContent=text;msgs.appendChild(d);scrollToLatest();}
+function renderMessage(m){if(!m)return;if(m.role==='user')add(m.content,'xvond-u',m.id);else if(m.role==='assistant'||m.role==='human')add(m.content,'xvond-a',m.id);}
+function cacheMessage(m){const id=Number(m?.id)||0;const role=String(m?.role||'');const content=String(m?.content||'');if(!id||!content||!['user','assistant','human'].includes(role))return;const existing=history.findIndex(x=>Number(x.id)===id);const item={id,role,content};if(existing>=0)history[existing]=item;else history.push(item);history.sort((a,b)=>Number(a.id)-Number(b.id));history=history.slice(-HISTORY_LIMIT);remember(id);saveHistoryCache();}
+function syncMessage(m,render=true){cacheMessage(m);if(render)renderMessage(m);}
+function restoreCachedHistory(){if(!loadHistoryCache())return false;for(const m of history)renderMessage(m);return true;}
 function showTyping(){hideTyping();const d=document.createElement('div');d.className='xvond-m xvond-a xvond-typing';d.setAttribute('aria-label',arabicUI?'المساعد يكتب الآن':'Assistant is typing');d.innerHTML='<span class="xvond-dot"></span><span class="xvond-dot"></span><span class="xvond-dot"></span>';typingNode=d;msgs.appendChild(d);scrollToLatest();}
 function hideTyping(){if(typingNode){typingNode.remove();typingNode=null;}}
 function remember(id){if(id&&id>lastId)lastId=id;}
-function rememberSession(data){if(data.conversation_id){cid=String(data.conversation_id);localStorage.setItem(CID_KEY,cid);}if(data.visitor_token){visitorToken=data.visitor_token;localStorage.setItem(TOKEN_KEY,visitorToken);}}
+function rememberSession(data){if(data.conversation_id){const nextCid=String(data.conversation_id);if(cid&&cid!==nextCid)clearHistoryCache();cid=nextCid;localStorage.setItem(CID_KEY,cid);}if(data.visitor_token){visitorToken=data.visitor_token;localStorage.setItem(TOKEN_KEY,visitorToken);}}
+restoreCachedHistory();
 if(!cid||!visitorToken)add(welcome,'xvond-a');
-btn.onclick=()=>{const opening=box.style.display!=='block';box.style.display=opening?'block':'none';if(opening)scrollToLatest();};
-box.querySelector('#xvond-form').onsubmit=async e=>{e.preventDefault();const input=box.querySelector('#xvond-in');const send=box.querySelector('#xvond-send');const m=input.value.trim();if(!m||send.disabled)return;input.value='';add(m,'xvond-u');showTyping();send.disabled=true;input.disabled=true;try{const r=await fetch(API+'/channels/website/'+CHANNEL+'/chat',{method:'POST',headers:requestHeaders(true),body:JSON.stringify({message:m,conversation_id:cid?Number(cid):null})});const j=await r.json();if(!r.ok)throw new Error(j.detail||'Request failed');rememberSession(j);if(j.message)remember(j.message.id);hideTyping();if(j.response){add(j.response.content,'xvond-a');remember(j.response.id);}}catch(_e){hideTyping();add(failureMessage,'xvond-a');}finally{send.disabled=false;input.disabled=false;input.focus();}};
-async function poll(){if(!cid||!visitorToken)return;const restoring=lastId===0;try{const r=await fetch(API+'/channels/website/'+CHANNEL+'/conversation/'+cid+'/messages?after_id='+lastId,{headers:requestHeaders(false)});if(r.status===401||r.status===404){localStorage.removeItem(CID_KEY);localStorage.removeItem(TOKEN_KEY);cid=null;visitorToken=null;lastId=0;if(!msgs.children.length)add(welcome,'xvond-a');return;}if(!r.ok)return;const j=await r.json();for(const m of (j.messages||[])){remember(m.id);if(restoring){if(m.role==='user')add(m.content,'xvond-u');else if(m.role==='assistant'||m.role==='human')add(m.content,'xvond-a');}else if(m.role==='human'){hideTyping();add(m.content,'xvond-a');}}}catch(_e){}}
+btn.onclick=()=>{const opening=box.style.display!=='block';box.style.display=opening?'block':'none';if(opening){scrollToLatest();poll();}};
+box.querySelector('#xvond-form').onsubmit=async e=>{e.preventDefault();const input=box.querySelector('#xvond-in');const send=box.querySelector('#xvond-send');const m=input.value.trim();if(!m||send.disabled)return;input.value='';add(m,'xvond-u');showTyping();send.disabled=true;input.disabled=true;try{const r=await fetch(API+'/channels/website/'+CHANNEL+'/chat',{method:'POST',headers:requestHeaders(true),body:JSON.stringify({message:m,conversation_id:cid?Number(cid):null})});const j=await r.json();if(!r.ok)throw new Error(j.detail||'Request failed');rememberSession(j);if(j.message)syncMessage(j.message,false);hideTyping();if(j.response)syncMessage(j.response,true);}catch(_e){hideTyping();add(failureMessage,'xvond-a');}finally{send.disabled=false;input.disabled=false;input.focus();}};
+async function poll(){if(!cid||!visitorToken||pollInFlight||document.hidden)return;pollInFlight=true;const restoring=lastId===0;try{const r=await fetch(API+'/channels/website/'+CHANNEL+'/conversation/'+cid+'/messages?after_id='+lastId,{headers:requestHeaders(false)});if(r.status===401||r.status===404){localStorage.removeItem(CID_KEY);localStorage.removeItem(TOKEN_KEY);localStorage.removeItem(HISTORY_KEY);cid=null;visitorToken=null;clearHistoryCache();msgs.innerHTML='';add(welcome,'xvond-a');return;}if(!r.ok)return;const j=await r.json();for(const m of (j.messages||[])){if(m.role==='human')hideTyping();syncMessage(m,true);}if(restoring&&!(j.messages||[]).length&&!msgs.children.length)add(welcome,'xvond-a');}catch(_e){}finally{pollInFlight=false;}}
 poll();
-setInterval(poll,2500);
+setInterval(()=>{if(!document.hidden)poll();},2500);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll();});
 })();'''
         replacements = {
             "__CHANNEL__": str(channel_id),
@@ -648,7 +676,7 @@ setInterval(poll,2500);
         return Response(
             content=js,
             media_type="application/javascript",
-            headers={"Cache-Control": "no-store"},
+            headers={"Cache-Control": "public, max-age=60, stale-while-revalidate=300"},
         )
     finally:
         db.close()

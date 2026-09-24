@@ -439,16 +439,28 @@ def website_messages(
             conversation_id,
         )
         conversation = _conversation(db, channel, conversation_id)
-        items = (
-            db.query(AIMessage)
-            .filter(
-                AIMessage.conversation_id == conversation.id,
-                AIMessage.id > max(0, after_id),
-            )
-            .order_by(AIMessage.id.asc())
-            .limit(100)
-            .all()
+        messages_query = db.query(AIMessage).filter(
+            AIMessage.conversation_id == conversation.id,
         )
+        if after_id > 0:
+            items = (
+                messages_query
+                .filter(AIMessage.id > after_id)
+                .order_by(AIMessage.id.asc())
+                .limit(100)
+                .all()
+            )
+        else:
+            # Initial widget restore should show the most recent conversation
+            # context immediately instead of walking old history page by page.
+            items = list(
+                reversed(
+                    messages_query
+                    .order_by(AIMessage.id.desc())
+                    .limit(100)
+                    .all()
+                )
+            )
         return {
             "mode": (
                 "human"
