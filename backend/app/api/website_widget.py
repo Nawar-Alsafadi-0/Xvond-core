@@ -624,14 +624,25 @@ if(cid&&!visitorToken){localStorage.removeItem(CID_KEY);localStorage.removeItem(
 if(visitorToken&&!cid){localStorage.removeItem(TOKEN_KEY);localStorage.removeItem(HISTORY_KEY);visitorToken=null;}
 const side=__POSITION__;
 const accent=__ACCENT__;
-const pageLang=(document.documentElement.lang||'').toLowerCase();
-const pageDir=(document.documentElement.dir||getComputedStyle(document.documentElement).direction||'').toLowerCase();
-const arabicUI=pageLang.startsWith('ar')||pageDir==='rtl';
-const welcome=arabicUI?__WELCOME_AR__:__WELCOME_EN__;
-const launcherLabel=arabicUI?__LABEL_AR__:__LABEL_EN__;
-const inputPlaceholder=arabicUI?'اكتب رسالتك':'Type your message';
-const sendLabel=arabicUI?'إرسال':'Send';
-const failureMessage=arabicUI?'تعذر إرسال الرسالة الآن. حاول مرة أخرى.':'Unable to send your message right now. Please try again.';
+function isArabicUI(){
+  const pageLang=(document.documentElement.lang||'').toLowerCase();
+  const pageDir=(document.documentElement.dir||getComputedStyle(document.documentElement).direction||'').toLowerCase();
+  return pageLang.startsWith('ar')||pageDir==='rtl';
+}
+let arabicUI=isArabicUI();
+let welcome=arabicUI?__WELCOME_AR__:__WELCOME_EN__;
+let launcherLabel=arabicUI?__LABEL_AR__:__LABEL_EN__;
+let inputPlaceholder=arabicUI?'اكتب رسالتك':'Type your message';
+let sendLabel=arabicUI?'إرسال':'Send';
+let failureMessage=arabicUI?'تعذر إرسال الرسالة الآن. حاول مرة أخرى.':'Unable to send your message right now. Please try again.';
+function refreshLocaleState(){
+  arabicUI=isArabicUI();
+  welcome=arabicUI?__WELCOME_AR__:__WELCOME_EN__;
+  launcherLabel=arabicUI?__LABEL_AR__:__LABEL_EN__;
+  inputPlaceholder=arabicUI?'اكتب رسالتك':'Type your message';
+  sendLabel=arabicUI?'إرسال':'Send';
+  failureMessage=arabicUI?'تعذر إرسال الرسالة الآن. حاول مرة أخرى.':'Unable to send your message right now. Please try again.';
+}
 function requestHeaders(jsonBody=true){const h={'X-Xvond-Widget-Key':WIDGET_KEY};if(jsonBody)h['Content-Type']='application/json';if(visitorToken)h['X-Xvond-Visitor-Token']=visitorToken;return h;}
 function cleanText(value){return String(value||'').replace(/\*\*(.*?)\*\*/gs,'$1').replace(/__(.*?)__/gs,'$1').replace(/`([^`]+)`/g,'$1').replace(/^#{1,6}\s+/gm,'').trim();}
 const css=`#xvond-btn{position:fixed;bottom:20px;${side}:20px;z-index:2147483646;border:0;border-radius:999px;padding:14px 18px;cursor:pointer;box-shadow:0 8px 30px #0003;background:${accent};color:#fff;font:600 14px Arial,sans-serif}#xvond-box{position:fixed;bottom:78px;${side}:20px;width:min(380px,calc(100vw - 24px));height:520px;max-height:70vh;background:#fff;color:#111;z-index:2147483647;border-radius:18px;box-shadow:0 18px 60px #0004;display:none;overflow:hidden;font-family:Arial,sans-serif}#xvond-head{padding:16px;font-weight:700;border-bottom:1px solid #eee;direction:auto;text-align:start}#xvond-msgs{height:calc(100% - 118px);overflow:auto;overflow-x:hidden;padding:14px;scroll-behavior:smooth}.xvond-m{margin:8px 0;padding:10px 12px;border-radius:12px;white-space:pre-wrap;line-height:1.55;unicode-bidi:plaintext;overflow-wrap:anywhere;word-break:normal}.xvond-m[dir="rtl"]{text-align:right}.xvond-m[dir="ltr"]{text-align:left}.xvond-u{background:#eef3ff;margin-inline-start:40px}.xvond-a{background:#f5f5f5;margin-inline-end:40px}.xvond-typing{width:max-content;min-width:52px;padding:11px 14px}.xvond-dot{display:inline-block;width:7px;height:7px;margin:0 2px;border-radius:50%;background:#7b8190;animation:xvondTyping 1.15s infinite ease-in-out}.xvond-dot:nth-child(2){animation-delay:.15s}.xvond-dot:nth-child(3){animation-delay:.3s}@keyframes xvondTyping{0%,60%,100%{transform:translateY(0);opacity:.45}30%{transform:translateY(-4px);opacity:1}}#xvond-form{display:flex;border-top:1px solid #eee;padding:10px;gap:8px}#xvond-in{flex:1;min-width:0;border:1px solid #ddd;border-radius:10px;padding:10px;direction:auto;text-align:start;unicode-bidi:plaintext}#xvond-send{border:0;border-radius:10px;padding:10px 14px;cursor:pointer;background:${accent};color:#fff}#xvond-send:disabled,#xvond-in:disabled{opacity:.65;cursor:not-allowed}@media(max-width:480px){#xvond-btn{bottom:14px;${side}:14px}#xvond-box{bottom:70px;${side}:12px;width:calc(100vw - 24px);height:min(540px,72vh);border-radius:16px}.xvond-u{margin-inline-start:24px}.xvond-a{margin-inline-end:24px}}`;
@@ -639,9 +650,22 @@ const st=document.createElement('style');st.textContent=css;document.head.append
 const btn=document.createElement('button');btn.id='xvond-btn';btn.textContent=launcherLabel;btn.setAttribute('dir','auto');
 const box=document.createElement('div');box.id='xvond-box';box.setAttribute('dir',arabicUI?'rtl':'ltr');box.innerHTML=`<div id="xvond-head"></div><div id="xvond-msgs"></div><form id="xvond-form"><input id="xvond-in" autocomplete="off"><button id="xvond-send" type="submit"></button></form>`;
 document.body.append(btn,box);box.querySelector('#xvond-head').textContent=__NAME__;box.querySelector('#xvond-in').placeholder=inputPlaceholder;box.querySelector('#xvond-send').textContent=sendLabel;
+let welcomeNode=null;
+function applyLocale(){
+  refreshLocaleState();
+  btn.textContent=launcherLabel;
+  box.setAttribute('dir',arabicUI?'rtl':'ltr');
+  box.querySelector('#xvond-in').placeholder=inputPlaceholder;
+  box.querySelector('#xvond-send').textContent=sendLabel;
+  if(welcomeNode&&welcomeNode.isConnected)welcomeNode.textContent=welcome;
+}
+if('MutationObserver'in window){
+  const localeObserver=new MutationObserver(()=>applyLocale());
+  localeObserver.observe(document.documentElement,{attributes:true,attributeFilter:['lang','dir']});
+}
 const msgs=box.querySelector('#xvond-msgs');
 function scrollToLatest(){msgs.scrollTop=msgs.scrollHeight;requestAnimationFrame(()=>{msgs.scrollTop=msgs.scrollHeight;});}
-function add(t,c,id=null){const text=cleanText(t);if(!text)return;if(id&&renderedIds.has(String(id)))return;const d=document.createElement('div');d.className='xvond-m '+c;d.setAttribute('dir','auto');if(id){d.dataset.messageId=String(id);renderedIds.add(String(id));}d.textContent=text;msgs.appendChild(d);scrollToLatest();}
+function add(t,c,id=null){const text=cleanText(t);if(!text)return null;if(id&&renderedIds.has(String(id)))return null;const d=document.createElement('div');d.className='xvond-m '+c;d.setAttribute('dir','auto');if(id){d.dataset.messageId=String(id);renderedIds.add(String(id));}d.textContent=text;msgs.appendChild(d);scrollToLatest();return d;}
 function renderMessage(m){if(!m)return;if(m.role==='user')add(m.content,'xvond-u',m.id);else if(m.role==='assistant'||m.role==='human')add(m.content,'xvond-a',m.id);}
 function cacheMessage(m){const id=Number(m?.id)||0;const role=String(m?.role||'');const content=String(m?.content||'');if(!id||!content||!['user','assistant','human'].includes(role))return;const existing=history.findIndex(x=>Number(x.id)===id);const item={id,role,content};if(existing>=0)history[existing]=item;else history.push(item);history.sort((a,b)=>Number(a.id)-Number(b.id));history=history.slice(-HISTORY_LIMIT);remember(id);saveHistoryCache();}
 function syncMessage(m,render=true){cacheMessage(m);if(render)renderMessage(m);}
@@ -651,10 +675,10 @@ function hideTyping(){if(typingNode){typingNode.remove();typingNode=null;}}
 function remember(id){if(id&&id>lastId)lastId=id;}
 function rememberSession(data){if(data.conversation_id){const nextCid=String(data.conversation_id);if(cid&&cid!==nextCid)clearHistoryCache();cid=nextCid;localStorage.setItem(CID_KEY,cid);}if(data.visitor_token){visitorToken=data.visitor_token;localStorage.setItem(TOKEN_KEY,visitorToken);}}
 restoreCachedHistory();
-if(!cid||!visitorToken)add(welcome,'xvond-a');
+if(!cid||!visitorToken)welcomeNode=add(welcome,'xvond-a');
 btn.onclick=()=>{const opening=box.style.display!=='block';box.style.display=opening?'block':'none';if(opening){scrollToLatest();poll();}};
 box.querySelector('#xvond-form').onsubmit=async e=>{e.preventDefault();const input=box.querySelector('#xvond-in');const send=box.querySelector('#xvond-send');const m=input.value.trim();if(!m||send.disabled)return;input.value='';add(m,'xvond-u');showTyping();send.disabled=true;input.disabled=true;try{const r=await fetch(API+'/channels/website/'+CHANNEL+'/chat',{method:'POST',headers:requestHeaders(true),body:JSON.stringify({message:m,conversation_id:cid?Number(cid):null})});const j=await r.json();if(!r.ok)throw new Error(j.detail||'Request failed');rememberSession(j);if(j.message)syncMessage(j.message,false);hideTyping();if(j.response)syncMessage(j.response,true);}catch(_e){hideTyping();add(failureMessage,'xvond-a');}finally{send.disabled=false;input.disabled=false;input.focus();}};
-async function poll(){if(!cid||!visitorToken||pollInFlight||document.hidden)return;pollInFlight=true;const restoring=lastId===0;try{const r=await fetch(API+'/channels/website/'+CHANNEL+'/conversation/'+cid+'/messages?after_id='+lastId,{headers:requestHeaders(false)});if(r.status===401||r.status===404){localStorage.removeItem(CID_KEY);localStorage.removeItem(TOKEN_KEY);localStorage.removeItem(HISTORY_KEY);cid=null;visitorToken=null;clearHistoryCache();msgs.innerHTML='';add(welcome,'xvond-a');return;}if(!r.ok)return;const j=await r.json();for(const m of (j.messages||[])){if(m.role==='human')hideTyping();syncMessage(m,true);}if(restoring&&!(j.messages||[]).length&&!msgs.children.length)add(welcome,'xvond-a');}catch(_e){}finally{pollInFlight=false;}}
+async function poll(){if(!cid||!visitorToken||pollInFlight||document.hidden)return;pollInFlight=true;const restoring=lastId===0;try{const r=await fetch(API+'/channels/website/'+CHANNEL+'/conversation/'+cid+'/messages?after_id='+lastId,{headers:requestHeaders(false)});if(r.status===401||r.status===404){localStorage.removeItem(CID_KEY);localStorage.removeItem(TOKEN_KEY);localStorage.removeItem(HISTORY_KEY);cid=null;visitorToken=null;clearHistoryCache();msgs.innerHTML='';welcomeNode=add(welcome,'xvond-a');return;}if(!r.ok)return;const j=await r.json();for(const m of (j.messages||[])){if(m.role==='human')hideTyping();syncMessage(m,true);}if(restoring&&!(j.messages||[]).length&&!msgs.children.length)add(welcome,'xvond-a');}catch(_e){}finally{pollInFlight=false;}}
 poll();
 setInterval(()=>{if(!document.hidden)poll();},2500);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll();});
