@@ -26,6 +26,10 @@ def test_website_widget_persists_conversation_across_browser_sessions():
     assert "function scrollToLatest()" in source
     assert "requestAnimationFrame" in source
     assert "if(opening){scrollToLatest();poll();}" in source
+    assert "function applyLocale()" in source
+    assert "new MutationObserver" in source
+    assert "attributeFilter:['lang','dir']" in source
+    assert "btn.textContent=launcherLabel" in source
 
 
 def test_website_widget_script_uses_short_browser_cache():
